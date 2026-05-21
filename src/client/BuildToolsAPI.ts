@@ -68,7 +68,8 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 export class BuildToolsAPI {
   private readonly baseUrl: string;
   private readonly username: string;
-  private readonly password: string;
+  /** Cleared after successful authenticate() — session cookie is sufficient thereafter. */
+  private password: string;
   private readonly timeoutMs: number;
 
   /** Manual cookie jar: raw cookie strings collected from Set-Cookie headers. */
@@ -128,6 +129,9 @@ export class BuildToolsAPI {
 
     this.cookies = setCookieHeaders;
     this.authenticated = true;
+    // Clear the password from heap — the session cookie is sufficient for
+    // subsequent requests. If re-authentication is needed, construct a new instance.
+    this.password = "";
   }
 
   /** Returns true after a successful authenticate() call. */
@@ -240,8 +244,15 @@ export class BuildToolsAPI {
   /**
    * Perform a GET request. By default a 404 throws BuildToolsClientError.
    * Pass `allow404 = true` to receive `null` for missing resources instead.
+   *
+   * Throws BuildToolsAuthError immediately if authenticate() has not been called.
    */
   private async get(path: string, allow404 = false): Promise<unknown> {
+    if (!this.authenticated) {
+      throw new BuildToolsAuthError(
+        "Call authenticate() before making API requests."
+      );
+    }
     const response = await this.rawFetch(path, { method: "GET" });
 
     if (allow404 && response.status === 404) {
@@ -361,17 +372,29 @@ export class BuildToolsAPI {
   }
 
   /**
-   * Extract Set-Cookie header values from a Response.
+   * Extract Set-Cookie header values from a Response and return only the
+   * `name=value` portion of each cookie (RFC 6265 §4.2: the Cookie request
+   * header MUST contain only name=value pairs — Path, HttpOnly, Secure,
+   * SameSite, Domain are response-only directives and MUST be stripped before
+   * storage to avoid sending phantom cookie names on subsequent requests).
+   *
    * In Node's native fetch, `response.headers.getSetCookie()` is available on
    * Node 18+ and returns an array; fall back to the legacy `get()` for safety.
    */
   private extractSetCookieHeaders(response: Response): string[] {
+    let rawHeaders: string[];
+
     // Node 18+ native fetch exposes getSetCookie() for multi-value headers.
     if (typeof (response.headers as unknown as { getSetCookie?: () => string[] }).getSetCookie === "function") {
-      return (response.headers as unknown as { getSetCookie: () => string[] }).getSetCookie();
+      rawHeaders = (response.headers as unknown as { getSetCookie: () => string[] }).getSetCookie();
+    } else {
+      const raw = response.headers.get("set-cookie");
+      rawHeaders = raw ? [raw] : [];
     }
-    const raw = response.headers.get("set-cookie");
-    return raw ? [raw] : [];
+
+    // Strip all cookie attributes (Path, HttpOnly, Secure, SameSite, Domain,
+    // Expires, Max-Age) — keep only the first "name=value" segment.
+    return rawHeaders.map((h) => h.split(";")[0].trim());
   }
 }
 
@@ -379,7 +402,14 @@ export class BuildToolsAPI {
 // Module-private utilities
 // ---------------------------------------------------------------------------
 
-/** Safely parse a single value against a Zod schema, wrapping ZodError. */
+/**
+ * Safely parse a single value against a Zod schema, wrapping ZodError.
+ *
+ * Uses `status: 0` as a sentinel to distinguish client-side schema-validation
+ * failures from genuine 4xx HTTP responses (which carry the real HTTP status).
+ * Callers can detect parse errors via `err instanceof BuildToolsClientError &&
+ * err.status === 0`.
+ */
 function parseSingleWith<T extends z.ZodTypeAny>(
   schema: T,
   data: unknown,
@@ -389,48 +419,60 @@ function parseSingleWith<T extends z.ZodTypeAny>(
   if (!result.success) {
     throw new BuildToolsClientError(
       `Response parse error (${label}): ${result.error.message}`,
-      200,
+      0,
       JSON.stringify(data)
     );
   }
-  return result.data as z.infer<T>;
+  return result.data;
 }
 
-/** Safely parse an array of values, wrapping ZodError. */
+/**
+ * Safely parse an array of values, wrapping ZodError.
+ *
+ * Performs one level of `{ data: [...] }` / `{ items: [...] }` unwrapping
+ * (non-recursive) to handle common API envelope shapes.
+ *
+ * Uses `status: 0` as a sentinel for client-side parse errors (see
+ * parseSingleWith for rationale).
+ */
 function parseArrayWith<T extends z.ZodTypeAny>(
   schema: T,
   data: unknown,
   label: string
 ): Array<z.infer<T>> {
-  if (!Array.isArray(data)) {
-    // Some APIs wrap arrays in { data: [...] } or { items: [...] }
+  // One-level envelope unwrap — not recursive to avoid stack overflow on
+  // pathological inputs (e.g. { data: { data: [...] } }).
+  let payload = data;
+  if (!Array.isArray(payload)) {
     if (
-      data !== null &&
-      typeof data === "object" &&
-      ("data" in data || "items" in data)
+      payload !== null &&
+      typeof payload === "object" &&
+      ("data" in payload || "items" in payload)
     ) {
-      const wrapper = data as Record<string, unknown>;
-      const inner = wrapper["data"] ?? wrapper["items"];
-      return parseArrayWith(schema, inner, label);
+      const wrapper = payload as Record<string, unknown>;
+      payload = wrapper["data"] ?? wrapper["items"];
     }
+  }
+
+  if (!Array.isArray(payload)) {
     throw new BuildToolsClientError(
-      `Expected array for ${label}, got ${typeof data}`,
-      200,
+      `Expected array for ${label}, got ${typeof payload}`,
+      0,
       JSON.stringify(data)
     );
   }
 
   const results: Array<z.infer<T>> = [];
-  for (const item of data as unknown[]) {
+  for (const item of payload as unknown[]) {
     const result = schema.safeParse(item);
     if (!result.success) {
       throw new BuildToolsClientError(
         `Response parse error (${label} item): ${result.error.message}`,
-        200,
+        0,
         JSON.stringify(item)
       );
     }
-    results.push(result.data as z.infer<T>);
+    results.push(result.data);
   }
   return results;
 }

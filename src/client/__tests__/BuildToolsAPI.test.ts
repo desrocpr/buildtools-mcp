@@ -171,8 +171,36 @@ describe("BuildToolsAPI — authenticate()", () => {
 
     const [, secondInit] = loginStub.mock.calls[1] as [string, RequestInit];
     const headers = secondInit.headers as Headers;
-    // The Cookie header should contain our session value
-    expect(headers.get("Cookie")).toContain("session=secret");
+    const cookieHeader = headers.get("Cookie");
+    // The Cookie header must contain the session value…
+    expect(cookieHeader).toContain("session=secret");
+    // …but must NOT echo Set-Cookie directives (RFC 6265 §4.2 compliance).
+    expect(cookieHeader).not.toContain("Path=");
+    expect(cookieHeader).not.toContain("HttpOnly");
+  });
+
+  it("cookie jar strips all Set-Cookie directives to only name=value pairs", async () => {
+    // Simulate a response with multiple directives and verify each stored cookie
+    // is reduced to its name=value segment only.
+    const loginStub = vi
+      .fn()
+      .mockResolvedValueOnce(
+        mockResponse("", 302, {
+          "set-cookie": "csrf=token123; Path=/; SameSite=Strict; Secure",
+        })
+      )
+      .mockResolvedValueOnce(mockResponse([], 200));
+    vi.stubGlobal("fetch", loginStub);
+
+    const api = new BuildToolsAPI(defaultOpts);
+    await api.authenticate();
+    await api.listProjects();
+
+    const [, secondInit] = loginStub.mock.calls[1] as [string, RequestInit];
+    const headers = secondInit.headers as Headers;
+    const cookieHeader = headers.get("Cookie");
+    // Only "csrf=token123" should appear — no directive tokens.
+    expect(cookieHeader).toBe("csrf=token123");
   });
 });
 
@@ -403,6 +431,26 @@ describe("BuildToolsAPI — listAttachments()", () => {
     const [url] = stub.mock.calls[1] as [string];
     expect(url).toContain("entity_type=change_order");
     expect(url).toContain("entity_id=301");
+  });
+});
+
+describe("BuildToolsAPI — authentication guard", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("throws BuildToolsAuthError immediately if listProjects() called before authenticate()", async () => {
+    // No fetch stub needed — guard fires before any network I/O.
+    const api = new BuildToolsAPI(defaultOpts);
+    await expect(api.listProjects()).rejects.toThrow(BuildToolsAuthError);
+  });
+
+  it("throws BuildToolsAuthError immediately if getProject() called before authenticate()", async () => {
+    const api = new BuildToolsAPI(defaultOpts);
+    await expect(api.getProject(1)).rejects.toThrow(BuildToolsAuthError);
+  });
+
+  it("throws BuildToolsAuthError immediately if listCustomers() called before authenticate()", async () => {
+    const api = new BuildToolsAPI(defaultOpts);
+    await expect(api.listCustomers()).rejects.toThrow(BuildToolsAuthError);
   });
 });
 
