@@ -1,0 +1,10 @@
+{
+  "_comment": "BuildTools does not return a JSON body on successful authentication; the success signal is a 302 redirect to /dashboard plus the presence of 'logout' or 'dashboard' markers in the follow-up HTML response (see authenticate() in BuildToolsAPI.ts). This fixture exists per the MOS-213 spec to document the post-login state for negative/parsing tests; it is NOT consumed by the success path.",
+  "redirect": "/dashboard",
+  "status": "ok",
+  "user": {
+    "id": 9001,
+    "email": "user@example.com",
+    "name": "Test User"
+  }
+}

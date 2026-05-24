@@ -1,0 +1,17 @@
+{
+  "draw": 1,
+  "recordsTotal": 1,
+  "recordsFiltered": 1,
+  "data": [
+    {
+      "DT_RowId": "row_2001",
+      "status": 1,
+      "project": "Jones Addition",
+      "date": "04/15/2026",
+      "weather": "Sunny, 72°F",
+      "hours_worked": 8.5,
+      "notes": "Framing inspection passed.",
+      "id": 2001
+    }
+  ]
+}

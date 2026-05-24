@@ -1,0 +1,29 @@
+{
+  "draw": 1,
+  "recordsTotal": 1,
+  "recordsFiltered": 1,
+  "data": [
+    {
+      "DT_RowId": "row_600001",
+      "status": 1,
+      "comments_status": 1,
+      "items_status": 1,
+      "recurrence_status": 1,
+      "email_status": 1601,
+      "email_status_label": "Untracked",
+      "project": "Doe Bathroom",
+      "name": "Permits",
+      "category_id": 0,
+      "due_date": "09/24/2025",
+      "assigned_to": "<div class=\"text-truncate\" title=\"Sam Worker\">Sam Worker</div>",
+      "location": "Master Bathroom",
+      "priority": 1,
+      "id": 600001,
+      "linked_schedule": {
+        "linkedSchedule": false,
+        "scheduleType": "",
+        "scheduleTask": ""
+      }
+    }
+  ]
+}

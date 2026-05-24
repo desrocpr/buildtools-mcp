@@ -1,0 +1,41 @@
+{
+  "draw": 1,
+  "recordsTotal": 2,
+  "recordsFiltered": 2,
+  "data": [
+    {
+      "DT_RowId": "row_500001",
+      "status": 1,
+      "comments_status": 1,
+      "info": 500001,
+      "attachment": 0,
+      "email_status": 1601,
+      "email_status_label": "",
+      "project_name": "Jones Addition",
+      "number": 19,
+      "approved_number": null,
+      "name": "Jones - Basement Work",
+      "total": "$ 13,800.00",
+      "dates": "-",
+      "relations": "<span title=\"10001 - Gross Margin\n1515 - Demolition Labor\n3010 - Framing Labor\">10001 - Gross Margin, 1515 - Demolition Labor, 3010 - Framing Labor</span>",
+      "created_at": "02/04/2026"
+    },
+    {
+      "DT_RowId": "row_500002",
+      "status": 2,
+      "comments_status": 1,
+      "info": 500002,
+      "attachment": 1,
+      "email_status": 1601,
+      "email_status_label": "Approved",
+      "project_name": "Brown Addition",
+      "number": 4,
+      "approved_number": 4,
+      "name": "Brown - Master Bath Upgrades",
+      "total": "$ 7,500.00",
+      "dates": "-",
+      "relations": "<span title=\"7730 - Tile Materials, 3620 - Drywall\">7730 - Tile Materials, 3620 - Drywall</span>",
+      "created_at": "11/02/2025"
+    }
+  ]
+}

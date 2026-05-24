@@ -1,0 +1,32 @@
+{
+  "draw": 1,
+  "recordsTotal": 1,
+  "recordsFiltered": 1,
+  "data": [
+    {
+      "DT_RowId": "row_3",
+      "status": 4,
+      "comments_status": 1,
+      "info": 3,
+      "attachment": 0,
+      "email_status": 1601,
+      "email_status_label": "Untracked",
+      "calendar": "",
+      "project": "Test Addition",
+      "name": "Seal breezeway steps",
+      "assigned_to": "<div class=\"text-truncate\" title=\"Chris Worker\">Chris Worker</div>",
+      "category_id": 5,
+      "created_at": "09/22/2023",
+      "due_date": "09/25/2023",
+      "linked_schedule": {
+        "linkedSchedule": false,
+        "scheduleType": "",
+        "scheduleTask": ""
+      },
+      "appointment_date": null,
+      "appointment_time": null,
+      "day_event": 0,
+      "participants": null
+    }
+  ]
+}

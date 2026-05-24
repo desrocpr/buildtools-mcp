@@ -1,0 +1,16 @@
+{
+  "id": 100002,
+  "name": "Jones Addition",
+  "status": "1",
+  "address": "456 Elm Ave",
+  "city": "Springfield",
+  "state": "VA",
+  "zip": "22030",
+  "country_code": "US",
+  "description": "Two-story addition over existing garage with new master suite.",
+  "budget_revised": "$ 245,500.50",
+  "created_at": "01/15/2026",
+  "updated_at": "04/30/2026",
+  "managers": ["Project Manager A"],
+  "client_ids": [200001]
+}

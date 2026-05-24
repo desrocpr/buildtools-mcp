@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>BuildTools — Sign In</title>
+</head>
+<body>
+  <form method="POST" action="/login">
+    <input type="hidden" name="_token" value="FIXTURE_CSRF_TOKEN_AAAA1111" />
+    <label>
+      Email
+      <input type="email" name="email" autocomplete="username" required />
+    </label>
+    <label>
+      Password
+      <input type="password" name="password" autocomplete="current-password" required />
+    </label>
+    <label>
+      <input type="checkbox" name="remember" value="on" /> Remember me
+    </label>
+    <button type="submit">Sign in</button>
+  </form>
+</body>
+</html>

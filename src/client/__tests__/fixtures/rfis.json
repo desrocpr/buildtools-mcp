@@ -1,0 +1,27 @@
+{
+  "draw": 1,
+  "recordsTotal": 1,
+  "recordsFiltered": 1,
+  "data": [
+    {
+      "DT_RowId": "row_900001",
+      "status": 1,
+      "comments_status": 1,
+      "email_status": 1601,
+      "email_status_label": "",
+      "project": "Wilson Remodel",
+      "number": "RFI-Wilson Remodel-11001",
+      "subject": "Wilson Basement",
+      "category_id": null,
+      "assigned_to": "<div class=\"text-truncate\" title=\"Manager C, Manager D\">Manager C, Manager D</div>",
+      "location": "Typical Room",
+      "priority": 1,
+      "id": 900001,
+      "linked_schedule": {
+        "linkedSchedule": false,
+        "scheduleType": "",
+        "scheduleTask": ""
+      }
+    }
+  ]
+}
