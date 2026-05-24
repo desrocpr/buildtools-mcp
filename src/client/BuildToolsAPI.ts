@@ -16,6 +16,31 @@
  *   - `datatable(...)` uses GET with a query string, which is what the source
  *     actually does (L188–210). The Linear issue description incorrectly says
  *     POST — we follow the source. Noted inline at the helper.
+ *
+ * Session lifecycle (MOS-212):
+ *
+ *   - **Credential storage**: one mechanism — credentials are cached on the
+ *     instance. They may be seeded via `BuildToolsClientOptions.username`/
+ *     `password` (the cleanest path when constructing from `loadConfigFromEnv`)
+ *     OR captured by the explicit `authenticate(email, password)` call. The
+ *     most-recent value wins. The 2-arg `authenticate(email, password)`
+ *     signature remains backward-compatible.
+ *   - **`isAuthenticated()`** returns true only when (a) a successful
+ *     `authenticate()` has occurred AND (b) the session timestamp is within
+ *     `sessionTimeoutMinutes` of `Date.now()`. As a back-compat affordance,
+ *     setting `api.authenticated = true` directly (used heavily by Phase 2.1
+ *     tests) is treated as a "session of unknown age" and is never expired
+ *     until `sessionTimestamp` is also set.
+ *   - **Auto re-auth**: every data-method calls `ensureAuthenticated()`,
+ *     which silently re-authenticates with cached credentials when
+ *     `isAuthenticated()` is false. With no cached credentials, it throws
+ *     `BuildToolsAuthError("Not authenticated")` (matches Phase 2.1 behavior).
+ *   - **401 retry**: the generic helpers (`datatable`, `get`, `post`) trigger
+ *     a one-shot re-auth + replay when the server returns 401. A still-401
+ *     replay surfaces the original response (no infinite loops). Higher-level
+ *     mutation methods that call `request()` directly are NOT wrapped in the
+ *     401-retry to avoid accidental re-auth loops on per-form CSRF flows;
+ *     they still call `ensureAuthenticated()` up-front.
  */
 
 import {
@@ -84,6 +109,26 @@ export class BuildToolsAPI {
   /** Resolved fetch implementation (override or `globalThis.fetch`). */
   private readonly fetchImpl: typeof fetch;
 
+  /**
+   * Cached credentials for transparent re-authentication. Seeded by
+   * constructor options and/or by the explicit `authenticate(email, pw)`
+   * call. Never logged. May be `null` if the API was constructed without
+   * credentials AND `authenticate(...)` has never been called.
+   */
+  private username: string | null = null;
+  private password: string | null = null;
+
+  /**
+   * `Date.now()` of the last successful `authenticate()`. `null` when
+   * either (a) the API has never authenticated, OR (b) a test has flipped
+   * `api.authenticated = true` directly (Phase 2.1 back-compat). In case
+   * (b), the session is treated as fresh until a `sessionTimestamp` is set.
+   */
+  private sessionTimestamp: number | null = null;
+
+  /** Defensive client-side session expiry in minutes. */
+  private readonly sessionTimeoutMinutes: number;
+
   public authenticated = false;
   public userId: string | number | null = null;
 
@@ -106,6 +151,15 @@ export class BuildToolsAPI {
       options.baseUrl ?? envBase ?? derivedBase ?? "https://moss.buildtools.app";
     this.authUrl = options.authUrl ?? envAuth ?? "https://core.buildtools.app";
     this.defaultTimeoutMs = options.defaultTimeoutMs;
+
+    // Per the JSDoc on the class: cached credentials live on the instance,
+    // seeded by constructor options OR by the explicit authenticate(...) call.
+    this.username = options.username ?? null;
+    this.password = options.password ?? null;
+
+    // Default applied at API construction (NOT at loadConfigFromEnv) so that
+    // callers passing a partial config still get a safe expiry.
+    this.sessionTimeoutMinutes = options.sessionTimeoutMinutes ?? 30;
 
     const resolvedFetch = options.fetch ?? globalThis.fetch;
     if (typeof resolvedFetch !== "function") {
@@ -294,8 +348,19 @@ export class BuildToolsAPI {
    * Mirrors source L153–186 with one intentional deviation: we throw
    * `BuildToolsAuthError` on failure instead of returning `false`. No stdout
    * logging (would corrupt MCP stdio).
+   *
+   * MOS-212: caches `email`/`password` on the instance so subsequent data
+   * calls can transparently re-authenticate after session expiry or a 401.
+   * Stamps `sessionTimestamp` on success.
    */
   async authenticate(email: string, password: string): Promise<boolean> {
+    // Cache credentials BEFORE the request — this way, if the auth flow
+    // throws partway through and a caller catches it, a subsequent
+    // ensureAuthenticated() can still find credentials and retry.
+    // (Most-recent call wins over constructor-seeded values.)
+    this.username = email;
+    this.password = password;
+
     // 1. GET login page (NO redirect follow) to harvest CSRF `_token`.
     const loginPage = await this.request(
       `${this.authUrl}/login?m=1&o=0ye79w`,
@@ -347,7 +412,75 @@ export class BuildToolsAPI {
         { status: appResponse.status, url: appResponse.url },
       );
     }
+    this.sessionTimestamp = Date.now();
     return this.authenticated;
+  }
+
+  // -------------------------------------------------------------------------
+  // Session lifecycle (MOS-212)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Returns `true` iff a successful authentication has occurred AND the
+   * session has not exceeded `sessionTimeoutMinutes`. Used both by the
+   * built-in `ensureAuthenticated()` guard and (publicly) by any caller
+   * that wants to introspect session state.
+   *
+   * Back-compat: `api.authenticated = true` set directly (without an
+   * accompanying `sessionTimestamp`) is treated as "session of unknown
+   * age" and is NOT considered expired — this preserves Phase 2.1 tests
+   * that bypass `authenticate()`.
+   */
+  isAuthenticated(): boolean {
+    if (!this.authenticated) return false;
+    if (this.sessionTimestamp === null) return true;
+    const elapsedMs = Date.now() - this.sessionTimestamp;
+    return elapsedMs < this.sessionTimeoutMinutes * 60_000;
+  }
+
+  /**
+   * If the session is missing or expired, transparently calls `authenticate()`
+   * with the cached credentials. With no cached credentials, throws
+   * `BuildToolsAuthError("Not authenticated")` — matches Phase 2.1's explicit
+   * auth-required behavior.
+   */
+  private async ensureAuthenticated(): Promise<void> {
+    if (this.isAuthenticated()) return;
+    if (!this.username || !this.password) {
+      throw new BuildToolsAuthError("Not authenticated");
+    }
+    await this.authenticate(this.username, this.password);
+  }
+
+  /**
+   * Performs `request()` and, on a 401, transparently re-authenticates with
+   * cached credentials and replays the request exactly once. If the replay
+   * is still 401 — OR if no credentials are cached — the original (or
+   * still-401) response is returned without further retries.
+   *
+   * Applied at the data-method layer (`datatable`/`get`/`post`) ONLY, NOT in
+   * the generic `request()` — so per-form CSRF flows (e.g. invoice save)
+   * can't accidentally trigger a re-auth loop on a deliberately 401-able
+   * login redirect.
+   */
+  private async requestWithReauthRetry(
+    urlString: string,
+    options: RequestOptions,
+    followRedirects: boolean,
+  ): Promise<NormalizedResponse> {
+    const first = await this.request(urlString, options, followRedirects);
+    if (first.status !== 401) return first;
+    if (!this.username || !this.password) return first;
+
+    // Force the next isAuthenticated() check to fall through to authenticate().
+    this.authenticated = false;
+    this.sessionTimestamp = null;
+    try {
+      await this.authenticate(this.username, this.password);
+    } catch {
+      return first;
+    }
+    return this.request(urlString, options, followRedirects);
   }
 
   // -------------------------------------------------------------------------
@@ -364,7 +497,7 @@ export class BuildToolsAPI {
     resource: string,
     params: DatatableParams = {},
   ): Promise<T | null> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
 
     const defaultParams: Record<string, string> = {
       draw: "1",
@@ -377,7 +510,7 @@ export class BuildToolsAPI {
     const queryString = new URLSearchParams(defaultParams).toString();
     const url = `${this.baseUrl}/${resource}/datatable?${queryString}`;
 
-    const response = await this.request(
+    const response = await this.requestWithReauthRetry(
       url,
       {
         headers: {
@@ -400,10 +533,10 @@ export class BuildToolsAPI {
 
   /** Mirrors source L212–231. JSON-aware GET; returns parsed JSON, raw body, or null. */
   async get<T = unknown>(path: string): Promise<T | string | null> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
 
     const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
-    const response = await this.request(
+    const response = await this.requestWithReauthRetry(
       url,
       {
         headers: {
@@ -433,7 +566,7 @@ export class BuildToolsAPI {
     path: string,
     data: PostData,
   ): Promise<T | { status: number; body: string }> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
 
     const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
 
@@ -447,7 +580,7 @@ export class BuildToolsAPI {
     }
     const body = formData.toString();
 
-    const response = await this.request(
+    const response = await this.requestWithReauthRetry(
       url,
       {
         method: "POST",
@@ -487,7 +620,7 @@ export class BuildToolsAPI {
     description?: string;
     clientIds?: string | number | Array<string | number>;
   }): Promise<{ success: boolean; projectId?: string | number; errors?: unknown }> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
 
     const data: PostData = {
       "Project[name]": projectData.name,
@@ -541,7 +674,7 @@ export class BuildToolsAPI {
    * (not `/api/projects/${id}`), per source.
    */
   async getProject<T = unknown>(projectId: string | number): Promise<T | null> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
 
     const response = await this.request(
       `${this.baseUrl}/projects/${projectId}/form`,
@@ -579,7 +712,7 @@ export class BuildToolsAPI {
       description?: string;
     },
   ): Promise<{ success: boolean; projectId?: string | number; errors?: unknown }> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
     if (!projectData.projectManager) {
       throw new BuildToolsAuthError("projectManager is required for updates");
     }
@@ -661,7 +794,7 @@ export class BuildToolsAPI {
     message?: unknown;
     errors?: unknown;
   }> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
 
     const items = coData.items ?? [
       { name: "Item", total: coData.total ?? 0, budget_category_id: 0 },
@@ -727,7 +860,7 @@ export class BuildToolsAPI {
       userName: string;
     }>
   > {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
     if (!projectId) throw new BuildToolsServerError("projectId is required");
 
     const listKey = `m-${projectId}-600-0`;
@@ -807,7 +940,7 @@ export class BuildToolsAPI {
     message?: unknown;
     errors?: unknown;
   }> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
 
     const items = poData.items ?? [
       { name: "Item", total: poData.total ?? 0 },
@@ -892,7 +1025,7 @@ export class BuildToolsAPI {
     message?: unknown;
     errors?: unknown;
   }> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
 
     const data: PostData = {
       "Task[name]": taskData.name,
@@ -940,7 +1073,7 @@ export class BuildToolsAPI {
     message?: unknown;
     errors?: unknown;
   }> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
 
     const formData = new URLSearchParams();
     formData.append("Rfi[subject]", rfiData.subject);
@@ -1005,7 +1138,7 @@ export class BuildToolsAPI {
     message?: unknown;
     errors?: unknown;
   }> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
 
     const formResp = await this.request(
       `${this.baseUrl}/invoices/form`,
@@ -1089,7 +1222,7 @@ export class BuildToolsAPI {
     message?: unknown;
     errors?: unknown;
   }> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
     if (!statementData.projectId) {
       throw new BuildToolsServerError("projectId is required");
     }
@@ -1160,7 +1293,7 @@ export class BuildToolsAPI {
     message?: unknown;
     errors?: unknown;
   }> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
     if (!data.projectId) throw new BuildToolsServerError("projectId is required");
     if (data.amount === undefined || data.amount === null) {
       throw new BuildToolsServerError("amount is required");
@@ -1291,7 +1424,7 @@ export class BuildToolsAPI {
     raw?: unknown;
     errors?: unknown;
   }> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
     if (!projectId) throw new BuildToolsServerError("projectId is required");
     const ids = Array.isArray(statementIds) ? statementIds : [statementIds];
     if (ids.length === 0) {
@@ -1405,7 +1538,7 @@ export class BuildToolsAPI {
     message?: unknown;
     errors?: unknown;
   }> {
-    if (!this.authenticated) throw new BuildToolsAuthError("Not authenticated");
+    await this.ensureAuthenticated();
 
     const data: PostData = {
       "Service[name]": serviceData.name,
