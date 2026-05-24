@@ -38,6 +38,23 @@ export const BuildToolsClientOptionsSchema = z
     baseUrl: z.string().url().optional(),
     /** Override the auth host (default `https://core.buildtools.app`). */
     authUrl: z.string().url().optional(),
+    /**
+     * Per-user BuildTools username/email. When provided, the API caches it
+     * for transparent auto re-authentication on session expiry or 401.
+     * Tests / callers may also pass credentials to `authenticate(email, pw)`
+     * directly; the most-recent value wins.
+     */
+    username: z.string().optional(),
+    /**
+     * Per-user BuildTools password. Cached on the instance for transparent
+     * re-authentication. Treat as a secret: never log or surface in errors.
+     */
+    password: z.string().optional(),
+    /**
+     * Defensive client-side session expiry in minutes (default 30). After
+     * this window the API will force re-auth on the next data-method call.
+     */
+    sessionTimeoutMinutes: z.number().int().positive().optional(),
     /** Optional default fetch timeout (milliseconds) for every request. */
     defaultTimeoutMs: z.number().int().positive().optional(),
     /**

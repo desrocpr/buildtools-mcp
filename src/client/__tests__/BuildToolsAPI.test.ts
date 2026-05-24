@@ -1286,3 +1286,213 @@ describe("request() network errors", () => {
     ).rejects.toBeInstanceOf(BuildToolsNetworkError);
   });
 });
+
+// ---------------------------------------------------------------------------
+// MOS-212 — isAuthenticated() + session expiry + 401 re-auth retry
+// ---------------------------------------------------------------------------
+
+describe("isAuthenticated()", () => {
+  it("returns false on a fresh instance", () => {
+    const api = new BuildToolsAPI({ fetch: makeFetchStub([]).stub });
+    expect(api.isAuthenticated()).toBe(false);
+  });
+
+  it("returns true after api.authenticated is set directly (Phase 2.1 back-compat)", () => {
+    const api = new BuildToolsAPI({ fetch: makeFetchStub([]).stub });
+    api.authenticated = true;
+    expect(api.isAuthenticated()).toBe(true);
+  });
+
+  it("returns false when the session timestamp is older than sessionTimeoutMinutes", () => {
+    const api = new BuildToolsAPI({
+      fetch: makeFetchStub([]).stub,
+      sessionTimeoutMinutes: 30,
+    });
+    api.authenticated = true;
+    // 31 minutes ago → expired.
+    (api as unknown as { sessionTimestamp: number }).sessionTimestamp =
+      Date.now() - 31 * 60_000;
+    expect(api.isAuthenticated()).toBe(false);
+  });
+
+  it("returns true when the session timestamp is within the timeout window", () => {
+    const api = new BuildToolsAPI({
+      fetch: makeFetchStub([]).stub,
+      sessionTimeoutMinutes: 30,
+    });
+    api.authenticated = true;
+    (api as unknown as { sessionTimestamp: number }).sessionTimestamp =
+      Date.now() - 10 * 60_000;
+    expect(api.isAuthenticated()).toBe(true);
+  });
+});
+
+describe("auto re-authentication on session expiry", () => {
+  it("triggers authenticate() on the next data call when the session has expired", async () => {
+    const { stub } = makeFetchStub([
+      // The data call after re-auth.
+      { status: 200, body: JSON.stringify({ data: [] }) },
+    ]);
+    const api = new BuildToolsAPI({
+      fetch: stub,
+      username: "cached-user@example.com",
+      password: "cached-pw",
+      sessionTimeoutMinutes: 30,
+    });
+    api.authenticated = true;
+    (api as unknown as { sessionTimestamp: number }).sessionTimestamp =
+      Date.now() - 31 * 60_000;
+
+    const authSpy = vi
+      .spyOn(api, "authenticate")
+      .mockImplementation(async (email, password) => {
+        // Simulate a successful re-auth: flip the flag and stamp the session.
+        api.authenticated = true;
+        (api as unknown as { sessionTimestamp: number }).sessionTimestamp =
+          Date.now();
+        expect(email).toBe("cached-user@example.com");
+        expect(password).toBe("cached-pw");
+        return true;
+      });
+
+    const out = await api.getProjects();
+    expect(out).toEqual({ data: [] });
+    expect(authSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws BuildToolsAuthError on a data call when no credentials are cached", async () => {
+    const { stub } = makeFetchStub([]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    // No username/password seeded; authenticated is false.
+    await expect(api.getProjects()).rejects.toBeInstanceOf(
+      BuildToolsAuthError,
+    );
+  });
+});
+
+describe("401 re-auth retry", () => {
+  it("re-authenticates once and replays the request on 401, returning the second response", async () => {
+    const { stub, recorded } = makeFetchStub([
+      // First call: 401.
+      { status: 401, body: "" },
+      // Replay after re-auth: 200 with data.
+      { status: 200, body: JSON.stringify({ data: [{ id: 1 }] }) },
+    ]);
+    const api = new BuildToolsAPI({
+      fetch: stub,
+      username: "u@example.com",
+      password: "pw",
+    });
+    api.authenticated = true;
+
+    const authSpy = vi
+      .spyOn(api, "authenticate")
+      .mockImplementation(async () => {
+        api.authenticated = true;
+        (api as unknown as { sessionTimestamp: number }).sessionTimestamp =
+          Date.now();
+        return true;
+      });
+
+    const out = await api.getProjects();
+    expect(out).toEqual({ data: [{ id: 1 }] });
+    expect(authSpy).toHaveBeenCalledTimes(1);
+    // Two fetches total: the 401, then the replay.
+    expect(recorded).toHaveLength(2);
+  });
+
+  it("surfaces the original 401 response when the replay is still 401 (no infinite loop)", async () => {
+    const { stub, recorded } = makeFetchStub([
+      // First call: 401.
+      { status: 401, body: "" },
+      // Replay after re-auth: still 401.
+      { status: 401, body: "" },
+    ]);
+    const api = new BuildToolsAPI({
+      fetch: stub,
+      username: "u",
+      password: "p",
+    });
+    api.authenticated = true;
+
+    const authSpy = vi
+      .spyOn(api, "authenticate")
+      .mockImplementation(async () => {
+        api.authenticated = true;
+        (api as unknown as { sessionTimestamp: number }).sessionTimestamp =
+          Date.now();
+        return true;
+      });
+
+    // datatable returns null on non-200 — the still-401 surfaces as null.
+    const out = await api.getProjects();
+    expect(out).toBeNull();
+    expect(authSpy).toHaveBeenCalledTimes(1);
+    // Exactly two fetches: first 401 + one replay. No further retries.
+    expect(recorded).toHaveLength(2);
+  });
+
+  it("does NOT retry when no cached credentials are available", async () => {
+    const { stub, recorded } = makeFetchStub([{ status: 401, body: "" }]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true; // Phase-2.1-style direct set, no creds cached.
+
+    const authSpy = vi.spyOn(api, "authenticate");
+
+    const out = await api.getProjects();
+    expect(out).toBeNull();
+    expect(authSpy).toHaveBeenCalledTimes(0);
+    expect(recorded).toHaveLength(1);
+  });
+
+  it("bubbles the original 401 when re-auth itself throws", async () => {
+    const { stub, recorded } = makeFetchStub([{ status: 401, body: "" }]);
+    const api = new BuildToolsAPI({
+      fetch: stub,
+      username: "u",
+      password: "p",
+    });
+    api.authenticated = true;
+
+    vi.spyOn(api, "authenticate").mockRejectedValue(
+      new BuildToolsAuthError("bad creds"),
+    );
+
+    const out = await api.getProjects();
+    expect(out).toBeNull();
+    expect(recorded).toHaveLength(1);
+  });
+});
+
+describe("authenticate() updates sessionTimestamp and credential cache", () => {
+  it("stamps sessionTimestamp on success and caches the credentials", async () => {
+    const loginPageHtml = '<input name="_token" value="TOK"/>';
+    const { stub } = makeFetchStub([
+      { status: 200, body: loginPageHtml },
+      { status: 200, body: "" },
+      { status: 200, body: "<html>logout</html>" },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    const before = Date.now();
+    await api.authenticate("seeded@example.com", "seeded-pw");
+    const after = Date.now();
+
+    const internal = api as unknown as {
+      sessionTimestamp: number | null;
+      username: string | null;
+      password: string | null;
+    };
+    expect(internal.sessionTimestamp).toBeGreaterThanOrEqual(before);
+    expect(internal.sessionTimestamp).toBeLessThanOrEqual(after);
+    expect(internal.username).toBe("seeded@example.com");
+    expect(internal.password).toBe("seeded-pw");
+    expect(api.isAuthenticated()).toBe(true);
+  });
+});
+
+describe("barrel exports — config surface (MOS-212)", () => {
+  it("re-exports loadConfigFromEnv as a function", async () => {
+    const barrel = await import("../index.js");
+    expect(typeof barrel.loadConfigFromEnv).toBe("function");
+  });
+});

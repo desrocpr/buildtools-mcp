@@ -9,6 +9,9 @@
 export { BuildToolsAPI } from "./BuildToolsAPI.js";
 export type { PostData } from "./BuildToolsAPI.js";
 
+export { loadConfigFromEnv } from "./config.js";
+export type { BuildToolsConfig } from "./config.js";
+
 export {
   BuildToolsError,
   BuildToolsAuthError,
