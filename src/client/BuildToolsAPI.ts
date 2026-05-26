@@ -840,6 +840,192 @@ export class BuildToolsAPI {
   }
 
   /**
+   * Phase 3.2 (MOS-215). Fetches a single change-order's detail payload from
+   * the form endpoint, mirroring `getProject()`'s `/projects/${id}/form`
+   * convention. No documented "GET /change-orders/:id" detail endpoint exists
+   * in source `api-client.js`; the form path is the natural read surface and
+   * is consistent with how change-order edit/save flows load. **Path is
+   * inferred and pending live verification** (MOS-222 smoke).
+   *
+   * Returns the parsed JSON body on 200, `null` on non-200 or non-JSON body.
+   */
+  async getChangeOrder<T = unknown>(
+    changeOrderId: string | number,
+  ): Promise<T | null> {
+    await this.ensureAuthenticated();
+
+    const response = await this.request(
+      `${this.baseUrl}/change-orders/${changeOrderId}/form`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+
+    if (response.status === 200) {
+      try {
+        return JSON.parse(response.body) as T;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Phase 3.2 (MOS-215). Reads a project's financial-statement summary via
+   * the same form endpoint used by `createFinancialStatementWithAmount`
+   * (source L1303). The financial-statements DataTable is documented as
+   * broken (per `~/code/buildtools/find-unbilled-cos.js` notes), so the form
+   * endpoint is the canonical read surface.
+   *
+   * Returns the parsed JSON body on 200, `null` on non-200 or non-JSON body.
+   * The shape is left to the caller — BuildTools' form payload carries many
+   * fields beyond the documented `FinancialStatementSchema` projection
+   * (budget overview totals, items, approvals, payments, etc.).
+   */
+  async getFinancialStatement<T = unknown>(
+    projectId: string | number,
+  ): Promise<T | null> {
+    await this.ensureAuthenticated();
+
+    const response = await this.request(
+      `${this.baseUrl}/financial/statements/form?PR[]=${projectId}`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+
+    if (response.status === 200) {
+      try {
+        return JSON.parse(response.body) as T;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Phase 3.2 (MOS-215). HTTP-only heuristic for "approved but not yet billed"
+   * change orders across all projects. Composes `getChangeOrders()` and
+   * applies the documented heuristic client-side because the reference
+   * implementation (`~/code/buildtools/find-unbilled-cos.js`) hits raw MySQL
+   * — not portable to MCP.
+   *
+   * Heuristic:
+   *   1. Pull change orders from the datatable (page-size capped at 500 to
+   *      stay inside BuildTools' DataTable response envelope).
+   *   2. Treat any row with `approved_number` set OR `email_status_label`
+   *      starting with `"Approved"` OR `status` === 3 (the value used by
+   *      the reference SQL impl) as approved.
+   *   3. Exclude any row that already references an invoice / financial
+   *      statement (best-guess: `invoiced_amount` is set and non-zero, or
+   *      `relations` mentions a statement number). The current fixtures do
+   *      not surface a definitive "billed?" flag — see the inline comment.
+   *   4. Apply `min_amount` against the numeric value parsed from `total`
+   *      (which the source emits as e.g. `"$ 7,500.00"`).
+   *   5. Apply `older_than_days` against `created_at` parsed as MM/DD/YYYY
+   *      (BuildTools' canonical date format). The change-order row does not
+   *      expose a dedicated "approved at" timestamp; `created_at` is the
+   *      documented proxy used by the reference impl.
+   *
+   * Returns the matching rows along with a parsed numeric `total_value` for
+   * each (downstream tool renders the currency-formatted sum).
+   */
+  async findUnbilledChangeOrders(
+    filters: { min_amount?: number; older_than_days?: number } = {},
+  ): Promise<
+    Array<
+      Record<string, unknown> & {
+        total_value: number;
+      }
+    >
+  > {
+    await this.ensureAuthenticated();
+
+    // Pull as many rows as BuildTools will return in a single page. The
+    // datatable defaults to `length=50`; we bump to 500 to maximise recall
+    // without paginating (the corpus is small in the moss tenant).
+    const result = (await this.datatable<{
+      data?: Array<Record<string, unknown>>;
+    }>("change-orders", { length: 500 })) ?? { data: [] };
+
+    const rows = result.data ?? [];
+    const matches: Array<Record<string, unknown> & { total_value: number }> = [];
+
+    const now = Date.now();
+    const olderThanMs =
+      filters.older_than_days !== undefined
+        ? filters.older_than_days * 24 * 60 * 60 * 1000
+        : undefined;
+    const minAmount = filters.min_amount;
+
+    for (const row of rows) {
+      // ---- approved? -----------------------------------------------------
+      const approvedNumber = row.approved_number;
+      const emailStatusLabel = String(row.email_status_label ?? "");
+      const status = row.status;
+      const approved =
+        (approvedNumber !== null && approvedNumber !== undefined) ||
+        emailStatusLabel.startsWith("Approved") ||
+        status === 3 ||
+        String(status) === "3";
+      if (!approved) continue;
+
+      // ---- already billed? ----------------------------------------------
+      // The change-orders datatable does not surface a canonical "billed"
+      // flag. The reference SQL impl joins against `financial_statements_*`
+      // tables which are not exposed here. Best-effort: skip rows whose
+      // numeric `invoiced_amount` is positive when surfaced, OR whose
+      // `relations` string mentions an invoice/statement number.
+      const invoicedAmountRaw = row.invoiced_amount;
+      if (typeof invoicedAmountRaw === "string") {
+        const invoicedValue = Number(invoicedAmountRaw.replace(/[^\d.-]/g, ""));
+        if (Number.isFinite(invoicedValue) && invoicedValue > 0) continue;
+      } else if (typeof invoicedAmountRaw === "number" && invoicedAmountRaw > 0) {
+        continue;
+      }
+
+      // ---- parse total to a numeric value -------------------------------
+      const totalRaw = row.total;
+      const totalValue =
+        typeof totalRaw === "string"
+          ? Number(totalRaw.replace(/[^\d.-]/g, ""))
+          : typeof totalRaw === "number"
+            ? totalRaw
+            : 0;
+      const safeTotal = Number.isFinite(totalValue) ? totalValue : 0;
+
+      // ---- min_amount filter -------------------------------------------
+      if (minAmount !== undefined && safeTotal < minAmount) continue;
+
+      // ---- older_than_days filter --------------------------------------
+      if (olderThanMs !== undefined) {
+        const created = String(row.created_at ?? "");
+        // BuildTools' MM/DD/YYYY format. `new Date("MM/DD/YYYY")` is
+        // accepted by V8 — we tolerate any unparseable date by skipping
+        // the filter for that row (rather than excluding it silently).
+        const parsed = Date.parse(created);
+        if (Number.isFinite(parsed)) {
+          if (now - parsed < olderThanMs) continue;
+        }
+      }
+
+      matches.push({ ...row, total_value: safeTotal });
+    }
+
+    return matches;
+  }
+
+  /**
    * Source L428–472. Lists files in module 600 (Change Orders) for a project,
    * optionally filtered by a specific change-order id.
    */

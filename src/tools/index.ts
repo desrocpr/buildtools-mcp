@@ -1,9 +1,9 @@
 /**
- * Barrel for MCP tool modules (MOS-214).
+ * Barrel for MCP tool modules (MOS-214, MOS-215).
  *
  * Re-exports the per-domain tool registries so `src/index.ts` can register
- * all tools with a single import as new phases land (Phase 3.2 financial
- * tools, Phase 3.3 customer/attachment tools, Phase 5 mutations).
+ * all tools with a single import as new phases land (Phase 3.3 customer /
+ * attachment tools, Phase 5 mutations).
  */
 
 export {
@@ -14,3 +14,11 @@ export {
   type ToolDefinition,
   type ToolResult,
 } from "./projects.js";
+
+export {
+  listChangeOrdersTool,
+  getChangeOrderTool,
+  findUnbilledChangeOrdersTool,
+  getFinancialStatementTool,
+  financialTools,
+} from "./financial.js";

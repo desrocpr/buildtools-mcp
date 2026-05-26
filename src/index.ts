@@ -2,10 +2,13 @@
 /**
  * buildtools-mcp stdio entrypoint.
  *
- * Tool registration (MOS-214, Phase 3.1):
+ * Tool registration (MOS-214, MOS-215, Phases 3.1 + 3.2):
  *   - `ping` is kept for diagnostics (Phase 1.2 transport smoke).
  *   - Project read tools (`list_projects`, `get_project`, `search_projects`)
  *     are registered via `projectTools` from `src/tools/projects.ts`.
+ *   - Financial read tools (`list_change_orders`, `get_change_order`,
+ *     `find_unbilled_change_orders`, `get_financial_statement`) are
+ *     registered via `financialTools` from `src/tools/financial.ts`.
  *
  * Client lifecycle: the `BuildToolsAPI` instance is lazily constructed on the
  * first tool invocation that needs it. This way, env-var configuration errors
@@ -21,7 +24,11 @@ import {
 
 import { BuildToolsAPI } from "./client/BuildToolsAPI.js";
 import { loadConfigFromEnv } from "./client/config.js";
-import { projectTools, type ToolDefinition } from "./tools/index.js";
+import {
+  financialTools,
+  projectTools,
+  type ToolDefinition,
+} from "./tools/index.js";
 
 const server = new Server(
   { name: "buildtools-mcp", version: "0.0.1" },
@@ -56,9 +63,10 @@ function getApi(): BuildToolsAPI {
 // Tool registry
 // ---------------------------------------------------------------------------
 
-const toolsByName: Map<string, ToolDefinition> = new Map(
-  projectTools.map((t) => [t.name, t]),
-);
+const toolsByName: Map<string, ToolDefinition> = new Map([
+  ...projectTools.map((t) => [t.name, t] as const),
+  ...financialTools.map((t) => [t.name, t] as const),
+]);
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
