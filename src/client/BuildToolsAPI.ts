@@ -754,6 +754,82 @@ export class BuildToolsAPI {
     return this.datatable<T>("companies", options);
   }
 
+  /**
+   * Phase 3.3 (MOS-216). Fetches a single customer/company detail payload
+   * from `/companies/:id/form`, mirroring the `/projects/:id/form` /
+   * `/change-orders/:id/form` form-endpoint convention used by other read
+   * methods. The source `api-client.js` does not expose a single-customer
+   * detail method, so the form path is the natural read surface. **Path is
+   * inferred and pending live verification** (MOS-222 smoke).
+   *
+   * Returns the parsed JSON body on 200, `null` on non-200 or non-JSON body.
+   */
+  async getCustomer<T = unknown>(
+    customerId: string | number,
+  ): Promise<T | null> {
+    await this.ensureAuthenticated();
+
+    const response = await this.request(
+      `${this.baseUrl}/companies/${customerId}/form`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+
+    if (response.status === 200) {
+      try {
+        return JSON.parse(response.body) as T;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Phase 3.3 (MOS-216). Lists ALL attachments for a project (any module),
+   * via `/documents?PR[]=:id` with no `list=` filter. This is the
+   * module-agnostic listing path documented inline in source — the
+   * `list=m-<projectId>-<module>-0` filter selects a single module (e.g.
+   * 600=Change Orders); omitting `list` returns everything visible to the
+   * user on the project's Documents tab. **Path semantics are inferred and
+   * pending live verification** (MOS-222 smoke).
+   *
+   * Returns the raw snake_case items as returned by BuildTools (no camelCase
+   * mapping — the Phase 3.3 tool renders the markdown directly). Returns
+   * `[]` on non-200 or unparseable body.
+   */
+  async getProjectAttachments(
+    projectId: string | number,
+  ): Promise<Array<Record<string, unknown>>> {
+    await this.ensureAuthenticated();
+    if (!projectId) throw new BuildToolsServerError("projectId is required");
+
+    const response = await this.request(
+      `${this.baseUrl}/documents?PR[]=${projectId}`,
+      {
+        method: "GET",
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      },
+      false,
+    );
+
+    if (response.status !== 200) return [];
+
+    try {
+      const data = JSON.parse(response.body) as {
+        items?: Array<Record<string, unknown>>;
+      };
+      return data.items ?? [];
+    } catch {
+      return [];
+    }
+  }
+
   // ========================================================================
   // CHANGE ORDER METHODS
   // ========================================================================

@@ -27,6 +27,7 @@ import { BuildToolsAPI } from "../BuildToolsAPI.js";
 import {
   AttachmentSchema,
   ChangeOrderSchema,
+  CustomerDetailSchema,
   CustomerSchema,
   DatatableResponseSchema,
   FinancialStatementSchema,
@@ -77,6 +78,11 @@ const changeOrdersFixture = loadJsonFixture<
 const customersFixture = loadJsonFixture<
   DatatableEnvelope<{ name: string; email?: string; [k: string]: unknown }>
 >("customers.json");
+const customerDetailFixture = loadJsonFixture<{
+  id: number;
+  name: string;
+  [k: string]: unknown;
+}>("customer-detail.json");
 const dailyLogsFixture =
   loadJsonFixture<DatatableEnvelope<Record<string, unknown>>>(
     "daily-logs.json",
@@ -240,6 +246,7 @@ describe("fixtures themselves", () => {
     "certificates.json": certificatesFixture,
     "change-orders.json": changeOrdersFixture,
     "customers.json": customersFixture,
+    "customer-detail.json": customerDetailFixture,
     "daily-logs.json": dailyLogsFixture,
     "financial-statement.json": financialStatementFixture,
     "login-success-response.json": loginSuccessResponseFixture,
@@ -482,6 +489,70 @@ describe("getCompanies() — customers.json", () => {
     expect((out.data[0] as { name: string }).name).toBe(
       "Acme Subcontractors LLC",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getCustomer() — customer-detail.json (MOS-216)
+// ---------------------------------------------------------------------------
+
+describe("getCustomer() — customer-detail.json", () => {
+  it("returns the parsed JSON body verbatim from /companies/:id/form", async () => {
+    const { api, recorded } = authedApi([
+      { status: 200, body: JSON.stringify(customerDetailFixture) },
+    ]);
+    const out = await api.getCustomer(300001);
+    expect(out).toEqual(customerDetailFixture);
+    expect(recorded[0].url).toBe(
+      "https://moss.buildtools.app/companies/300001/form",
+    );
+  });
+
+  it("CustomerDetailSchema.parse() validates the customer-detail fixture", () => {
+    const parsed = CustomerDetailSchema.parse(customerDetailFixture);
+    expect(parsed.id).toBe(300001);
+    expect(parsed.name).toBe("Acme Subcontractors LLC");
+    expect(parsed.main_contact).toBe("Pat Sample");
+    expect(Array.isArray(parsed.projects)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getProjectAttachments() — attachments.json (MOS-216)
+// ---------------------------------------------------------------------------
+
+describe("getProjectAttachments() — attachments.json (MOS-216)", () => {
+  it("returns the snake_case items array verbatim", async () => {
+    const { api, recorded } = authedApi([
+      { status: 200, body: JSON.stringify(attachmentsFixture) },
+    ]);
+    const out = await api.getProjectAttachments(100002);
+    expect(out).toHaveLength(attachmentsFixture.items.length);
+    expect(out[0]).toMatchObject({
+      id: 800001,
+      name: "scope-revision-1.pdf",
+      extension: "pdf",
+    });
+    // Module-agnostic path: /documents?PR[]=:id (no list= filter).
+    expect(recorded[0].url).toBe(
+      "https://moss.buildtools.app/documents?PR[]=100002",
+    );
+    expect(recorded[0].url).not.toContain("list=");
+  });
+
+  it("AttachmentSchema parses each wire-shape item from the fixture", () => {
+    for (const item of attachmentsFixture.items) {
+      const parsed = AttachmentSchema.parse(item);
+      expect(parsed.id).toBeDefined();
+      expect(parsed.name.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("returns [] on empty items array", async () => {
+    const { api } = authedApi([
+      { status: 200, body: JSON.stringify({ items: [] }) },
+    ]);
+    expect(await api.getProjectAttachments(100002)).toEqual([]);
   });
 });
 
