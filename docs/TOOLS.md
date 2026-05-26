@@ -350,6 +350,54 @@ Empty-result responses are returned as Markdown ("No attachments found for
 project #…"), not errors. This tool is strictly read-only — upload / delete
 actions are Phase 5 (MOS-219).
 
+## Mutation confirmation pattern
+
+Phase 4 (MOS-217) introduces an in-memory confirmation framework that gates
+every Phase 5 mutation tool behind a two-step handshake. **No mutation tools
+ship in Phase 4** — this section documents the protocol so Claude Desktop
+(and any other MCP client) knows how to drive a write tool once Phase 5 lands.
+
+**The protocol.** Each mutation tool has two invocation modes:
+
+1. **First invocation — no `confirmation_id` argument.**
+   The tool does NOT mutate anything. Instead, it records the requested
+   action in an in-process `ConfirmationStore` and returns a Markdown prompt
+   that contains:
+
+   - a `⚠️` banner naming the tool that is about to mutate production data,
+   - a human-readable description of what will happen (e.g. *"Create a new
+     BuildTools project named 'Smith Kitchen' for customer Smith with
+     contract value $42,500"*),
+   - a single-use `confirmation_id` (UUID v4),
+   - the TTL after which the confirmation expires (5 minutes by default).
+
+2. **Second invocation — same tool name, with the `confirmation_id` argument
+   set to the value from step 1.** The server consumes the pending entry
+   (single-use; a second consume of the same ID returns nothing) and
+   executes the mutation using the **args captured at step 1**, not the
+   args sent in step 2. Substituting different args between step 1 and step
+   2 is therefore a no-op for the mutation itself — the original intent is
+   what runs.
+
+**TTL.** Confirmations expire 5 minutes after creation. A periodic sweep
+(driven by an `.unref()`ed `setInterval` in `src/index.ts`) drops expired
+entries; `consume()` also enforces expiry on read. A `confirmation_id` that
+has expired, was already consumed, never existed, or was minted for a
+DIFFERENT tool name is treated identically: the server returns a Markdown
+message asking Claude to re-invoke the tool without a `confirmation_id` to
+get a fresh prompt.
+
+**Error shape.** The "please re-invoke" message is a **user-flow message,
+not an error**, so it is returned WITHOUT `isError: true`. Genuine
+BuildTools failures during the actual mutation (auth, network, server)
+still surface as `isError: true` Markdown the same way read tools do today.
+
+**Scope.** The store is process-local and in-memory. This is correct for
+the stdio transport (one Claude Desktop client per server process). Phase 6
+(MOS-220) will revisit isolation when the HTTP/SSE transport lands. There
+is no persistence across server restarts — pending confirmations are lost
+on restart, which is the desired safety property.
+
 ## Error responses
 
 All read tools convert thrown `BuildToolsError`s (authentication, network,
