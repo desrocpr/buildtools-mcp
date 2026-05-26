@@ -27,6 +27,9 @@ export {
   ProjectSaveResultSchema,
   SuccessSaveResultSchema,
   ChangeOrderAttachmentSchema,
+  CustomerSchema,
+  CustomerDetailSchema,
+  AttachmentSchema,
 } from "./types.js";
 
 export type {
@@ -37,4 +40,7 @@ export type {
   ProjectSaveResult,
   SuccessSaveResult,
   ChangeOrderAttachment,
+  Customer,
+  CustomerDetail,
+  Attachment,
 } from "./types.js";

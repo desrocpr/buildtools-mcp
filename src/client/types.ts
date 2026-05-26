@@ -262,13 +262,16 @@ export type FinancialStatement = z.infer<typeof FinancialStatementSchema>;
  * Document attachment as returned by the `/documents` listing endpoint
  * (snake_case from the wire, before `getChangeOrderAttachments()` maps to its
  * camelCase shape). Distinct from `ChangeOrderAttachmentSchema` which models
- * the post-mapping shape.
+ * the post-mapping shape. Reused by `getProjectAttachments()` (MOS-216) which
+ * returns the snake_case wire shape directly.
  */
 export const AttachmentSchema = z
   .object({
     id: z.union([z.string(), z.number()]),
     name: z.string(),
     module_id: z.union([z.string(), z.number()]).optional(),
+    module_code: z.union([z.string(), z.number()]).optional(),
+    module_name: z.string().optional(),
     extension: z.string().optional(),
     public_url: z.string().optional(),
     key: z.string().optional(),
@@ -279,3 +282,47 @@ export const AttachmentSchema = z
   })
   .passthrough();
 export type Attachment = z.infer<typeof AttachmentSchema>;
+
+// ---------------------------------------------------------------------------
+// CustomerDetail (MOS-216) — single-customer form payload
+// ---------------------------------------------------------------------------
+
+/**
+ * Customer detail payload as returned by `/companies/:id/form` (MOS-216,
+ * Phase 3.3). Like `CustomerSchema`, every field is optional + the schema is
+ * `.passthrough()` because BuildTools' form payloads include many more fields
+ * than the documented surface (CSRF tokens, audit blobs, etc.). The fields
+ * listed here are the ones the `get_customer` tool surfaces in its Markdown
+ * detail view.
+ */
+export const CustomerDetailSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]).optional(),
+    name: z.string().optional(),
+    status: z.union([z.string(), z.number()]).optional(),
+    type_name: z.string().optional(),
+    main_contact: z.string().optional(),
+    email: z.string().optional(),
+    phone: z.string().optional(),
+    address: z.string().optional(),
+    zip: z.string().optional(),
+    city: z.string().optional(),
+    state: z.string().optional(),
+    country: z.string().optional(),
+    country_code: z.string().optional(),
+    rating: z.union([z.string(), z.number()]).optional(),
+    notes: z.string().optional(),
+    /**
+     * Associated projects. BuildTools' form payload uses a variety of shapes
+     * for this — sometimes an array of {id, name} objects, sometimes a list
+     * of IDs, sometimes an HTML blob in `budget_relations`. Tools normalize
+     * client-side; we tolerate any shape here via `z.unknown()` + passthrough.
+     */
+    projects: z.unknown().optional(),
+    project_ids: z.array(z.union([z.string(), z.number()])).optional(),
+    budget_relations: z.string().optional(),
+    created_at: z.string().optional(),
+    updated_at: z.string().optional(),
+  })
+  .passthrough();
+export type CustomerDetail = z.infer<typeof CustomerDetailSchema>;

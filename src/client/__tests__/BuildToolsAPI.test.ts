@@ -746,6 +746,114 @@ describe("findUnbilledChangeOrders() — MOS-215", () => {
 });
 
 // ---------------------------------------------------------------------------
+// MOS-216 — new read-only methods: getCustomer, getProjectAttachments.
+// ---------------------------------------------------------------------------
+
+describe("getCustomer() — MOS-216", () => {
+  it("hits the form endpoint /companies/:id/form", async () => {
+    const detail = { id: 300001, name: "Acme" };
+    const { stub, recorded } = makeFetchStub([
+      { status: 200, body: JSON.stringify(detail) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.getCustomer(300001);
+    expect(out).toEqual(detail);
+    expect(recorded[0].url).toBe(
+      "https://moss.buildtools.app/companies/300001/form",
+    );
+  });
+
+  it("returns null on non-200", async () => {
+    const { stub } = makeFetchStub([{ status: 404, body: "" }]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    expect(await api.getCustomer(1)).toBeNull();
+  });
+
+  it("returns null when response body is not JSON", async () => {
+    const { stub } = makeFetchStub([{ status: 200, body: "not-json" }]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    expect(await api.getCustomer(1)).toBeNull();
+  });
+
+  it("requires authentication", async () => {
+    const { stub } = makeFetchStub([]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    await expect(api.getCustomer(1)).rejects.toBeInstanceOf(BuildToolsAuthError);
+  });
+});
+
+describe("getProjectAttachments() — MOS-216", () => {
+  it("hits /documents?PR[]=:id with no list= filter", async () => {
+    const payload = {
+      items: [
+        {
+          id: 1,
+          name: "scope.pdf",
+          extension: "pdf",
+          public_url: "https://example.com/s.pdf",
+          size: 100,
+          created_at: "01/01/2026",
+        },
+      ],
+    };
+    const { stub, recorded } = makeFetchStub([
+      { status: 200, body: JSON.stringify(payload) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.getProjectAttachments(100002);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ id: 1, name: "scope.pdf", extension: "pdf" });
+    expect(recorded[0].url).toBe(
+      "https://moss.buildtools.app/documents?PR[]=100002",
+    );
+    // No `list=` filter — module-agnostic listing.
+    expect(recorded[0].url).not.toContain("list=");
+  });
+
+  it("returns [] on non-200", async () => {
+    const { stub } = makeFetchStub([{ status: 500, body: "" }]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    expect(await api.getProjectAttachments(100002)).toEqual([]);
+  });
+
+  it("returns [] on non-JSON body", async () => {
+    const { stub } = makeFetchStub([{ status: 200, body: "<html/>" }]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    expect(await api.getProjectAttachments(100002)).toEqual([]);
+  });
+
+  it("returns [] when items is missing from the JSON envelope", async () => {
+    const { stub } = makeFetchStub([{ status: 200, body: "{}" }]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    expect(await api.getProjectAttachments(100002)).toEqual([]);
+  });
+
+  it("throws BuildToolsServerError when projectId is falsy", async () => {
+    const { stub } = makeFetchStub([]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    await expect(api.getProjectAttachments(0)).rejects.toBeInstanceOf(
+      BuildToolsServerError,
+    );
+  });
+
+  it("requires authentication", async () => {
+    const { stub } = makeFetchStub([]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    await expect(api.getProjectAttachments(1)).rejects.toBeInstanceOf(
+      BuildToolsAuthError,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // AbortController timeout
 // ---------------------------------------------------------------------------
 
@@ -1505,6 +1613,10 @@ describe("barrel exports", () => {
     expect(barrel.ProjectSaveResultSchema).toBeDefined();
     expect(barrel.SuccessSaveResultSchema).toBeDefined();
     expect(barrel.ChangeOrderAttachmentSchema).toBeDefined();
+    // MOS-216: customer + attachment schemas surfaced through the barrel.
+    expect(barrel.CustomerSchema).toBeDefined();
+    expect(barrel.CustomerDetailSchema).toBeDefined();
+    expect(barrel.AttachmentSchema).toBeDefined();
   });
 
   it("DatatableResponseSchema validates a real fixture", async () => {

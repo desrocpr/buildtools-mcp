@@ -1,10 +1,12 @@
 # buildtools-mcp — Tool Reference
 
 This MCP server exposes a set of tools that Claude Desktop can invoke against
-the BuildTools (`moss.buildtools.app`) tenant. As of Phase 3.2 (MOS-215) the
-read-only project surface (MOS-214) and the read-only financial surface
-(change orders + financial statements + unbilled-CO sweep) are live; customer
-and attachment tools follow in later phases.
+the BuildTools (`moss.buildtools.app`) tenant. As of Phase 3.3 (MOS-216) the
+read-only MVP is complete: the project surface (MOS-214), the financial
+surface (MOS-215 — change orders + financial statements + unbilled-CO sweep),
+and now the customer + attachment surface (MOS-216) are all live. Mutations
+(Phase 5), the confirmation framework (Phase 4), HTTP/SSE transport (Phase 6),
+and install polish (Phase 7) follow as separate issues.
 
 All tool responses are returned as Markdown text. Claude Desktop renders the
 response inline, so headers, bullet lists, and tables show up correctly.
@@ -239,9 +241,118 @@ throwing. Margin is derived from contract value − costs when not present in th
 payload; the BuildTools form sometimes ships these inside a
 `budgetOverviewTotals` JSON blob which is parsed transparently.
 
+## `list_customers`
+
+**Purpose**: list BuildTools customers (people / companies tied to projects).
+Optionally filter by activity (customers with at least one project link) or by
+a name substring. Returns a Markdown bullet list.
+
+**When to use it**: when the user asks for "all our vendors / subs / clients",
+"who do we work with on X type of project", or wants to find a customer by
+fragment of name before drilling into `get_customer`.
+
+**Inputs**:
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `has_active_project` | boolean | no | When `true`, only customers with at least one project link (heuristic: non-empty `budget_relations`). When `false`, only customers with no project link. Omit to skip filter. |
+| `name_search` | string | no | Forwarded to the customers datatable's free-text `search[value]`. |
+
+**Sample prompt**: "Use list_customers from buildtools, name_search 'Acme'."
+
+**Sample output**:
+
+```markdown
+**2 customers**:
+
+- #300001 [Active] Acme Subcontractors LLC (Subcontractor) — Anytown, VA — contact: Pat Sample
+- #300002 [Active] Acme Painting Co (Vendor) — Springfield, VA — contact: Jordan Painter
+```
+
+Empty-result responses are returned as Markdown ("No customers matched the
+filter…"), not errors.
+
+## `get_customer`
+
+**Purpose**: fetch the full record for a single BuildTools customer by its
+numeric ID. Renders a structured Markdown summary with status, type, primary
+contact, email, phone, address, rating, and associated projects when surfaced
+on the form payload.
+
+**When to use it**: after `list_customers` identifies a candidate, or when the
+user asks "tell me everything about customer #X" or "what projects do we have
+with customer Y".
+
+**Inputs**:
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `customer_id` | number | yes | The BuildTools internal numeric customer / company ID. |
+
+**Sample prompt**: "Use get_customer from buildtools for customer 300001."
+
+**Sample output**:
+
+```markdown
+## Customer #300001 — Acme Subcontractors LLC
+
+- **Status**: Active
+- **Type**: Subcontractor
+- **Primary contact**: Pat Sample
+- **Email**: vendor@example.com
+- **Phone**: 555-010-0001
+- **Address**: 100 Industrial Way · Anytown, VA · 22030 · United States
+- **Rating**: 4
+- **Created**: 01/19/2026
+- **Updated**: 03/01/2026
+
+### Associated projects
+
+- #100002 — Jones Addition
+- #100007 — Smith Pool House
+```
+
+Missing fields render as em-dashes (`—`); a missing customer returns
+"No customer found with ID #…" as Markdown rather than throwing.
+
+## `list_project_attachments`
+
+**Purpose**: list files/attachments for a BuildTools project. Returns a
+Markdown TABLE with name, type (extension + image/document bucket), size,
+upload date, and a clickable download URL column. Optional `type_filter`
+buckets the result client-side.
+
+**When to use it**: when the user asks for "files for project X", "renderings
+for the bathroom remodel", "all PDFs we've uploaded on Y", or wants a quick
+table they can click through to download.
+
+**Inputs**:
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `project_id` | number | yes | BuildTools project ID. |
+| `type_filter` | `"images"` \| `"documents"` \| `"all"` | no | `images` = png/jpg/jpeg/gif/webp/svg/bmp; `documents` = everything else. Default `all`. |
+
+**Sample prompt**: "Use list_project_attachments from buildtools for project 100002, type_filter documents."
+
+**Sample output**:
+
+```markdown
+**2 attachments** for project #100002 (type_filter: documents):
+
+| Name | Type | Size | Uploaded | Download |
+|---|---|---|---|---|
+| scope-revision-1.pdf | pdf (document) | 239.4 KB | 02/04/2026 09:15:00 | [Download](https://example.com/attachments/scope-revision-1.pdf) |
+| approval-signed.pdf | pdf (document) | 87.1 KB | 02/05/2026 14:30:00 | [Download](https://example.com/attachments/approval-signed.pdf) |
+```
+
+Empty-result responses are returned as Markdown ("No attachments found for
+project #…"), not errors. This tool is strictly read-only — upload / delete
+actions are Phase 5 (MOS-219).
+
 ## Error responses
 
-All three tools convert thrown `BuildToolsError`s (authentication, network,
+All read tools convert thrown `BuildToolsError`s (authentication, network,
 validation, server) into a Markdown error content block with `isError: true`.
 For example, an expired session followed by a failed silent re-auth surfaces
 as:

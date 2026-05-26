@@ -1,0 +1,24 @@
+{
+  "id": 300001,
+  "name": "Acme Subcontractors LLC",
+  "status": "Active",
+  "type_name": "Subcontractor",
+  "main_contact": "Pat Sample",
+  "email": "vendor@example.com",
+  "phone": "555-010-0001",
+  "address": "100 Industrial Way",
+  "zip": "22030",
+  "city": "Anytown",
+  "state": "VA",
+  "country": "United States",
+  "country_code": "US",
+  "rating": 4,
+  "notes": "Long-time framing partner.",
+  "projects": [
+    { "id": 100002, "name": "Jones Addition" },
+    { "id": 100007, "name": "Smith Pool House" }
+  ],
+  "budget_relations": "<div title=\"Jones Addition\">Jones Addition</div>",
+  "created_at": "01/19/2026",
+  "updated_at": "03/01/2026"
+}
