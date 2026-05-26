@@ -1,0 +1,51 @@
+{
+  "draw": 1,
+  "recordsTotal": 2,
+  "recordsFiltered": 2,
+  "data": [
+    {
+      "DT_RowId": "row_400001",
+      "status": 3,
+      "sync_status": "",
+      "comments_status": 1,
+      "info": 400001,
+      "attachment": 1,
+      "email_status": 1601,
+      "email_status_label": "Untracked",
+      "can_manage_project": true,
+      "project_name": "Brown Addition",
+      "number": 333121488,
+      "name": "Brown - Wedi materials",
+      "company": "Sample Vendor Inc",
+      "relations": "7730 - Tile Materials",
+      "total": "$ 3,855.46",
+      "invoiced_amount": "$ 0.00",
+      "difference": "$ 3,855.46",
+      "created_at": "02/04/2026",
+      "prefix": "PO",
+      "project_number": null
+    },
+    {
+      "DT_RowId": "row_400002",
+      "status": 1,
+      "sync_status": "",
+      "comments_status": 1,
+      "info": 400002,
+      "attachment": 0,
+      "email_status": 1601,
+      "email_status_label": "Untracked",
+      "can_manage_project": true,
+      "project_name": "Jones Addition",
+      "number": 333121489,
+      "name": "Jones - Lumber",
+      "company": "Acme Subcontractors LLC",
+      "relations": "3010 - Framing Labor",
+      "total": "$ 12,500.00",
+      "invoiced_amount": "$ 12,500.00",
+      "difference": "$ 0.00",
+      "created_at": "01/22/2026",
+      "prefix": "PO",
+      "project_number": null
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "id": 700001,
+  "project_id": 100002,
+  "name": "Q1 2026 Statement",
+  "status": 1,
+  "current_amount": "$ 45,000.00",
+  "current_amount_value": 45000.00,
+  "report_previous_balance": "0",
+  "credit_amount": "0",
+  "notes": "Progress billing for Q1 2026 phase 1.",
+  "financial_method": 3,
+  "assigned_to": [9001],
+  "created_at": "04/01/2026",
+  "due_date": "04/30/2026",
+  "payment_last": "04/30/2026",
+  "amount_paid": "$ 45,000.00",
+  "amount_unpaid": "$ 0.00",
+  "aging_days": 0,
+  "items": [
+    {
+      "id": 700101,
+      "name": "Framing labor",
+      "total": "$ 18,000.00",
+      "category": "3010 - Framing Labor"
+    },
+    {
+      "id": 700102,
+      "name": "Drywall materials",
+      "total": "$ 27,000.00",
+      "category": "3620 - Drywall"
+    }
+  ]
+}

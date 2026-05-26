@@ -1,0 +1,61 @@
+{
+  "draw": 1,
+  "recordsTotal": 3,
+  "recordsFiltered": 3,
+  "data": [
+    {
+      "DT_RowId": "row_300001",
+      "status": "Active",
+      "sync_status": "<span class=\"material-icons text-grey\" title=\"The item does not meet the synchronization criteria\">sync_disabled</span>",
+      "name": "Acme Subcontractors LLC",
+      "type_name": "Subcontractor",
+      "main_contact": "Pat Sample",
+      "email": "vendor@example.com",
+      "phone": "555-010-0001",
+      "address": "100 Industrial Way",
+      "zip": "22030",
+      "city": "Anytown",
+      "state": "VA",
+      "country": "United States",
+      "rating": 4,
+      "budget_relations": "<div class=\"text-truncate\" title=\"\"></div>",
+      "created_at": "01/19/2026"
+    },
+    {
+      "DT_RowId": "row_300002",
+      "status": "Active",
+      "sync_status": "",
+      "name": "Sample Vendor Inc",
+      "type_name": "Vendor",
+      "main_contact": "Jordan Buyer",
+      "email": "orders@example.com",
+      "phone": "555-010-0002",
+      "address": "200 Commerce Dr",
+      "zip": "20191",
+      "city": "Springfield",
+      "state": "VA",
+      "country": "United States",
+      "rating": 5,
+      "budget_relations": "",
+      "created_at": "11/22/2025"
+    },
+    {
+      "DT_RowId": "row_300003",
+      "status": "Inactive",
+      "sync_status": "",
+      "name": "Test Architects",
+      "type_name": "Designer",
+      "main_contact": "Robin Designer",
+      "email": "design@example.com",
+      "phone": "555-010-0003",
+      "address": "",
+      "zip": "",
+      "city": "",
+      "state": "",
+      "country": "United States",
+      "rating": 0,
+      "budget_relations": "",
+      "created_at": "07/10/2024"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "draw": 1,
+  "recordsTotal": 1,
+  "recordsFiltered": 1,
+  "data": [
+    {
+      "DT_RowId": "row_4001",
+      "status": 1,
+      "project": "Jones Addition",
+      "date": "04/15/2026",
+      "user": "Alex Doe",
+      "hours": 8.0,
+      "id": 4001
+    }
+  ]
+}

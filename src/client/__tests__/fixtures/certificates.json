@@ -1,0 +1,18 @@
+{
+  "draw": 1,
+  "recordsTotal": 1,
+  "recordsFiltered": 1,
+  "data": [
+    {
+      "DT_RowId": "row_1001",
+      "status": 1,
+      "name": "General Liability Insurance",
+      "type": "Insurance",
+      "company": "Acme Subcontractors LLC",
+      "issuer": "Sample Insurance Co",
+      "issue_date": "01/01/2026",
+      "expiry_date": "12/31/2026",
+      "id": 1001
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "items": [
+    {
+      "id": 800001,
+      "name": "scope-revision-1.pdf",
+      "module_id": 500001,
+      "extension": "pdf",
+      "public_url": "https://example.com/attachments/scope-revision-1.pdf",
+      "key": "attachments/scope-revision-1.pdf",
+      "size": 245123,
+      "created_at": "02/04/2026 09:15:00",
+      "user_id": 9001,
+      "user_name": "Project Manager A"
+    },
+    {
+      "id": 800002,
+      "name": "approval-signed.pdf",
+      "module_id": 500001,
+      "extension": "pdf",
+      "public_url": "https://example.com/attachments/approval-signed.pdf",
+      "key": "attachments/approval-signed.pdf",
+      "size": 89234,
+      "created_at": "02/05/2026 14:30:00",
+      "user_id": 9002,
+      "user_name": "Project Manager B"
+    },
+    {
+      "id": 800003,
+      "name": "bathroom-rendering.png",
+      "module_id": 500002,
+      "extension": "png",
+      "public_url": "https://example.com/attachments/bathroom-rendering.png",
+      "key": "attachments/bathroom-rendering.png",
+      "size": 1245678,
+      "created_at": "11/02/2025 10:00:00",
+      "user_id": 9003,
+      "user_name": "Project Manager C"
+    }
+  ]
+}

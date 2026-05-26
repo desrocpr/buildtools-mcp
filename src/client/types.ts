@@ -166,3 +166,116 @@ export const ChangeOrderAttachmentSchema = z
   })
   .passthrough();
 export type ChangeOrderAttachment = z.infer<typeof ChangeOrderAttachmentSchema>;
+
+// ---------------------------------------------------------------------------
+// Additional entity schemas (MOS-213)
+//
+// These are intentionally minimal. They cover the well-known fields that the
+// snapshot tests in `__tests__/BuildToolsAPI.fixtures.test.ts` assert on, and
+// use `.passthrough()` so any extra columns that BuildTools' DataTables
+// envelope ships with (HTML widgets, etc.) are preserved rather than dropped.
+//
+// Per the MOS-213 contract: these are NOT re-exported from `src/client/index.ts`
+// (the barrel) — that work belongs to MOS-214 / 215 / 216, where the
+// downstream MCP tool definitions actually need to consume them. Tests import
+// directly from `../types.js`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Customer (BuildTools' /companies datatable row). BuildTools labels these
+ * "companies" internally but the user-facing concept — and the MOS-213 spec —
+ * calls them customers.
+ */
+export const CustomerSchema = z
+  .object({
+    DT_RowId: z.string().optional(),
+    name: z.string(),
+    status: z.union([z.string(), z.number()]).optional(),
+    type_name: z.string().optional(),
+    main_contact: z.string().optional(),
+    email: z.string().optional(),
+    phone: z.string().optional(),
+    address: z.string().optional(),
+    zip: z.string().optional(),
+    city: z.string().optional(),
+    state: z.string().optional(),
+    country: z.string().optional(),
+    rating: z.union([z.string(), z.number()]).optional(),
+    created_at: z.string().optional(),
+  })
+  .passthrough();
+export type Customer = z.infer<typeof CustomerSchema>;
+
+/**
+ * Change order (BuildTools' /change-orders datatable row). The `total` field
+ * is surfaced as a formatted currency string (e.g. `"$ 13,800.00"`) — callers
+ * that need a numeric value must parse it themselves; the schema preserves
+ * the source string.
+ */
+export const ChangeOrderSchema = z
+  .object({
+    DT_RowId: z.string().optional(),
+    status: z.union([z.string(), z.number()]).optional(),
+    info: z.union([z.string(), z.number()]).optional(),
+    project_name: z.string().optional(),
+    number: z.union([z.string(), z.number()]).optional(),
+    approved_number: z.union([z.string(), z.number()]).nullable().optional(),
+    name: z.string(),
+    total: z.string().optional(),
+    dates: z.string().optional(),
+    relations: z.string().optional(),
+    created_at: z.string().optional(),
+  })
+  .passthrough();
+export type ChangeOrder = z.infer<typeof ChangeOrderSchema>;
+
+/**
+ * Financial statement (single-record shape returned by the form/save endpoints,
+ * and also the analogous fields surfaced on the project datatable row prefixed
+ * with `financial_statements_*`). Like ChangeOrder, currency comes as a
+ * formatted string; the optional `current_amount_value` carries the numeric
+ * equivalent when the source includes it.
+ */
+export const FinancialStatementSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    project_id: z.union([z.string(), z.number()]).optional(),
+    name: z.string(),
+    status: z.union([z.string(), z.number()]).optional(),
+    current_amount: z.string().optional(),
+    current_amount_value: z.number().optional(),
+    report_previous_balance: z.union([z.string(), z.number()]).optional(),
+    credit_amount: z.union([z.string(), z.number()]).optional(),
+    notes: z.string().optional(),
+    financial_method: z.union([z.string(), z.number()]).optional(),
+    created_at: z.string().optional(),
+    due_date: z.string().optional(),
+    payment_last: z.string().optional(),
+    amount_paid: z.string().optional(),
+    amount_unpaid: z.string().optional(),
+    aging_days: z.union([z.string(), z.number()]).optional(),
+  })
+  .passthrough();
+export type FinancialStatement = z.infer<typeof FinancialStatementSchema>;
+
+/**
+ * Document attachment as returned by the `/documents` listing endpoint
+ * (snake_case from the wire, before `getChangeOrderAttachments()` maps to its
+ * camelCase shape). Distinct from `ChangeOrderAttachmentSchema` which models
+ * the post-mapping shape.
+ */
+export const AttachmentSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    name: z.string(),
+    module_id: z.union([z.string(), z.number()]).optional(),
+    extension: z.string().optional(),
+    public_url: z.string().optional(),
+    key: z.string().optional(),
+    size: z.union([z.string(), z.number()]).optional(),
+    created_at: z.string().optional(),
+    user_id: z.union([z.string(), z.number()]).optional(),
+    user_name: z.string().optional(),
+  })
+  .passthrough();
+export type Attachment = z.infer<typeof AttachmentSchema>;

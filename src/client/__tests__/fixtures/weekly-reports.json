@@ -1,0 +1,17 @@
+{
+  "draw": 1,
+  "recordsTotal": 1,
+  "recordsFiltered": 1,
+  "data": [
+    {
+      "DT_RowId": "row_3001",
+      "status": 1,
+      "project": "Jones Addition",
+      "week_start": "04/13/2026",
+      "week_end": "04/19/2026",
+      "total_hours": 42.5,
+      "summary": "Framing completed; drywall starts Monday.",
+      "id": 3001
+    }
+  ]
+}
