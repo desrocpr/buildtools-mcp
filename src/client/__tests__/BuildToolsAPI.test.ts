@@ -499,6 +499,253 @@ describe("createChangeOrder()", () => {
 });
 
 // ---------------------------------------------------------------------------
+// MOS-215 — new read-only methods: getChangeOrder, getFinancialStatement,
+// findUnbilledChangeOrders.
+// ---------------------------------------------------------------------------
+
+describe("getChangeOrder() — MOS-215", () => {
+  it("hits the form endpoint /change-orders/:id/form", async () => {
+    const detail = { id: 500001, name: "X" };
+    const { stub, recorded } = makeFetchStub([
+      { status: 200, body: JSON.stringify(detail) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.getChangeOrder(500001);
+    expect(out).toEqual(detail);
+    expect(recorded[0].url).toBe(
+      "https://moss.buildtools.app/change-orders/500001/form",
+    );
+  });
+
+  it("returns null on non-200", async () => {
+    const { stub } = makeFetchStub([{ status: 404, body: "" }]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    expect(await api.getChangeOrder(1)).toBeNull();
+  });
+
+  it("returns null when response body is not JSON", async () => {
+    const { stub } = makeFetchStub([{ status: 200, body: "not-json" }]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    expect(await api.getChangeOrder(1)).toBeNull();
+  });
+
+  it("requires authentication", async () => {
+    const { stub } = makeFetchStub([]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    await expect(api.getChangeOrder(1)).rejects.toBeInstanceOf(
+      BuildToolsAuthError,
+    );
+  });
+});
+
+describe("getFinancialStatement() — MOS-215", () => {
+  it("hits the form endpoint /financial/statements/form?PR[]=<id>", async () => {
+    const statement = { id: 700001, name: "Q1" };
+    const { stub, recorded } = makeFetchStub([
+      { status: 200, body: JSON.stringify(statement) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.getFinancialStatement(100002);
+    expect(out).toEqual(statement);
+    expect(recorded[0].url).toBe(
+      "https://moss.buildtools.app/financial/statements/form?PR[]=100002",
+    );
+  });
+
+  it("returns null on non-200", async () => {
+    const { stub } = makeFetchStub([{ status: 500, body: "" }]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    expect(await api.getFinancialStatement(1)).toBeNull();
+  });
+
+  it("returns null when response body is not JSON", async () => {
+    const { stub } = makeFetchStub([{ status: 200, body: "<html/>" }]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    expect(await api.getFinancialStatement(1)).toBeNull();
+  });
+
+  it("requires authentication", async () => {
+    const { stub } = makeFetchStub([]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    await expect(api.getFinancialStatement(1)).rejects.toBeInstanceOf(
+      BuildToolsAuthError,
+    );
+  });
+});
+
+describe("findUnbilledChangeOrders() — MOS-215", () => {
+  it("returns approved-but-not-billed rows from the datatable", async () => {
+    const payload = {
+      data: [
+        {
+          // Approved by email_status_label.
+          id: 1,
+          status: 3,
+          approved_number: 5,
+          email_status_label: "Approved",
+          name: "CO A",
+          total: "$ 7,500.00",
+          created_at: "01/15/2025",
+        },
+        {
+          // Not approved (no approved_number, no Approved label, status !== 3).
+          id: 2,
+          status: 1,
+          approved_number: null,
+          email_status_label: "",
+          name: "CO B",
+          total: "$ 3,000.00",
+          created_at: "01/15/2025",
+        },
+        {
+          // Approved but already invoiced — must be filtered out.
+          id: 3,
+          status: 3,
+          approved_number: 6,
+          email_status_label: "Approved",
+          name: "CO C",
+          total: "$ 9,000.00",
+          invoiced_amount: "$ 9,000.00",
+          created_at: "01/15/2025",
+        },
+      ],
+    };
+    const { stub, recorded } = makeFetchStub([
+      { status: 200, body: JSON.stringify(payload) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.findUnbilledChangeOrders();
+    expect(out).toHaveLength(1);
+    expect(out[0].id).toBe(1);
+    expect(out[0].total_value).toBe(7500);
+    // Bumped length=500 for recall.
+    expect(recorded[0].url).toContain("length=500");
+  });
+
+  it("applies min_amount filter", async () => {
+    const payload = {
+      data: [
+        {
+          id: 10,
+          status: 3,
+          approved_number: 1,
+          name: "Small",
+          total: "$ 500.00",
+          created_at: "01/15/2025",
+        },
+        {
+          id: 11,
+          status: 3,
+          approved_number: 2,
+          name: "Big",
+          total: "$ 25,000.00",
+          created_at: "01/15/2025",
+        },
+      ],
+    };
+    const { stub } = makeFetchStub([
+      { status: 200, body: JSON.stringify(payload) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.findUnbilledChangeOrders({ min_amount: 10000 });
+    expect(out).toHaveLength(1);
+    expect(out[0].id).toBe(11);
+  });
+
+  it("applies older_than_days filter using created_at as the proxy", async () => {
+    const today = new Date();
+    const recent = `${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}/${today.getFullYear()}`;
+    const payload = {
+      data: [
+        {
+          // Approved today — should be filtered out by older_than_days=7.
+          id: 20,
+          status: 3,
+          approved_number: 1,
+          name: "Today",
+          total: "$ 1,000.00",
+          created_at: recent,
+        },
+        {
+          // Approved very long ago — should pass.
+          id: 21,
+          status: 3,
+          approved_number: 2,
+          name: "Old",
+          total: "$ 1,000.00",
+          created_at: "01/01/2000",
+        },
+      ],
+    };
+    const { stub } = makeFetchStub([
+      { status: 200, body: JSON.stringify(payload) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.findUnbilledChangeOrders({ older_than_days: 7 });
+    const ids = out.map((r) => r.id);
+    expect(ids).toEqual([21]);
+  });
+
+  it("returns [] when the datatable is empty or returns null", async () => {
+    const { stub } = makeFetchStub([
+      { status: 200, body: JSON.stringify({ data: [] }) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    expect(await api.findUnbilledChangeOrders()).toEqual([]);
+  });
+
+  it("requires authentication", async () => {
+    const { stub } = makeFetchStub([]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    await expect(api.findUnbilledChangeOrders()).rejects.toBeInstanceOf(
+      BuildToolsAuthError,
+    );
+  });
+
+  it("treats invoiced_amount numeric > 0 as already billed", async () => {
+    const payload = {
+      data: [
+        {
+          id: 30,
+          status: 3,
+          approved_number: 1,
+          name: "Billed already",
+          total: "$ 9,000.00",
+          invoiced_amount: 9000,
+          created_at: "01/15/2025",
+        },
+        {
+          id: 31,
+          status: 3,
+          approved_number: 2,
+          name: "Not billed",
+          total: "$ 4,000.00",
+          invoiced_amount: 0,
+          created_at: "01/15/2025",
+        },
+      ],
+    };
+    const { stub } = makeFetchStub([
+      { status: 200, body: JSON.stringify(payload) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.findUnbilledChangeOrders();
+    expect(out.map((r) => r.id)).toEqual([31]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // AbortController timeout
 // ---------------------------------------------------------------------------
 
