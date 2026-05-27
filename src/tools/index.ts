@@ -67,6 +67,7 @@ export {
 export {
   listSelectionsTool,
   listAllowancesTool,
+  listSelectionCategoriesTool,
   selectionTools,
 } from "./selections.js";
 

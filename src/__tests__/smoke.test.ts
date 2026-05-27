@@ -36,7 +36,7 @@ describe("buildtools-mcp", () => {
     const store = new ConfirmationStore();
     const tools = createMutationTools(() => api, store);
 
-    expect(tools.length).toBe(9);
+    expect(tools.length).toBe(11);
     const names = tools.map((t) => t.name);
     expect(names).toContain("create_project");
     expect(names).toContain("create_change_order");
@@ -47,6 +47,8 @@ describe("buildtools-mcp", () => {
     expect(names).toContain("create_financial_statement");
     expect(names).toContain("delete_financial_statement");
     expect(names).toContain("create_service");
+    expect(names).toContain("create_selection");
+    expect(names).toContain("delete_selection");
   });
 
   it("mutation tools return confirmation prompt on first call (no confirmation_id)", async () => {

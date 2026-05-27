@@ -209,10 +209,50 @@ export const listAllowancesTool: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// list_selection_categories
+// ---------------------------------------------------------------------------
+
+const ListSelectionCategoriesInputSchema = z.object({
+  project_id: z.number().describe("BuildTools project ID."),
+});
+
+async function listSelectionCategoriesHandler(
+  args: unknown,
+  api: BuildToolsAPI,
+): Promise<ToolResult> {
+  const parsed = ListSelectionCategoriesInputSchema.safeParse(args ?? {});
+  if (!parsed.success) return formatZodError(parsed.error, "list_selection_categories");
+  const { project_id } = parsed.data;
+
+  try {
+    const categories = await api.getSelectionBudgetCategories(project_id);
+    if (categories.length === 0) {
+      return markdown(`No budget categories available for selections on project #${project_id}.`);
+    }
+    const header = `**${categories.length} budget categories** available for selections on project #${project_id}:\n`;
+    const list = categories
+      .map((c) => `- **${c.id}** — ${c.name}`)
+      .join("\n");
+    return markdown(`${header}\n${list}`);
+  } catch (err) {
+    return formatError(err, "list_selection_categories");
+  }
+}
+
+export const listSelectionCategoriesTool: ToolDefinition = {
+  name: "list_selection_categories",
+  description:
+    "List the budget categories available for creating selections on a project. Returns category IDs needed for create_selection.",
+  inputSchema: zodToJsonSchema(ListSelectionCategoriesInputSchema),
+  handler: listSelectionCategoriesHandler,
+};
+
+// ---------------------------------------------------------------------------
 // Exported registry
 // ---------------------------------------------------------------------------
 
 export const selectionTools: ToolDefinition[] = [
   listSelectionsTool,
   listAllowancesTool,
+  listSelectionCategoriesTool,
 ];
