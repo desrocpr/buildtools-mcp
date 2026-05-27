@@ -367,7 +367,7 @@ export class BuildToolsAPI {
       {},
       false,
     );
-    const csrfMatch = loginPage.body.match(/name="_token"\s+value="([^"]+)"/);
+    const csrfMatch = loginPage.body.match(/name="_token"[^>]*value="([^"]+)"/);
     if (csrfMatch) this.csrfToken = csrfMatch[1];
 
     if (!this.csrfToken) {

@@ -216,6 +216,59 @@ describe("authenticate()", () => {
     expect(followHeaders["Cookie"]).toContain("XSRF-TOKEN=");
   });
 
+  // MOS-284 regression: the CSRF harvest regex must tolerate any/no
+  // intermediate attributes between `name="_token"` and `value="..."`.
+  // Production HTML serves `name="_token" type="hidden" value="..."` —
+  // the previous `\s+` pattern silently missed that ordering. This
+  // parameterised case asserts all three observed orderings are
+  // extracted and reach the POST body as `_token=<harvested>`.
+  it.each([
+    {
+      label: "name then type then value (production)",
+      input: '<input name="_token" type="hidden" value="ORDERING_A_TOKEN" />',
+      token: "ORDERING_A_TOKEN",
+    },
+    {
+      label: "type then name then value (alternate)",
+      input: '<input type="hidden" name="_token" value="ORDERING_B_TOKEN" />',
+      token: "ORDERING_B_TOKEN",
+    },
+    {
+      label: "name then value (no type; original fixture shape)",
+      input: '<input name="_token" value="ORDERING_C_TOKEN" />',
+      token: "ORDERING_C_TOKEN",
+    },
+  ])(
+    "harvests CSRF _token regardless of attribute ordering: $label",
+    async ({ input, token }) => {
+      const { stub, recorded } = makeFetchStub([
+        // 1. GET login page — serves the variant HTML.
+        {
+          status: 200,
+          body: `<html><form>${input}</form></html>`,
+          setCookie: [
+            "XSRF-TOKEN=xsrf-raw; path=/; domain=.buildtools.app",
+          ],
+        },
+        // 2. POST login — server 302 → /dashboard.
+        { status: 302, location: "https://core.buildtools.app/dashboard" },
+        // 2b. Manual redirect-follow lands on /dashboard.
+        { status: 200, body: "<html>dashboard ready</html>" },
+        // 3. Cross-domain GET to baseUrl — needs the logout marker.
+        { status: 200, body: "<html>logout link</html>" },
+      ]);
+
+      const api = new BuildToolsAPI({ fetch: stub });
+      const ok = await api.authenticate("user@example.com", "secret");
+      expect(ok).toBe(true);
+
+      // POST body should carry the harvested CSRF token verbatim.
+      const loginPost = recorded[1];
+      expect(loginPost.url).toBe("https://core.buildtools.app/login");
+      expect(String(loginPost.init.body)).toContain(`_token=${token}`);
+    },
+  );
+
   it("throws BuildToolsAuthError if the login HTML has no _token", async () => {
     const { stub } = makeFetchStub([
       { status: 200, body: "<html>no token here</html>" },

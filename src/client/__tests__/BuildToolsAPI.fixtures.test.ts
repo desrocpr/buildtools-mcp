@@ -276,7 +276,7 @@ describe("fixtures themselves", () => {
     for (const needle of realStrings) {
       expect(loginPageHtml).not.toContain(needle);
     }
-    expect(loginPageHtml).toMatch(/name="_token"\s+value="([^"]+)"/);
+    expect(loginPageHtml).toMatch(/name="_token"[^>]*value="([^"]+)"/);
   });
 });
 
