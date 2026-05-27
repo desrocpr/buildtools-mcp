@@ -2,7 +2,7 @@
 /**
  * buildtools-mcp stdio entrypoint.
  *
- * Tool registration (MOS-214, MOS-215, MOS-216 — Phases 3.1 + 3.2 + 3.3):
+ * Tool registration (MOS-214–216, MOS-292–295 — Phases 3.1–3.3 + read-tools expansion):
  *   - `ping` is kept for diagnostics (Phase 1.2 transport smoke).
  *   - Project read tools (`list_projects`, `get_project`, `search_projects`)
  *     are registered via `projectTools` from `src/tools/projects.ts`.
@@ -13,6 +13,17 @@
  *     via `customerTools` from `src/tools/customers.ts`.
  *   - Attachment read tools (`list_project_attachments`) are registered via
  *     `attachmentTools` from `src/tools/attachments.ts`.
+ *   - Task read tools (`list_tasks`, `search_tasks`) are registered via
+ *     `taskTools` from `src/tools/tasks.ts`.
+ *   - Purchase-order read tools (`list_purchase_orders`,
+ *     `search_purchase_orders`) are registered via `purchaseOrderTools` from
+ *     `src/tools/purchase-orders.ts` (MOS-292).
+ *   - Work-tracking read tools (`list_certificates`, `list_daily_logs`,
+ *     `list_weekly_reports`, `list_work_days`) are registered via
+ *     `workTrackingTools` from `src/tools/work-tracking.ts` (MOS-295).
+ *   - Operations read tools (`list_rfis`, `list_services`, `list_users`,
+ *     `search_users`) are registered via `operationTools` from
+ *     `src/tools/operations.ts` (MOS-294).
  *
  * Client lifecycle: the `BuildToolsAPI` instance is lazily constructed on the
  * first tool invocation that needs it. This way, env-var configuration errors
@@ -33,7 +44,11 @@ import {
   attachmentTools,
   customerTools,
   financialTools,
+  operationTools,
   projectTools,
+  purchaseOrderTools,
+  taskTools,
+  workTrackingTools,
   type ToolDefinition,
 } from "./tools/index.js";
 
@@ -95,6 +110,10 @@ const toolsByName: Map<string, ToolDefinition> = new Map([
   ...financialTools.map((t) => [t.name, t] as const),
   ...customerTools.map((t) => [t.name, t] as const),
   ...attachmentTools.map((t) => [t.name, t] as const),
+  ...taskTools.map((t) => [t.name, t] as const),
+  ...purchaseOrderTools.map((t) => [t.name, t] as const),
+  ...workTrackingTools.map((t) => [t.name, t] as const),
+  ...operationTools.map((t) => [t.name, t] as const),
 ]);
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
