@@ -620,7 +620,7 @@ async function listFinancialStatementsHandler(
 
     const tableBody = statements
       .map((s) =>
-        `| ${s.id} | ${s.status} | ${s.name.substring(0, 50)} | ${formatUsd(s.amount)} | ${formatUsd(s.paid)} | ${formatUsd(s.balance)} | ${s.date || "—"} |`,
+        `| ${s.id} | ${s.status} | ${s.name.substring(0, 50).replace(/\|/g, "\\|")} | ${formatUsd(s.amount)} | ${formatUsd(s.paid)} | ${formatUsd(s.balance)} | ${s.date || "—"} |`,
       )
       .join("\n");
 

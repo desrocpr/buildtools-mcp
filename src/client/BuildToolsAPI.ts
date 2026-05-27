@@ -1439,15 +1439,24 @@ export class BuildToolsAPI {
       return Number.isFinite(n) ? n : 0;
     };
 
-    const rowRegex = /<tr[^>]*data-id="(\d+)"[^>]*data-amount="([^"]*)"[^>]*data-paid="([^"]*)"[^>]*data-balance="([^"]*)"[^>]*>([\s\S]*?)<\/tr>/g;
+    // Match <tr> tags containing data-id (attribute order may vary).
+    const rowRegex = /<tr([^>]*data-id="[^"]*"[^>]*)>([\s\S]*?)<\/tr>/g;
     let match: RegExpExecArray | null;
 
+    const attr = (tag: string, name: string): string => {
+      const m = tag.match(new RegExp(`${name}="([^"]*)"`));
+      return m?.[1] ?? "";
+    };
+
     while ((match = rowRegex.exec(html)) !== null) {
-      const id = match[1];
-      const amount = parseCurrency(match[2]);
-      const paid = parseCurrency(match[3]);
-      const balance = parseCurrency(match[4]);
-      const rowHtml = match[5];
+      const attrs = match[1];
+      const id = attr(attrs, "data-id");
+      if (!id || !/^\d+$/.test(id)) continue;
+
+      const amount = parseCurrency(attr(attrs, "data-amount"));
+      const paid = parseCurrency(attr(attrs, "data-paid"));
+      const balance = parseCurrency(attr(attrs, "data-balance"));
+      const rowHtml = match[2];
 
       const cells: string[] = [];
       const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/g;
@@ -1456,16 +1465,14 @@ export class BuildToolsAPI {
         cells.push(strip(cellMatch[1]));
       }
 
-      // Cells: status, name, amount, paid, fees, balance, date
       const statusText = cells[0] ?? "";
-      const statusCode = Object.entries(STATUS_MAP).find(([, v]) => v === statusText)?.[0];
       const name = cells[1] ?? "";
       const date = cells.find((c) => /^\d{2}\/\d{2}\/\d{4}$/.test(c)) ?? "";
 
       statements.push({
         id,
         name,
-        status: statusText || (statusCode ? STATUS_MAP[Number(statusCode)] : "Unknown"),
+        status: statusText || "Unknown",
         amount,
         paid,
         balance,
