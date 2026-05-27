@@ -1044,7 +1044,7 @@ export class BuildToolsAPI {
   async getSelectionDetail(
     selectionId: string | number,
     projectId: string | number,
-  ): Promise<{
+  ): Promise<null | {
     items: Array<{
       id: number;
       selectionId: number;
@@ -1069,8 +1069,12 @@ export class BuildToolsAPI {
   } | null> {
     await this.ensureAuthenticated();
 
-    const response = await this.request(
-      `${this.baseUrl}/selections/form/${selectionId}?itemsData=1&PR[]=${projectId}`,
+    const numSelId = Number(selectionId);
+    const numProjId = Number(projectId);
+    if (!Number.isFinite(numSelId) || !Number.isFinite(numProjId)) return null;
+
+    const response = await this.requestWithReauthRetry(
+      `${this.baseUrl}/selections/form/${numSelId}?itemsData=1&PR[]=${numProjId}`,
       {
         headers: {
           Accept: "application/json",

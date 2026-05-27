@@ -58,6 +58,14 @@ function orDash(value: unknown): string {
   return s;
 }
 
+function escapeMarkdownCell(s: string): string {
+  return s.replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
+
+function escapeMarkdownLink(s: string): string {
+  return s.replace(/[[\]]/g, (c) => `\\${c}`);
+}
+
 // ---------------------------------------------------------------------------
 // list_selections
 // ---------------------------------------------------------------------------
@@ -107,7 +115,7 @@ async function listSelectionsHandler(
 
     const tableBody = selections
       .map((s) =>
-        `| ${s.id} | ${s.status} | ${orDash(s.category)} | ${orDash(s.location)} | ${orDash(s.item)} | ${orDash(s.price)} |`,
+        `| ${s.id} | ${s.status} | ${escapeMarkdownCell(orDash(s.category))} | ${escapeMarkdownCell(orDash(s.location))} | ${escapeMarkdownCell(orDash(s.item))} | ${orDash(s.price)} |`,
       )
       .join("\n");
 
@@ -178,7 +186,7 @@ async function getSelectionHandler(
         lines.push("");
         lines.push(`**Attached files** (${selected.files.length}):`);
         for (const f of selected.files) {
-          lines.push(`- [${f.name}](${f.url}) (${formatSize(f.size)}, ${f.type}${f.isImage ? ", image" : ""})`);
+          lines.push(`- [${escapeMarkdownLink(f.name)}](${f.url}) (${formatSize(f.size)}, ${f.type}${f.isImage ? ", image" : ""})`);
         }
       }
 
@@ -186,7 +194,7 @@ async function getSelectionHandler(
         lines.push("");
         lines.push(`**Sub-items** (${selected.subitems.length}):`);
         for (const s of selected.subitems) {
-          lines.push(`- ${s.title ?? s.name ?? JSON.stringify(s)}`);
+          lines.push(`- ${s.title ?? s.name ?? "(unnamed sub-item)"}`);
         }
       }
     }
