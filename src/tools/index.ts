@@ -22,6 +22,7 @@ export {
   getChangeOrderTool,
   findUnbilledChangeOrdersTool,
   getFinancialStatementTool,
+  listFinancialStatementsTool,
   financialTools,
 } from "./financial.js";
 

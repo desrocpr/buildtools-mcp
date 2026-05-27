@@ -559,9 +559,83 @@ async function getFinancialStatementHandler(
 export const getFinancialStatementTool: ToolDefinition = {
   name: "get_financial_statement",
   description:
-    "Get the financial statement (revenue + costs + margin) for a single project.",
+    "Get the project-level financial overview: original contract, approved COs, revised contract, total billing, costs, and margin. For individual statement records, use list_financial_statements.",
   inputSchema: zodToJsonSchema(GetFinancialStatementInputSchema),
   handler: getFinancialStatementHandler,
+};
+
+// ---------------------------------------------------------------------------
+// list_financial_statements
+// ---------------------------------------------------------------------------
+
+const ListFinancialStatementsInputSchema = z.object({
+  project_id: z.number().describe("BuildTools project ID."),
+  status: z
+    .enum(["Draft", "Pending", "Partial", "Sent", "Paid", "All"])
+    .optional()
+    .describe("Filter by statement status. Default: All."),
+});
+
+async function listFinancialStatementsHandler(
+  args: unknown,
+  api: BuildToolsAPI,
+): Promise<ToolResult> {
+  const parsed = ListFinancialStatementsInputSchema.safeParse(args ?? {});
+  if (!parsed.success) {
+    return formatZodError(parsed.error, "list_financial_statements");
+  }
+  const { project_id, status } = parsed.data;
+
+  try {
+    const result = await api.getFinancialStatements(project_id);
+    let statements = result.statements;
+
+    if (status && status !== "All") {
+      statements = statements.filter((s) => s.status === status);
+    }
+
+    if (statements.length === 0) {
+      const total = Object.values(result.statusCount).reduce((a, b) => a + Number(b), 0);
+      if (total === 0) {
+        return markdown(`No financial statements found for project #${project_id}.`);
+      }
+      return markdown(
+        `No statements matching status "${status}" for project #${project_id}. ` +
+        `Total: ${total}.`,
+      );
+    }
+
+    const totalAmount = statements.reduce((sum, s) => sum + s.amount, 0);
+    const totalPaid = statements.reduce((sum, s) => sum + s.paid, 0);
+    const totalBalance = statements.reduce((sum, s) => sum + s.balance, 0);
+
+    const header = `**${statements.length} financial statement${statements.length === 1 ? "" : "s"}** for project #${project_id}${status && status !== "All" ? ` (${status})` : ""}:`;
+
+    const summaryLine = `Totals: ${formatUsd(totalAmount)} billed, ${formatUsd(totalPaid)} paid, ${formatUsd(totalBalance)} outstanding`;
+
+    const tableHeader = [
+      "| ID | Status | Name | Amount | Paid | Balance | Date |",
+      "|---|---|---|---|---|---|---|",
+    ].join("\n");
+
+    const tableBody = statements
+      .map((s) =>
+        `| ${s.id} | ${s.status} | ${s.name.substring(0, 50).replace(/\|/g, "\\|")} | ${formatUsd(s.amount)} | ${formatUsd(s.paid)} | ${formatUsd(s.balance)} | ${s.date || "—"} |`,
+      )
+      .join("\n");
+
+    return markdown(`${header}\n\n${summaryLine}\n\n${tableHeader}\n${tableBody}`);
+  } catch (err) {
+    return formatError(err, "list_financial_statements");
+  }
+}
+
+export const listFinancialStatementsTool: ToolDefinition = {
+  name: "list_financial_statements",
+  description:
+    "List individual financial statements (draw requests / client bills) for a project. Shows ID, status, name, amount, paid, balance, and date. Optionally filter by status (Draft/Pending/Partial/Sent/Paid).",
+  inputSchema: zodToJsonSchema(ListFinancialStatementsInputSchema),
+  handler: listFinancialStatementsHandler,
 };
 
 // ---------------------------------------------------------------------------
@@ -573,4 +647,5 @@ export const financialTools: ToolDefinition[] = [
   getChangeOrderTool,
   findUnbilledChangeOrdersTool,
   getFinancialStatementTool,
+  listFinancialStatementsTool,
 ];
