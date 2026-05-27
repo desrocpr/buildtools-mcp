@@ -55,3 +55,11 @@ export {
   listWorkDaysTool,
   workTrackingTools,
 } from "./work-tracking.js";
+
+export {
+  listRfisTool,
+  listServicesTool,
+  listUsersTool,
+  searchUsersTool,
+  operationTools,
+} from "./operations.js";
