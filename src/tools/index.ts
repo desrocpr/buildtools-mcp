@@ -64,4 +64,10 @@ export {
   operationTools,
 } from "./operations.js";
 
+export {
+  listSelectionsTool,
+  listAllowancesTool,
+  selectionTools,
+} from "./selections.js";
+
 export { createMutationTools } from "./mutations.js";

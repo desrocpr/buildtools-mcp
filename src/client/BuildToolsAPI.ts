@@ -813,6 +813,219 @@ export class BuildToolsAPI {
   }
 
   // ========================================================================
+  // SELECTION METHODS
+  // ========================================================================
+
+  /**
+   * Fetches selections for a project by parsing the HTML grid returned by
+   * GET /selections?PR[]=<projectId>. Returns structured selection rows
+   * extracted from the HTML table rows.
+   */
+  async getSelections(
+    projectId: string | number,
+  ): Promise<{
+    statusCount: Record<string, number>;
+    selections: Array<{
+      id: string;
+      statusCode: number;
+      status: string;
+      category: string;
+      location: string;
+      item: string;
+      price: string;
+      dueDate: string;
+      selection: string;
+      notes: string;
+    }>;
+  }> {
+    await this.ensureAuthenticated();
+
+    const response = await this.request(
+      `${this.baseUrl}/selections?PR[]=${projectId}`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+
+    if (response.status !== 200) {
+      return { statusCount: {}, selections: [] };
+    }
+
+    let data: { grids?: string; statusCount?: Record<string, number> };
+    try {
+      data = JSON.parse(response.body);
+    } catch {
+      return { statusCount: {}, selections: [] };
+    }
+
+    const statusCount = data.statusCount ?? {};
+    const html = data.grids ?? "";
+    const selections: Array<{
+      id: string;
+      statusCode: number;
+      status: string;
+      category: string;
+      location: string;
+      item: string;
+      price: string;
+      dueDate: string;
+      selection: string;
+      notes: string;
+    }> = [];
+
+    const STATUS_MAP: Record<number, string> = {
+      1: "Open",
+      2: "Selected",
+      3: "Approved",
+      4: "Rejected",
+      5: "Complete",
+    };
+
+    const strip = (s: string): string =>
+      s.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/\s+/g, " ").trim();
+
+    // Each grid section has a category header
+    const gridRegex = /<div[^>]*class="[^"]*tables-content grid-item[^"]*"[^>]*>([\s\S]*?)(?=<div[^>]*class="[^"]*tables-content grid-item|$)/g;
+    let gridMatch: RegExpExecArray | null;
+
+    while ((gridMatch = gridRegex.exec(html)) !== null) {
+      const gridHtml = gridMatch[1];
+      const headerMatch = gridHtml.match(/<h2>([^<]+)<\/h2>/);
+      const category = headerMatch ? strip(headerMatch[1]) : "Unknown";
+      if (category === "Typical Room") continue; // skip empty typical room shells
+
+      const rowRegex = /<tr[^>]*id="sgRow_\d+"[^>]*data-id="(\d+)"[^>]*data-status="(\d+)"[^>]*>([\s\S]*?)<\/tr>/g;
+      let rowMatch: RegExpExecArray | null;
+
+      while ((rowMatch = rowRegex.exec(gridHtml)) !== null) {
+        const id = rowMatch[1];
+        const statusCode = Number(rowMatch[2]);
+        const rowHtml = rowMatch[3];
+
+        const cells: string[] = [];
+        const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/g;
+        let cellMatch: RegExpExecArray | null;
+        while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
+          cells.push(strip(cellMatch[1]));
+        }
+
+        // Column layout: [expand] [checkbox] status [icon] category location item price dueDate [relations] spec selection notes [actions]
+        // Indices vary by whether the "# REL." column is present, so find by content
+        const nonEmpty = cells.filter((c) => c.length > 0);
+
+        selections.push({
+          id,
+          statusCode,
+          status: STATUS_MAP[statusCode] ?? String(statusCode),
+          category,
+          location: nonEmpty.find((c) => /^(Kitchen|Bathroom|Bedroom|Living|Dining|Basement|Attic|Office|Garage|Non-specified|Typical|Master|Hall|Laundry|Closet|Exterior|Porch|Deck|Foyer|Family|Great|Mud|Pantry|Powder|Study|Sun|Breezeway)/i.test(c)) ?? "",
+          item: nonEmpty.find((c) => c.length > 3 && !/^\d{4}\s*-/.test(c) && !/^\$/.test(c) && !/^(Open|Selected|Approved|Rejected|Complete|Purchased|No|Yes)$/i.test(c)) ?? "",
+          price: nonEmpty.find((c) => /^\$\s*[\d,]+\.\d{2}$/.test(c)) ?? "",
+          dueDate: nonEmpty.find((c) => /^\d{2}\/\d{2}\/\d{4}$/.test(c)) ?? "",
+          selection: nonEmpty.find((c) => c.includes("SELECT OPTION") || c.length > 20) ?? "",
+          notes: "",
+        });
+      }
+    }
+
+    return { statusCount, selections };
+  }
+
+  /**
+   * Fetches allowance budget categories for a project. Parses the budget HTML
+   * from GET /budget?PR[]=<projectId> and extracts rows whose category name
+   * contains "Allowance".
+   */
+  async getAllowances(
+    projectId: string | number,
+  ): Promise<Array<{
+    id: string;
+    categoryId: string;
+    name: string;
+    budgetedAmount: number;
+    revisedAmount: string;
+    cells: string[];
+  }>> {
+    await this.ensureAuthenticated();
+
+    const response = await this.request(
+      `${this.baseUrl}/budget?PR[]=${projectId}`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+
+    if (response.status !== 200) return [];
+
+    let data: { content?: string };
+    try {
+      data = JSON.parse(response.body);
+    } catch {
+      return [];
+    }
+
+    const html = data.content ?? "";
+    const strip = (s: string): string =>
+      s.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/\s+/g, " ").trim();
+
+    const allowances: Array<{
+      id: string;
+      categoryId: string;
+      name: string;
+      budgetedAmount: number;
+      revisedAmount: string;
+      cells: string[];
+    }> = [];
+
+    // Budget rows have data-id and data-category attributes (order varies)
+    const rowRegex = /<tr[^>]*data-id="(\d+)"[^>]*data-category="(\d+)"[^>]*>([\s\S]*?)<\/tr>/g;
+    const rowRegex2 = /<tr[^>]*data-category="(\d+)"[^>]*data-id="(\d+)"[^>]*>([\s\S]*?)<\/tr>/g;
+
+    for (const re of [rowRegex, rowRegex2]) {
+      let match: RegExpExecArray | null;
+      while ((match = re.exec(html)) !== null) {
+        const id = re === rowRegex ? match[1] : match[2];
+        const categoryId = re === rowRegex ? match[2] : match[1];
+        const rowHtml = match[3];
+
+        const cells: string[] = [];
+        const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/g;
+        let cellMatch: RegExpExecArray | null;
+        while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
+          cells.push(strip(cellMatch[1]));
+        }
+
+        const name = cells[0] ?? "";
+        if (!/allowance/i.test(name)) continue;
+
+        // Avoid duplicates
+        if (allowances.some((a) => a.id === id)) continue;
+
+        const dataValue = match[0].match(/data-value="([^"]*)"/);
+        const budgetedAmount = dataValue ? Number(dataValue[1]) || 0 : 0;
+
+        // Find the revised amount (typically a $ value in the cells)
+        const amounts = cells.filter((c) => /^\$\s*[\d,]+\.\d{2}/.test(c));
+        const revisedAmount = amounts[0] ?? "";
+
+        allowances.push({ id, categoryId, name, budgetedAmount, revisedAmount, cells });
+      }
+    }
+
+    return allowances;
+  }
+
+  // ========================================================================
   // CHANGE ORDER METHODS
   // ========================================================================
 

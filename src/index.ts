@@ -48,6 +48,7 @@ import {
   operationTools,
   projectTools,
   purchaseOrderTools,
+  selectionTools,
   taskTools,
   workTrackingTools,
   type ToolDefinition,
@@ -117,6 +118,7 @@ const toolsByName: Map<string, ToolDefinition> = new Map([
   ...purchaseOrderTools.map((t) => [t.name, t] as const),
   ...workTrackingTools.map((t) => [t.name, t] as const),
   ...operationTools.map((t) => [t.name, t] as const),
+  ...selectionTools.map((t) => [t.name, t] as const),
   ...mutationTools.map((t) => [t.name, t] as const),
 ]);
 
