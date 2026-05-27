@@ -21,6 +21,9 @@
  *   - Work-tracking read tools (`list_certificates`, `list_daily_logs`,
  *     `list_weekly_reports`, `list_work_days`) are registered via
  *     `workTrackingTools` from `src/tools/work-tracking.ts` (MOS-295).
+ *   - Operations read tools (`list_rfis`, `list_services`, `list_users`,
+ *     `search_users`) are registered via `operationTools` from
+ *     `src/tools/operations.ts` (MOS-294).
  *
  * Client lifecycle: the `BuildToolsAPI` instance is lazily constructed on the
  * first tool invocation that needs it. This way, env-var configuration errors
@@ -41,6 +44,7 @@ import {
   attachmentTools,
   customerTools,
   financialTools,
+  operationTools,
   projectTools,
   purchaseOrderTools,
   taskTools,
@@ -109,6 +113,7 @@ const toolsByName: Map<string, ToolDefinition> = new Map([
   ...taskTools.map((t) => [t.name, t] as const),
   ...purchaseOrderTools.map((t) => [t.name, t] as const),
   ...workTrackingTools.map((t) => [t.name, t] as const),
+  ...operationTools.map((t) => [t.name, t] as const),
 ]);
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
