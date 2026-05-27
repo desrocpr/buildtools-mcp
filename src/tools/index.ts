@@ -1,10 +1,11 @@
 /**
- * Barrel for MCP tool modules (MOS-214, MOS-215, MOS-216).
+ * Barrel for MCP tool modules (MOS-214, MOS-215, MOS-216, MOS-295).
  *
  * Re-exports the per-domain tool registries so `src/index.ts` can register
  * all tools with a single import. As of MOS-216 (Phase 3.3) the read-only
- * MVP surface is complete; Phase 5 mutations will add additional registries
- * here.
+ * MVP surface is complete; MOS-295 adds work-tracking read tools
+ * (certificates / daily logs / weekly reports / work days). Phase 5
+ * mutations will add additional registries here.
  */
 
 export {
@@ -46,3 +47,11 @@ export {
   searchPurchaseOrdersTool,
   purchaseOrderTools,
 } from "./purchase-orders.js";
+
+export {
+  listCertificatesTool,
+  listDailyLogsTool,
+  listWeeklyReportsTool,
+  listWorkDaysTool,
+  workTrackingTools,
+} from "./work-tracking.js";
