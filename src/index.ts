@@ -42,11 +42,13 @@ import { loadConfigFromEnv } from "./client/config.js";
 import { ConfirmationStore } from "./confirm/index.js";
 import {
   attachmentTools,
+  createMutationTools,
   customerTools,
   financialTools,
   operationTools,
   projectTools,
   purchaseOrderTools,
+  selectionTools,
   taskTools,
   workTrackingTools,
   type ToolDefinition,
@@ -105,6 +107,8 @@ setInterval(() => confirmationStore.sweep(), SWEEP_INTERVAL_MS).unref();
 // Tool registry
 // ---------------------------------------------------------------------------
 
+const mutationTools = createMutationTools(() => getApi(), confirmationStore);
+
 const toolsByName: Map<string, ToolDefinition> = new Map([
   ...projectTools.map((t) => [t.name, t] as const),
   ...financialTools.map((t) => [t.name, t] as const),
@@ -114,6 +118,8 @@ const toolsByName: Map<string, ToolDefinition> = new Map([
   ...purchaseOrderTools.map((t) => [t.name, t] as const),
   ...workTrackingTools.map((t) => [t.name, t] as const),
   ...operationTools.map((t) => [t.name, t] as const),
+  ...selectionTools.map((t) => [t.name, t] as const),
+  ...mutationTools.map((t) => [t.name, t] as const),
 ]);
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
