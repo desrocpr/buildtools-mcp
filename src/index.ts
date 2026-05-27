@@ -13,6 +13,10 @@
  *     via `customerTools` from `src/tools/customers.ts`.
  *   - Attachment read tools (`list_project_attachments`) are registered via
  *     `attachmentTools` from `src/tools/attachments.ts`.
+ *   - Project mutation tools (`create_project`, `update_project`) are
+ *     registered via `buildProjectMutationTools(confirmationStore)` from
+ *     `src/tools/project-mutations.ts` (MOS-218, Phase 5.1). Each routes
+ *     through the Phase 4 (MOS-217) confirmation handshake.
  *
  * Client lifecycle: the `BuildToolsAPI` instance is lazily constructed on the
  * first tool invocation that needs it. This way, env-var configuration errors
@@ -31,6 +35,7 @@ import { loadConfigFromEnv } from "./client/config.js";
 import { ConfirmationStore } from "./confirm/index.js";
 import {
   attachmentTools,
+  buildProjectMutationTools,
   customerTools,
   financialTools,
   projectTools,
@@ -90,11 +95,21 @@ setInterval(() => confirmationStore.sweep(), SWEEP_INTERVAL_MS).unref();
 // Tool registry
 // ---------------------------------------------------------------------------
 
+/**
+ * Project mutation tools (MOS-218, Phase 5.1): `create_project` +
+ * `update_project`. Built via a factory that closes over the boot-time
+ * `confirmationStore` so the two-step confirmation handshake shares state
+ * with future mutation tools (MOS-219). The factory pattern avoids changing
+ * `ToolDefinition.handler`'s signature for the existing read tools.
+ */
+const projectMutationTools = buildProjectMutationTools(confirmationStore);
+
 const toolsByName: Map<string, ToolDefinition> = new Map([
   ...projectTools.map((t) => [t.name, t] as const),
   ...financialTools.map((t) => [t.name, t] as const),
   ...customerTools.map((t) => [t.name, t] as const),
   ...attachmentTools.map((t) => [t.name, t] as const),
+  ...projectMutationTools.map((t) => [t.name, t] as const),
 ]);
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({

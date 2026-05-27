@@ -1,12 +1,15 @@
 # buildtools-mcp — Tool Reference
 
 This MCP server exposes a set of tools that Claude Desktop can invoke against
-the BuildTools (`moss.buildtools.app`) tenant. As of Phase 3.3 (MOS-216) the
-read-only MVP is complete: the project surface (MOS-214), the financial
-surface (MOS-215 — change orders + financial statements + unbilled-CO sweep),
-and now the customer + attachment surface (MOS-216) are all live. Mutations
-(Phase 5), the confirmation framework (Phase 4), HTTP/SSE transport (Phase 6),
-and install polish (Phase 7) follow as separate issues.
+the BuildTools (`moss.buildtools.app`) tenant. As of Phase 5.1 (MOS-218) the
+read-only MVP and the first mutation tools are live: the project read surface
+(MOS-214), the financial read surface (MOS-215 — change orders + financial
+statements + unbilled-CO sweep), the customer + attachment read surface
+(MOS-216), and the project mutation surface (MOS-218 — `create_project` +
+`update_project`, both gated by the Phase 4 / MOS-217 confirmation framework).
+Attachment + change-order mutations (Phase 5.2 / MOS-219), HTTP/SSE transport
+(Phase 6 / MOS-220), and install polish (Phase 7 / MOS-221) follow as separate
+issues.
 
 All tool responses are returned as Markdown text. Claude Desktop renders the
 response inline, so headers, bullet lists, and tables show up correctly.
@@ -350,12 +353,121 @@ Empty-result responses are returned as Markdown ("No attachments found for
 project #…"), not errors. This tool is strictly read-only — upload / delete
 actions are Phase 5 (MOS-219).
 
+## `create_project`
+
+**Purpose**: create a new BuildTools project. Two-step: the first call returns
+a confirmation prompt with a single-use `confirmation_id`; re-invoke with that
+ID to execute the mutation. Routed through the Phase 4 confirmation framework
+(see *Mutation confirmation pattern* below).
+
+**Inputs**:
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `name` | string (≥ 1 char) | yes | Project name (visible in BuildTools UI). |
+| `customer_id` | number | yes | Existing customer ID. Use `list_customers` to find. Wired through to BuildTools as `Client[ids]`. |
+| `status` | `"Active"` \| `"Complete"` \| `"Lost"` | no | Initial project status. When omitted, the BuildTools client default applies. |
+| `address` | string | no | Street address. |
+| `city` | string | no |  |
+| `state` | string | no | 2-letter state code (e.g. `VA`). |
+| `zip` | string | no |  |
+| `country` | string | no | Country code (e.g. `US`). |
+| `description` | string | no |  |
+| `project_manager` | number \| string | no | BuildTools employee ID for the project manager. Most tenants require one server-side. |
+| `confirmation_id` | string | no | Pass on the second invocation to execute the mutation. Single-use; expires after 5 minutes. |
+
+**`contract_value` and `project_type` are intentionally NOT exposed**: the
+underlying `BuildToolsAPI.createProject` does not accept either. Contract
+value is managed via the financial-statement surface; project type has no
+documented wire field on the project-save endpoint.
+
+**Sample prompt**: "Create a new project for John Smith — Kitchen remodel, customer 300001."
+
+**Sample 1st-call output** (confirmation prompt — no mutation runs):
+
+```markdown
+⚠️ This will modify BuildTools production data via `create_project`.
+
+Create a new BuildTools project named "Kitchen remodel" for customer #300001
+- Project manager: 42
+
+To proceed, re-invoke `create_project` with confirmation_id: "abc-123-…". This confirmation expires in 5 minutes.
+```
+
+**Sample 2nd-call output** (with the `confirmation_id` from the 1st call):
+
+```markdown
+✅ Created project #1248: Kitchen remodel (customer #300001).
+```
+
+If BuildTools rejects the create (e.g. validation error) the response is
+Markdown with `isError: true` and includes the server's error payload; no
+raw stack trace is leaked.
+
+## `update_project`
+
+**Purpose**: update fields on an existing BuildTools project. Two-step
+confirmation required. The first call fetches the existing project so the
+confirmation prompt can render a clear `old → new` diff per field. The
+mutation only runs after the second call with the matching `confirmation_id`.
+
+**Inputs**:
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `project_id` | number | yes | BuildTools project ID to update. |
+| `name` | string (≥ 1 char) | no | New name. |
+| `status` | `"Active"` \| `"Complete"` \| `"Lost"` | no | New status. `"On Hold"` is not yet supported — no documented wire code (refining is a MOS-222 concern). |
+| `address` | string | no |  |
+| `city` | string | no |  |
+| `state` | string | no |  |
+| `zip` | string | no |  |
+| `country` | string | no | Country code. |
+| `description` | string | no |  |
+| `confirmation_id` | string | no | Pass on the second invocation to execute. Single-use; expires after 5 minutes. |
+
+`contract_value` is intentionally NOT exposed (see `create_project` above).
+
+**No-op short-circuit**: calling `update_project` with `project_id` only — no
+diff fields — returns a Markdown "No changes to apply" message WITHOUT minting
+a confirmation entry and WITHOUT calling the BuildTools API.
+
+**Project-manager requirement**: BuildTools' save endpoint requires a project
+manager on every save. The tool reads the existing project's project manager
+on the first call and re-uses it on save, so the user does NOT need to supply
+one. If the existing project has no project manager on record, the first call
+returns a clear error rather than minting a confirmation.
+
+**Sample prompt**: "Change project 100002's status to Complete."
+
+**Sample 1st-call output** (confirmation prompt — no mutation runs):
+
+```markdown
+⚠️ This will modify BuildTools production data via `update_project`.
+
+Change project #100002's status from Active → Complete
+
+To proceed, re-invoke `update_project` with confirmation_id: "def-456-…". This confirmation expires in 5 minutes.
+```
+
+**Sample 2nd-call output** (with the `confirmation_id` from the 1st call):
+
+```markdown
+✅ Updated project #100002.
+
+Change project #100002's status from Active → Complete
+```
+
+If BuildTools rejects the update or throws, the response is Markdown with
+`isError: true` and the server's error payload; no raw stack trace is leaked.
+
 ## Mutation confirmation pattern
 
-Phase 4 (MOS-217) introduces an in-memory confirmation framework that gates
-every Phase 5 mutation tool behind a two-step handshake. **No mutation tools
-ship in Phase 4** — this section documents the protocol so Claude Desktop
-(and any other MCP client) knows how to drive a write tool once Phase 5 lands.
+Phase 4 (MOS-217) introduced an in-memory confirmation framework that gates
+every Phase 5 mutation tool behind a two-step handshake. Phase 5.1 (MOS-218)
+ships the first two mutation tools (`create_project` + `update_project`,
+documented above) — this section documents the shared protocol so Claude
+Desktop (and any other MCP client) knows how to drive any write tool.
 
 **The protocol.** Each mutation tool has two invocation modes:
 

@@ -34,3 +34,9 @@ export {
   listProjectAttachmentsTool,
   attachmentTools,
 } from "./attachments.js";
+
+export {
+  buildProjectMutationTools,
+  type CreateProjectInput,
+  type UpdateProjectInput,
+} from "./project-mutations.js";
