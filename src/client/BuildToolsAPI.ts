@@ -670,31 +670,24 @@ export class BuildToolsAPI {
   }
 
   /**
-   * Source L306–325. NOTE: uses the form endpoint `/projects/${id}/form`
-   * (not `/api/projects/${id}`), per source.
+   * Fetches a single project by ID. BuildTools does not expose a JSON detail
+   * endpoint — `/projects/:id/form` returns 404. Instead we pull from the
+   * projects datatable and match by the `id` field client-side.
    */
   async getProject<T = unknown>(projectId: string | number): Promise<T | null> {
-    await this.ensureAuthenticated();
+    const numericId = Number(projectId);
+    const result = await this.datatable<{
+      data?: Array<Record<string, unknown>>;
+    }>("projects", { length: 5000 });
 
-    const response = await this.request(
-      `${this.baseUrl}/projects/${projectId}/form`,
-      {
-        headers: {
-          Accept: "application/json",
-          "X-Requested-With": "XMLHttpRequest",
-        },
-      },
-      false,
+    const rows = result?.data ?? [];
+    const match = rows.find(
+      (r) =>
+        r.id === numericId ||
+        r.id === String(numericId) ||
+        r.DT_RowId === `row_${numericId}`,
     );
-
-    if (response.status === 200) {
-      try {
-        return JSON.parse(response.body) as T;
-      } catch {
-        return null;
-      }
-    }
-    return null;
+    return (match as T) ?? null;
   }
 
   /** Source L333–365. */
@@ -755,39 +748,28 @@ export class BuildToolsAPI {
   }
 
   /**
-   * Phase 3.3 (MOS-216). Fetches a single customer/company detail payload
-   * from `/companies/:id/form`, mirroring the `/projects/:id/form` /
-   * `/change-orders/:id/form` form-endpoint convention used by other read
-   * methods. The source `api-client.js` does not expose a single-customer
-   * detail method, so the form path is the natural read surface. **Path is
-   * inferred and pending live verification** (MOS-222 smoke).
-   *
-   * Returns the parsed JSON body on 200, `null` on non-200 or non-JSON body.
+   * Fetches a single customer/company by ID. BuildTools does not expose a JSON
+   * detail endpoint — `/companies/:id/form` returns 404. Instead we pull from
+   * the companies datatable and match by `DT_RowId` client-side (companies use
+   * `row_${id}` format; the raw `id` field is not in the datatable row).
    */
   async getCustomer<T = unknown>(
     customerId: string | number,
   ): Promise<T | null> {
-    await this.ensureAuthenticated();
+    const numericId = Number(customerId);
+    const result = await this.datatable<{
+      data?: Array<Record<string, unknown>>;
+    }>("companies", { length: 5000 });
 
-    const response = await this.request(
-      `${this.baseUrl}/companies/${customerId}/form`,
-      {
-        headers: {
-          Accept: "application/json",
-          "X-Requested-With": "XMLHttpRequest",
-        },
-      },
-      false,
+    const rows = result?.data ?? [];
+    const rowIdKey = `row_${numericId}`;
+    const match = rows.find(
+      (r) =>
+        r.DT_RowId === rowIdKey ||
+        r.id === numericId ||
+        r.id === String(numericId),
     );
-
-    if (response.status === 200) {
-      try {
-        return JSON.parse(response.body) as T;
-      } catch {
-        return null;
-      }
-    }
-    return null;
+    return (match as T) ?? null;
   }
 
   /**
@@ -916,39 +898,28 @@ export class BuildToolsAPI {
   }
 
   /**
-   * Phase 3.2 (MOS-215). Fetches a single change-order's detail payload from
-   * the form endpoint, mirroring `getProject()`'s `/projects/${id}/form`
-   * convention. No documented "GET /change-orders/:id" detail endpoint exists
-   * in source `api-client.js`; the form path is the natural read surface and
-   * is consistent with how change-order edit/save flows load. **Path is
-   * inferred and pending live verification** (MOS-222 smoke).
-   *
-   * Returns the parsed JSON body on 200, `null` on non-200 or non-JSON body.
+   * Fetches a single change order by ID. BuildTools does not expose a JSON
+   * detail endpoint — `/change-orders/:id/form` returns 404. Instead we pull
+   * from the change-orders datatable and match by the `info` field (which
+   * holds the CO's numeric ID) client-side.
    */
   async getChangeOrder<T = unknown>(
     changeOrderId: string | number,
   ): Promise<T | null> {
-    await this.ensureAuthenticated();
+    const numericId = Number(changeOrderId);
+    const result = await this.datatable<{
+      data?: Array<Record<string, unknown>>;
+    }>("change-orders", { length: 10000 });
 
-    const response = await this.request(
-      `${this.baseUrl}/change-orders/${changeOrderId}/form`,
-      {
-        headers: {
-          Accept: "application/json",
-          "X-Requested-With": "XMLHttpRequest",
-        },
-      },
-      false,
+    const rows = result?.data ?? [];
+    const match = rows.find(
+      (r) =>
+        r.info === numericId ||
+        r.info === String(numericId) ||
+        r.id === numericId ||
+        r.DT_RowId === `row_${numericId}`,
     );
-
-    if (response.status === 200) {
-      try {
-        return JSON.parse(response.body) as T;
-      } catch {
-        return null;
-      }
-    }
-    return null;
+    return (match as T) ?? null;
   }
 
   /**

@@ -434,15 +434,18 @@ describe("searchProjects() — fixture-driven", () => {
 // ---------------------------------------------------------------------------
 
 describe("getProject() — project-detail.json", () => {
-  it("returns the parsed JSON body verbatim", async () => {
+  it("finds the project by ID from a datatable envelope", async () => {
+    const dtEnvelope = {
+      data: [{ ...projectDetailFixture, DT_RowId: `row_${projectDetailFixture.id}` }],
+      recordsTotal: 1,
+      recordsFiltered: 1,
+    };
     const { api, recorded } = authedApi([
-      { status: 200, body: JSON.stringify(projectDetailFixture) },
+      { status: 200, body: JSON.stringify(dtEnvelope) },
     ]);
     const out = await api.getProject(100002);
-    expect(out).toEqual(projectDetailFixture);
-    expect(recorded[0].url).toBe(
-      "https://moss.buildtools.app/projects/100002/form",
-    );
+    expect(out).toMatchObject({ id: 100002, name: "Jones Addition" });
+    expect(recorded[0].url).toContain("projects/datatable");
   });
 
   it("ProjectSchema.parse() validates the project-detail fixture", () => {
@@ -497,15 +500,18 @@ describe("getCompanies() — customers.json", () => {
 // ---------------------------------------------------------------------------
 
 describe("getCustomer() — customer-detail.json", () => {
-  it("returns the parsed JSON body verbatim from /companies/:id/form", async () => {
+  it("finds the customer by DT_RowId from a datatable envelope", async () => {
+    const dtEnvelope = {
+      data: [{ ...customerDetailFixture, DT_RowId: `row_${customerDetailFixture.id}` }],
+      recordsTotal: 1,
+      recordsFiltered: 1,
+    };
     const { api, recorded } = authedApi([
-      { status: 200, body: JSON.stringify(customerDetailFixture) },
+      { status: 200, body: JSON.stringify(dtEnvelope) },
     ]);
     const out = await api.getCustomer(300001);
-    expect(out).toEqual(customerDetailFixture);
-    expect(recorded[0].url).toBe(
-      "https://moss.buildtools.app/companies/300001/form",
-    );
+    expect(out).toMatchObject({ id: 300001, name: "Acme Subcontractors LLC" });
+    expect(recorded[0].url).toContain("companies/datatable");
   });
 
   it("CustomerDetailSchema.parse() validates the customer-detail fixture", () => {
