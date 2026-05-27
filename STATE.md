@@ -13,6 +13,12 @@ Tools shipped:
 
 Installation: see docs/INSTALL.md.
 
-## Phase 4-7 (Mutations + HTTP/SSE) — NOT STARTED
+## Phase 4 (Confirmation framework) — DONE (MOS-217)
+
+In-memory `ConfirmationStore` + `requiresConfirmation` helper live under
+`src/confirm/`. Wired into `src/index.ts` with an `.unref()`ed sweep timer.
+No mutation tools yet — Phase 5 (MOS-218 / MOS-219) will register them.
+
+## Phase 5-7 (Mutations + HTTP/SSE + install polish) — NOT STARTED
 
 Filed as separate Linear issues, deferred until Phase 1-3 is validated in production.

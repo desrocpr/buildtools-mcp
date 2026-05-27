@@ -28,6 +28,7 @@ import {
 
 import { BuildToolsAPI } from "./client/BuildToolsAPI.js";
 import { loadConfigFromEnv } from "./client/config.js";
+import { ConfirmationStore } from "./confirm/index.js";
 import {
   attachmentTools,
   customerTools,
@@ -64,6 +65,26 @@ function getApi(): BuildToolsAPI {
   });
   return apiSingleton;
 }
+
+// ---------------------------------------------------------------------------
+// Confirmation framework (MOS-217, Phase 4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Single in-process `ConfirmationStore` that Phase 5 mutation tools (MOS-218 /
+ * MOS-219) will read/write to. Wired here at boot so the periodic `sweep()`
+ * timer can be attached and `.unref()`ed once — re-instantiating per-request
+ * would leak entries.
+ *
+ * The interval handle is `.unref()`ed so it does not pin the stdio process:
+ * Claude Desktop closing the transport must still let the process exit
+ * cleanly. The sweep cadence matches the default TTL (5 min); the worst case
+ * is an expired entry lingering up to one sweep cycle, which is fine — a
+ * second `consume()` call will still return `null` on its own expiry check.
+ */
+const confirmationStore = new ConfirmationStore();
+const SWEEP_INTERVAL_MS = confirmationStore.ttlMilliseconds;
+setInterval(() => confirmationStore.sweep(), SWEEP_INTERVAL_MS).unref();
 
 // ---------------------------------------------------------------------------
 // Tool registry
