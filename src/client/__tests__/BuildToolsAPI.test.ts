@@ -654,8 +654,8 @@ describe("getFinancialStatement() — MOS-215", () => {
 });
 
 describe("findUnbilledChangeOrders() — MOS-215", () => {
-  const makeFsFormHtml = (currentAmount: number): string =>
-    `<input name="budgetOverviewTotals" type="hidden" value="{ &quot;financial_current_amount&quot;: ${currentAmount} }">`;
+  const makeFsFormHtml = (totalBilled: number): string =>
+    `<input name="budgetOverviewTotals" type="hidden" value="{ &quot;financial_amount&quot;: ${totalBilled}, &quot;financial_current_amount&quot;: 0 }">`;
 
   it("returns projects where budget_revised > requested_amount", async () => {
     const projectsPayload = {

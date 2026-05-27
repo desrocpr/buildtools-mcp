@@ -1428,11 +1428,15 @@ export class BuildToolsAPI {
       if (budgetRevised <= 0) continue;
 
       // Fetch the FS form HTML and parse budgetOverviewTotals.
+      // financial_amount = sum of all FS amounts (the total requested billing).
+      // financial_current_amount = amount for the NEW statement being created (always 0 on a blank form).
       let requestedAmount = 0;
       try {
         const fsData = await this.getFinancialStatement<Record<string, unknown>>(projectId as number);
-        if (fsData?.financial_current_amount !== undefined) {
-          requestedAmount = parseCurrency(fsData.financial_current_amount);
+        if (fsData?.financial_amount !== undefined) {
+          requestedAmount = parseCurrency(fsData.financial_amount);
+        } else if (fsData?.financial_past_amount !== undefined) {
+          requestedAmount = parseCurrency(fsData.financial_past_amount);
         }
       } catch {
         // If FS form fails, assume 0 requested (conservative — will surface the project).
