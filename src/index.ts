@@ -2,7 +2,7 @@
 /**
  * buildtools-mcp stdio entrypoint.
  *
- * Tool registration (MOS-214, MOS-215, MOS-216 — Phases 3.1 + 3.2 + 3.3):
+ * Tool registration (MOS-214, MOS-215, MOS-216, MOS-293 — Phases 3.1 + 3.2 + 3.3 + tasks):
  *   - `ping` is kept for diagnostics (Phase 1.2 transport smoke).
  *   - Project read tools (`list_projects`, `get_project`, `search_projects`)
  *     are registered via `projectTools` from `src/tools/projects.ts`.
@@ -13,6 +13,8 @@
  *     via `customerTools` from `src/tools/customers.ts`.
  *   - Attachment read tools (`list_project_attachments`) are registered via
  *     `attachmentTools` from `src/tools/attachments.ts`.
+ *   - Task read tools (`list_tasks`, `search_tasks`) are registered via
+ *     `taskTools` from `src/tools/tasks.ts`.
  *
  * Client lifecycle: the `BuildToolsAPI` instance is lazily constructed on the
  * first tool invocation that needs it. This way, env-var configuration errors
@@ -34,6 +36,7 @@ import {
   customerTools,
   financialTools,
   projectTools,
+  taskTools,
   type ToolDefinition,
 } from "./tools/index.js";
 
@@ -95,6 +98,7 @@ const toolsByName: Map<string, ToolDefinition> = new Map([
   ...financialTools.map((t) => [t.name, t] as const),
   ...customerTools.map((t) => [t.name, t] as const),
   ...attachmentTools.map((t) => [t.name, t] as const),
+  ...taskTools.map((t) => [t.name, t] as const),
 ]);
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({

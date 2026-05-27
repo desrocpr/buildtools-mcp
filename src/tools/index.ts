@@ -34,3 +34,9 @@ export {
   listProjectAttachmentsTool,
   attachmentTools,
 } from "./attachments.js";
+
+export {
+  listTasksTool,
+  searchTasksTool,
+  taskTools,
+} from "./tasks.js";
