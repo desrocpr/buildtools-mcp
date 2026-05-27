@@ -350,6 +350,59 @@ export function createMutationTools(
     },
   );
 
+  // -- create_selection -----------------------------------------------------
+  const CreateSelectionSchema = z.object({
+    project_id: z.number().describe("BuildTools project ID."),
+    name: z.string().describe("Selection item name (e.g. 'Countertop', 'Faucet')."),
+    budget_category_id: z.number().describe("Budget category ID. Use list_selection_categories to find valid IDs."),
+    status: z.number().optional().describe("1=Open (default), 2=Selected, 3=Approved, 4=Rejected, 5=Complete."),
+    location_room_id: z.number().optional().describe("Location/room ID. Default: 2 (Non-Specified)."),
+    notes: z.string().optional(),
+    due_date: z.string().optional().describe("MM/DD/YYYY format."),
+    confirmation_id: z.string().optional(),
+  });
+  type CreateSelectionArgs = z.infer<typeof CreateSelectionSchema>;
+
+  const createSelectionConfirmed = requiresConfirmation<CreateSelectionArgs>(
+    "create_selection",
+    (a) => `Create selection **"${a.name}"** on project #${a.project_id} (category #${a.budget_category_id}).`,
+    async (a) => {
+      try {
+        const result = await getApi().createSelection({
+          projectId: a.project_id,
+          name: a.name,
+          budgetCategoryId: a.budget_category_id,
+          status: a.status,
+          locationRoomId: a.location_room_id,
+          notes: a.notes,
+          dueDate: a.due_date,
+        });
+        if (result.success) return markdown(`Selection **#${result.selectionId}** created successfully.`);
+        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+      } catch (err) { return formatError(err, "create_selection"); }
+    },
+  );
+
+  // -- delete_selection -----------------------------------------------------
+  const DeleteSelectionSchema = z.object({
+    selection_ids: z.array(z.number()).min(1).describe("Array of selection IDs to delete."),
+    project_id: z.number().describe("BuildTools project ID (required for session scoping)."),
+    confirmation_id: z.string().optional(),
+  });
+  type DeleteSelectionArgs = z.infer<typeof DeleteSelectionSchema>;
+
+  const deleteSelectionConfirmed = requiresConfirmation<DeleteSelectionArgs>(
+    "delete_selection",
+    (a) => `Delete **${a.selection_ids.length}** selection(s) (IDs: ${a.selection_ids.join(", ")}) from project #${a.project_id}.`,
+    async (a) => {
+      try {
+        const result = await getApi().deleteSelection(a.selection_ids, a.project_id);
+        if (result.success) return markdown(`Deleted ${result.succeeded} selection(s) successfully.`);
+        return errorMarkdown(`Delete failed: succeeded=${result.succeeded}, failed=${result.failed}`);
+      } catch (err) { return formatError(err, "delete_selection"); }
+    },
+  );
+
   // -- Build ToolDefinition array ------------------------------------------
 
   function makeTool(
@@ -424,6 +477,18 @@ export function createMutationTools(
       "Create a service request on a project. Requires confirmation.",
       CreateServiceSchema,
       createServiceConfirmed,
+    ),
+    makeTool(
+      "create_selection",
+      "Create a material/finish selection on a project. Requires a budget_category_id (use list_selection_categories to find valid IDs). Requires confirmation.",
+      CreateSelectionSchema,
+      createSelectionConfirmed,
+    ),
+    makeTool(
+      "delete_selection",
+      "Delete one or more selections from a project. Requires confirmation. This is destructive.",
+      DeleteSelectionSchema,
+      deleteSelectionConfirmed,
     ),
   ];
 }

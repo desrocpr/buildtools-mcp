@@ -1025,6 +1025,162 @@ export class BuildToolsAPI {
     return allowances;
   }
 
+  /**
+   * Creates a selection on a project. Requires CSRF from the form.
+   * Verified working against live BuildTools.
+   *
+   * POST /selections/save?PR[]=<projectId>
+   * Response: { result: "success", id: <number>, message: "..." }
+   */
+  async createSelection(selectionData: {
+    projectId: string | number;
+    name: string;
+    budgetCategoryId: string | number;
+    status?: string | number;
+    locationRoomId?: string | number;
+    notes?: string;
+    dueDate?: string;
+  }): Promise<{ success: boolean; selectionId?: number; errors?: unknown }> {
+    await this.ensureAuthenticated();
+    if (!selectionData.projectId) throw new BuildToolsServerError("projectId is required");
+    if (!selectionData.name) throw new BuildToolsServerError("name is required");
+    if (!selectionData.budgetCategoryId) throw new BuildToolsServerError("budgetCategoryId is required");
+
+    const formResp = await this.request(
+      `${this.baseUrl}/selections/form?PR[]=${selectionData.projectId}`,
+      { headers: { Accept: "text/html", "X-Requested-With": "XMLHttpRequest" } },
+      false,
+    );
+    const csrf = (formResp.body.match(/name="_token"[^>]*value="([^"]+)"/) ?? [])[1];
+    if (!csrf) return { success: false, errors: "Could not harvest CSRF token from selections form" };
+
+    const fd = new URLSearchParams();
+    fd.append("_token", csrf);
+    fd.append("Selection[name]", selectionData.name);
+    fd.append("Selection[project_id]", String(selectionData.projectId));
+    fd.append("Selection[budget_category_id]", String(selectionData.budgetCategoryId));
+    fd.append("Selection[status]", String(selectionData.status ?? 1));
+    fd.append("Selection[locations_room_id][]", String(selectionData.locationRoomId ?? 2));
+    if (selectionData.notes) fd.append("Selection[notes]", selectionData.notes);
+    if (selectionData.dueDate) fd.append("Selection[due_date]", selectionData.dueDate);
+
+    const resp = await this.request(
+      `${this.baseUrl}/selections/save?PR[]=${selectionData.projectId}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-Requested-With": "XMLHttpRequest",
+          Accept: "application/json",
+          "X-CSRF-TOKEN": csrf,
+          "X-XSRF-TOKEN": this.xsrfToken ?? "",
+        },
+        body: fd.toString(),
+      },
+      false,
+    );
+
+    try {
+      const result = JSON.parse(resp.body) as {
+        result?: string;
+        id?: number;
+        message?: string | string[];
+      };
+      if (result.result === "success") {
+        return { success: true, selectionId: result.id };
+      }
+      return { success: false, errors: result.message };
+    } catch {
+      return { success: false, errors: `HTTP ${resp.status}: ${resp.body.slice(0, 200)}` };
+    }
+  }
+
+  /**
+   * Deletes one or more selections from a project.
+   * Verified working against live BuildTools.
+   *
+   * POST /selections/delete?PR[]=<projectId> with ids[]=<id>
+   * Response: { r: 1, s: <succeeded>, f: <failed> }
+   */
+  async deleteSelection(
+    selectionIds: number | number[],
+    projectId: string | number,
+  ): Promise<{ success: boolean; succeeded: number; failed: number }> {
+    await this.ensureAuthenticated();
+    if (!projectId) throw new BuildToolsServerError("projectId is required");
+    const ids = Array.isArray(selectionIds) ? selectionIds : [selectionIds];
+    if (!ids.length) throw new BuildToolsServerError("selectionIds is required");
+
+    const formResp = await this.request(
+      `${this.baseUrl}/selections/form?PR[]=${projectId}`,
+      { headers: { Accept: "text/html", "X-Requested-With": "XMLHttpRequest" } },
+      false,
+    );
+    const csrf = (formResp.body.match(/name="_token"[^>]*value="([^"]+)"/) ?? [])[1];
+    if (!csrf) return { success: false, succeeded: 0, failed: ids.length };
+
+    const fd = new URLSearchParams();
+    fd.append("_token", csrf);
+    for (const id of ids) fd.append("ids[]", String(id));
+
+    const resp = await this.request(
+      `${this.baseUrl}/selections/delete?PR[]=${projectId}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-Requested-With": "XMLHttpRequest",
+          Accept: "application/json",
+          "X-CSRF-TOKEN": csrf,
+          "X-XSRF-TOKEN": this.xsrfToken ?? "",
+        },
+        body: fd.toString(),
+      },
+      false,
+    );
+
+    try {
+      const result = JSON.parse(resp.body) as { r?: number; s?: number; f?: number };
+      return {
+        success: result.r === 1 && (result.s ?? 0) > 0,
+        succeeded: result.s ?? 0,
+        failed: result.f ?? 0,
+      };
+    } catch {
+      return { success: false, succeeded: 0, failed: ids.length };
+    }
+  }
+
+  /**
+   * Returns the available budget categories for the selections form on a project.
+   * Parses the bcSelectProject select element from the form HTML.
+   */
+  async getSelectionBudgetCategories(
+    projectId: string | number,
+  ): Promise<Array<{ id: string; name: string }>> {
+    await this.ensureAuthenticated();
+
+    const formResp = await this.request(
+      `${this.baseUrl}/selections/form?PR[]=${projectId}`,
+      { headers: { Accept: "text/html", "X-Requested-With": "XMLHttpRequest" } },
+      false,
+    );
+    if (formResp.status !== 200) return [];
+
+    const html = formResp.body;
+    const selectMatch = html.match(/id="bcSelectProject"[\s\S]*?<\/select>/);
+    if (!selectMatch) return [];
+
+    const categories: Array<{ id: string; name: string }> = [];
+    const optRegex = /<option[^>]*value="(\d+)"[^>]*>([^<]+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = optRegex.exec(selectMatch[0])) !== null) {
+      const name = m[2].replace(/&nbsp;/g, "").replace(/&amp;/g, "&").trim();
+      if (name) categories.push({ id: m[1], name });
+    }
+    return categories;
+  }
+
   // ========================================================================
   // CHANGE ORDER METHODS
   // ========================================================================
