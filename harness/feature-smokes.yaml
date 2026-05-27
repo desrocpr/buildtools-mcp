@@ -1,0 +1,27 @@
+# harness/feature-smokes.yaml
+# Maps feature names to smoke test invocations.
+# Orchestrator runs these before opening `feature/<name> → main` promotion PRs.
+# Each active feature branch MUST have an entry here BEFORE the orchestrator
+# will auto-promote it.
+
+buildtools-read-tools:
+  command: npm test -- --grep "read-tools"
+  timeout_sec: 120
+  env: {}
+  notes: |
+    Non-destructive. Verifies all new read-tool registries export the correct
+    tool names, each tool has a valid JSON Schema, and handler unit tests pass.
+    No live BuildTools calls — purely fixture/mock based.
+
+buildtools-mutations:
+  command: BUILDTOOLS_LIVE=1 npm test -- tests/integration
+  timeout_sec: 300
+  env:
+    BUILDTOOLS_USERNAME: ${BUILDTOOLS_USERNAME}
+    BUILDTOOLS_PASSWORD: ${BUILDTOOLS_PASSWORD}
+  notes: |
+    Hits live BuildTools tenant (moss.buildtools.app). Read-only verification
+    for reads; write-then-rollback for mutations (e.g., create a Templates-status
+    project then verify it appears in the datatable). Mutation tests MUST use
+    status=1 (Templates) to avoid polluting reporting. Financial statement tests
+    should create-then-delete to clean up.
