@@ -923,16 +923,15 @@ export class BuildToolsAPI {
   }
 
   /**
-   * Phase 3.2 (MOS-215). Reads a project's financial-statement summary via
-   * the same form endpoint used by `createFinancialStatementWithAmount`
-   * (source L1303). The financial-statements DataTable is documented as
-   * broken (per `~/code/buildtools/find-unbilled-cos.js` notes), so the form
-   * endpoint is the canonical read surface.
+   * Reads a project's financial overview by parsing the FS form HTML.
    *
-   * Returns the parsed JSON body on 200, `null` on non-200 or non-JSON body.
-   * The shape is left to the caller — BuildTools' form payload carries many
-   * fields beyond the documented `FinancialStatementSchema` projection
-   * (budget overview totals, items, approvals, payments, etc.).
+   * The /financial/statements/form?PR[]=<id> endpoint returns HTML (not JSON).
+   * The key data lives in a hidden input named `budgetOverviewTotals` whose
+   * value is an HTML-encoded JSON blob. This matches the pattern used by
+   * createFinancialStatementWithAmount in api-client.js:737-768.
+   *
+   * Returns a structured object with budget totals extracted from the form,
+   * or null on non-200.
    */
   async getFinancialStatement<T = unknown>(
     projectId: string | number,
@@ -943,49 +942,71 @@ export class BuildToolsAPI {
       `${this.baseUrl}/financial/statements/form?PR[]=${projectId}`,
       {
         headers: {
-          Accept: "application/json",
+          Accept: "text/html",
           "X-Requested-With": "XMLHttpRequest",
         },
       },
       false,
     );
 
-    if (response.status === 200) {
-      try {
-        return JSON.parse(response.body) as T;
-      } catch {
-        return null;
-      }
+    if (response.status !== 200) return null;
+
+    const html = response.body;
+    const grab = (re: RegExp): string | null => {
+      const m = html.match(re);
+      return m ? m[1] : null;
+    };
+
+    const decodeHtmlEntities = (s: string): string =>
+      s
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&#039;/g, "'");
+
+    const botRaw = grab(/name="budgetOverviewTotals"[^>]*value="([^"]+)"/);
+    if (!botRaw) return null;
+
+    let budgetOverviewTotals: Record<string, unknown>;
+    try {
+      budgetOverviewTotals = JSON.parse(decodeHtmlEntities(botRaw));
+    } catch {
+      return null;
     }
-    return null;
+
+    const result: Record<string, unknown> = {
+      project_id: projectId,
+      budgetOverviewTotals,
+      ...budgetOverviewTotals,
+    };
+
+    const nameMatch = grab(/name="FinancialStatement\[name\]"[^>]*value="([^"]*)"/);
+    if (nameMatch) result.name = decodeHtmlEntities(nameMatch);
+
+    const statusMatch = grab(/name="FinancialStatement\[status\]"[^>]*value="([^"]*)"/);
+    if (statusMatch) result.status = statusMatch;
+
+    return result as T;
   }
 
   /**
-   * Phase 3.2 (MOS-215). HTTP-only heuristic for "approved but not yet billed"
-   * change orders across all projects. Composes `getChangeOrders()` and
-   * applies the documented heuristic client-side because the reference
-   * implementation (`~/code/buildtools/find-unbilled-cos.js`) hits raw MySQL
-   * — not portable to MCP.
+   * Project-level unbilled change order analysis. Matches the logic in the
+   * reference implementation (find-unbilled-cos.js:39-71):
    *
-   * Heuristic:
-   *   1. Pull change orders from the datatable (page-size capped at 500 to
-   *      stay inside BuildTools' DataTable response envelope).
-   *   2. Treat any row with `approved_number` set OR `email_status_label`
-   *      starting with `"Approved"` OR `status` === 3 (the value used by
-   *      the reference SQL impl) as approved.
-   *   3. Exclude any row that already references an invoice / financial
-   *      statement (best-guess: `invoiced_amount` is set and non-zero, or
-   *      `relations` mentions a statement number). The current fixtures do
-   *      not surface a definitive "billed?" flag — see the inline comment.
-   *   4. Apply `min_amount` against the numeric value parsed from `total`
-   *      (which the source emits as e.g. `"$ 7,500.00"`).
-   *   5. Apply `older_than_days` against `created_at` parsed as MM/DD/YYYY
-   *      (BuildTools' canonical date format). The change-order row does not
-   *      expose a dedicated "approved at" timestamp; `created_at` is the
-   *      documented proxy used by the reference impl.
+   *   unbilled_gap = budget_revised - requested_amount
    *
-   * Returns the matching rows along with a parsed numeric `total_value` for
-   * each (downstream tool renders the currency-formatted sum).
+   * Where budget_revised = budget_total + approved_co_total (from the projects
+   * datatable) and requested_amount = sum of financial statement amounts (from
+   * the FS form's budgetOverviewTotals).
+   *
+   * The reference uses raw MySQL. We replicate it over HTTP:
+   *   1. Get active projects (status 5-8) from the projects datatable
+   *   2. Filter to projects with change_orders_approved > 0
+   *   3. For each, fetch the FS form to parse budgetOverviewTotals
+   *   4. Compute the gap; return projects where gap >= 0.01
+   *
+   * Returns project-level rows (not individual COs).
    */
   async findUnbilledChangeOrders(
     filters: { min_amount?: number; older_than_days?: number } = {},
@@ -998,10 +1019,16 @@ export class BuildToolsAPI {
   > {
     await this.ensureAuthenticated();
 
-    // Step 1: Get active projects (status 5-8: Nexus, Omega, Invicta, Alpha).
-    // The reference implementation (find-unbilled-cos.js) filters to these
-    // statuses — non-active projects should never appear in the results.
-    const activeStatuses = new Set([5, 6, 7, 8]);
+    const parseCurrency = (v: unknown): number => {
+      if (typeof v === "number") return v;
+      if (typeof v === "string" && v !== "-" && v.trim() !== "") {
+        const n = Number(v.replace(/[^\d.-]/g, ""));
+        return Number.isFinite(n) ? n : 0;
+      }
+      return 0;
+    };
+
+    // Step 1: Get active projects (status 5-8).
     const projectsResult = (await this.datatable<{
       data?: Array<Record<string, unknown>>;
     }>("projects", {
@@ -1010,83 +1037,53 @@ export class BuildToolsAPI {
       "columns[1][search][regex]": "true",
     })) ?? { data: [] };
 
-    const activeProjectNames = new Set<string>();
+    const activeStatuses = new Set([5, 6, 7, 8]);
+    const candidates: Array<Record<string, unknown>> = [];
     for (const proj of projectsResult.data ?? []) {
       const status = typeof proj.status === "number" ? proj.status : Number(proj.status);
-      if (activeStatuses.has(status) && typeof proj.name === "string") {
-        activeProjectNames.add(proj.name.trim());
-      }
+      if (!activeStatuses.has(status)) continue;
+      const approvedCOs = parseCurrency(proj.change_orders_approved);
+      if (approvedCOs <= 0) continue;
+      candidates.push(proj);
     }
 
-    // Step 2: Pull all change orders.
-    const coResult = (await this.datatable<{
-      data?: Array<Record<string, unknown>>;
-    }>("change-orders", { length: 500 })) ?? { data: [] };
-
-    const rows = coResult.data ?? [];
+    // Step 2: For each candidate, fetch FS form to get budgetOverviewTotals.
     const matches: Array<Record<string, unknown> & { total_value: number }> = [];
-
-    const now = Date.now();
-    const olderThanMs =
-      filters.older_than_days !== undefined
-        ? filters.older_than_days * 24 * 60 * 60 * 1000
-        : undefined;
     const minAmount = filters.min_amount;
 
-    for (const row of rows) {
-      // ---- belongs to an active project? --------------------------------
-      const projectName = typeof row.project_name === "string"
-        ? row.project_name.trim()
-        : "";
-      if (!activeProjectNames.has(projectName)) continue;
+    for (const proj of candidates) {
+      const projectId = proj.id;
+      if (!projectId) continue;
 
-      // ---- approved? (status 3 per BUSINESS_LOGIC.md) -------------------
-      const status = row.status;
-      const approved =
-        status === 3 ||
-        String(status) === "3" ||
-        (row.approved_number !== null && row.approved_number !== undefined);
-      if (!approved) continue;
+      const budgetRevised = parseCurrency(proj.budget_revised);
+      if (budgetRevised <= 0) continue;
 
-      // ---- already billed? ----------------------------------------------
-      // The CO datatable does not surface a canonical "billed" flag. The
-      // reference SQL computes (budget_total + approved_co_total -
-      // requested_amount) which is a project-level gap, not per-CO. This
-      // per-CO heuristic is a best-effort approximation: skip COs whose
-      // invoiced_amount is positive.
-      const invoicedAmountRaw = row.invoiced_amount;
-      if (typeof invoicedAmountRaw === "string") {
-        const invoicedValue = Number(invoicedAmountRaw.replace(/[^\d.-]/g, ""));
-        if (Number.isFinite(invoicedValue) && invoicedValue > 0) continue;
-      } else if (typeof invoicedAmountRaw === "number" && invoicedAmountRaw > 0) {
-        continue;
-      }
-
-      // ---- parse total to a numeric value -------------------------------
-      const totalRaw = row.total;
-      const totalValue =
-        typeof totalRaw === "string"
-          ? Number(totalRaw.replace(/[^\d.-]/g, ""))
-          : typeof totalRaw === "number"
-            ? totalRaw
-            : 0;
-      const safeTotal = Number.isFinite(totalValue) ? totalValue : 0;
-
-      // ---- min_amount filter -------------------------------------------
-      if (minAmount !== undefined && safeTotal < minAmount) continue;
-
-      // ---- older_than_days filter --------------------------------------
-      if (olderThanMs !== undefined) {
-        const created = String(row.created_at ?? "");
-        const parsed = Date.parse(created);
-        if (Number.isFinite(parsed)) {
-          if (now - parsed < olderThanMs) continue;
+      // Fetch the FS form HTML and parse budgetOverviewTotals.
+      let requestedAmount = 0;
+      try {
+        const fsData = await this.getFinancialStatement<Record<string, unknown>>(projectId as number);
+        if (fsData?.financial_current_amount !== undefined) {
+          requestedAmount = parseCurrency(fsData.financial_current_amount);
         }
+      } catch {
+        // If FS form fails, assume 0 requested (conservative — will surface the project).
       }
 
-      matches.push({ ...row, total_value: safeTotal });
+      const gap = budgetRevised - requestedAmount;
+      if (gap < 0.01) continue;
+
+      if (minAmount !== undefined && gap < minAmount) continue;
+
+      matches.push({
+        ...proj,
+        budget_revised_value: budgetRevised,
+        requested_amount: requestedAmount,
+        unbilled_gap: gap,
+        total_value: gap,
+      });
     }
 
+    matches.sort((a, b) => (b.total_value ?? 0) - (a.total_value ?? 0));
     return matches;
   }
 

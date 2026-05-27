@@ -348,13 +348,7 @@ const FindUnbilledChangeOrdersInputSchema = z.object({
   min_amount: z
     .number()
     .optional()
-    .describe("Filter to COs over this dollar amount."),
-  older_than_days: z
-    .number()
-    .optional()
-    .describe(
-      "Only COs approved more than this many days ago (uses created_at as a proxy — BuildTools does not surface a dedicated approved-at timestamp).",
-    ),
+    .describe("Only include projects where the unbilled gap exceeds this dollar amount."),
 });
 
 export type FindUnbilledChangeOrdersInput = z.infer<
@@ -369,64 +363,42 @@ async function findUnbilledChangeOrdersHandler(
   if (!parsed.success) {
     return formatZodError(parsed.error, "find_unbilled_change_orders");
   }
-  const { min_amount, older_than_days } = parsed.data;
+  const { min_amount } = parsed.data;
 
   try {
-    const matches = await api.findUnbilledChangeOrders({
-      min_amount,
-      older_than_days,
-    });
+    const matches = await api.findUnbilledChangeOrders({ min_amount });
 
     if (matches.length === 0) {
-      const filterDesc: string[] = [];
-      if (min_amount !== undefined) filterDesc.push(`min ${formatUsd(min_amount)}`);
-      if (older_than_days !== undefined) {
-        filterDesc.push(`older than ${older_than_days} days`);
-      }
-      const filterText =
-        filterDesc.length > 0 ? ` (filters: ${filterDesc.join(", ")})` : "";
-      return markdown(`No unbilled change orders found${filterText}.`);
+      const filterText = min_amount !== undefined ? ` (min ${formatUsd(min_amount)})` : "";
+      return markdown(`No active projects with unbilled change orders found${filterText}.`);
     }
 
-    const totalAmount = matches.reduce(
+    const totalGap = matches.reduce(
       (sum, row) => sum + (typeof row.total_value === "number" ? row.total_value : 0),
       0,
     );
 
-    const headerBits: string[] = [];
-    headerBits.push(
-      `**${matches.length} unbilled change order${matches.length === 1 ? "" : "s"}**`,
-    );
-    headerBits.push(`total ${formatUsd(totalAmount)}`);
-    if (min_amount !== undefined) {
-      headerBits.push(`min ${formatUsd(min_amount)}`);
-    }
-    if (older_than_days !== undefined) {
-      headerBits.push(`older than ${older_than_days} days`);
-    }
-    const header = headerBits.join(" — ");
+    const header = `**${matches.length} active project${matches.length === 1 ? "" : "s"}** with unbilled change orders — total gap ${formatUsd(totalGap)}`;
 
     const tableHeader = [
-      "| # | CO | Project | Status | Amount | Created |",
+      "| ID | Project | Team | Revised Contract | Requested | Unbilled Gap |",
       "|---|---|---|---|---|---|",
     ].join("\n");
+
+    const TEAM_LABELS: Record<number, string> = {
+      5: "Nexus", 6: "Omega", 7: "Invicta", 8: "Alpha",
+    };
+
     const tableBody = matches
       .map((row) => {
-        const id =
-          (row.id as string | number | undefined) ??
-          (row.info as string | number | undefined) ??
-          (row.DT_RowId as string | undefined) ??
-          "?";
-        const number = row.number !== undefined ? `#${row.number}` : "—";
-        const project =
-          (row.project_name as string | undefined) ??
-          (row.project_id !== undefined ? `#${row.project_id}` : "—");
-        const status = changeOrderStatusLabel(
-          row.status as string | number | undefined,
-        );
-        const amount = formatUsd(row.total_value);
-        const created = orDash(row.created_at);
-        return `| ${id} | ${number} | ${project} | ${status} | ${amount} | ${created} |`;
+        const id = (row.id as string | number | undefined) ?? "?";
+        const name = (row.name as string | undefined) ?? "—";
+        const statusCode = typeof row.status === "number" ? row.status : Number(row.status);
+        const team = TEAM_LABELS[statusCode] ?? String(row.status);
+        const revised = formatUsd(row.budget_revised_value);
+        const requested = formatUsd(row.requested_amount);
+        const gap = formatUsd(row.unbilled_gap);
+        return `| ${id} | ${name} | ${team} | ${revised} | ${requested} | ${gap} |`;
       })
       .join("\n");
 
@@ -439,7 +411,7 @@ async function findUnbilledChangeOrdersHandler(
 export const findUnbilledChangeOrdersTool: ToolDefinition = {
   name: "find_unbilled_change_orders",
   description:
-    "Find approved change orders on active projects (Nexus/Omega/Invicta/Alpha) that have not yet been billed. Useful for accounting cleanup.",
+    "Find active projects (Nexus/Omega/Invicta/Alpha) where the revised contract exceeds total billing — the project-level 'unbilled gap'. Matches the logic in find-unbilled-cos.js.",
   inputSchema: zodToJsonSchema(FindUnbilledChangeOrdersInputSchema),
   handler: findUnbilledChangeOrdersHandler,
 };
@@ -505,103 +477,40 @@ function formatFinancialStatement(
   statement: FinancialStatementDetail,
   projectId: number,
 ): string {
-  // BuildTools' form payload sometimes ships a JSON blob under
-  // `budgetOverviewTotals` (form HTML) — try to surface anything useful from
-  // it as a fallback when top-level keys aren't present.
-  let overviewBag: Record<string, unknown> = {};
-  if (
-    statement.budgetOverviewTotals &&
-    typeof statement.budgetOverviewTotals === "object"
-  ) {
-    overviewBag = statement.budgetOverviewTotals as Record<string, unknown>;
-  } else if (typeof statement.budgetOverviewTotals === "string") {
-    try {
-      overviewBag = JSON.parse(statement.budgetOverviewTotals);
-    } catch {
-      overviewBag = {};
-    }
-  }
-
-  const contractValue =
-    firstDefined(statement as Record<string, unknown>, [
-      "contract_value",
-      "contract_amount",
-      "revised_contract",
-      "budget_revised",
-      "total_revenue",
-    ]) ??
-    firstDefined(overviewBag, [
-      "contract_value",
-      "contract_amount",
-      "revised_contract",
-      "budget_revised",
-      "total_revenue",
-    ]);
-
-  const costs =
-    firstDefined(statement as Record<string, unknown>, [
-      "costs",
-      "total_costs",
-      "cost_actual",
-    ]) ??
-    firstDefined(overviewBag, ["costs", "total_costs", "cost_actual"]);
-
-  let margin: unknown =
-    firstDefined(statement as Record<string, unknown>, [
-      "margin",
-      "margin_value",
-    ]) ?? firstDefined(overviewBag, ["margin", "margin_value"]);
-
-  // If we have both contract and costs but no precomputed margin, derive it.
-  if (margin === undefined) {
-    const contractNum = toNumber(contractValue);
-    const costsNum = toNumber(costs);
-    if (contractNum !== undefined && costsNum !== undefined) {
-      margin = contractNum - costsNum;
-    }
-  }
+  // The data comes from budgetOverviewTotals (parsed from FS form HTML).
+  // Fields are spread onto the statement object by getFinancialStatement().
+  const bag = statement as Record<string, unknown>;
 
   const billingStatus = orDash(
-    statement.email_status_label ??
-      statement.status_label ??
-      (statement.status !== undefined
-        ? financialStatementStatusLabel(statement.status)
-        : undefined),
+    statement.status !== undefined
+      ? financialStatementStatusLabel(statement.status)
+      : undefined,
   );
 
-  const outstanding =
-    firstDefined(statement as Record<string, unknown>, [
-      "amount_unpaid",
-      "outstanding_receivables",
-    ]) ?? firstDefined(overviewBag, ["amount_unpaid", "outstanding_receivables"]);
-
-  const id = statement.id ?? "—";
-  const name = statement.name ?? "Financial Statement";
+  const name = statement.name ?? "Financial Overview";
 
   const lines: string[] = [];
-  lines.push(
-    `## Financial Statement #${id} — ${name} (project #${projectId})`,
-  );
+  lines.push(`## ${name} (project #${projectId})`);
   lines.push("");
-  lines.push(`- **Contract value**: ${formatCurrencyOrDash(contractValue)}`);
-  lines.push(`- **Costs**: ${formatCurrencyOrDash(costs)}`);
-  lines.push(`- **Margin**: ${formatCurrencyOrDash(margin)}`);
-  lines.push(`- **Billing status**: ${billingStatus}`);
-  lines.push(
-    `- **Outstanding receivables**: ${formatCurrencyOrDash(outstanding)}`,
-  );
-  if (statement.amount_paid !== undefined) {
-    lines.push(`- **Amount paid to date**: ${orDash(statement.amount_paid)}`);
+
+  const budgetFields: Array<[string, string[]]> = [
+    ["Original contract", ["budget_total"]],
+    ["Approved COs", ["approved_co_total", "change_orders_approved"]],
+    ["Revised contract", ["budget_revised", "revised_contract"]],
+    ["Current billing", ["financial_current_amount"]],
+    ["Total costs", ["cost_actual", "costs", "total_costs"]],
+    ["Gross margin", ["margin", "margin_value"]],
+  ];
+
+  for (const [label, keys] of budgetFields) {
+    const val = firstDefined(bag, keys);
+    lines.push(`- **${label}**: ${formatCurrencyOrDash(val)}`);
   }
-  if (statement.due_date !== undefined) {
-    lines.push(`- **Due date**: ${orDash(statement.due_date)}`);
+
+  if (billingStatus !== "—") {
+    lines.push(`- **Billing status**: ${billingStatus}`);
   }
-  if (statement.payment_last !== undefined) {
-    lines.push(`- **Last payment**: ${orDash(statement.payment_last)}`);
-  }
-  if (statement.aging_days !== undefined) {
-    lines.push(`- **Aging days**: ${orDash(statement.aging_days)}`);
-  }
+
   return lines.join("\n");
 }
 

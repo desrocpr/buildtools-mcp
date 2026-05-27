@@ -104,19 +104,23 @@ const sampleChangeOrderDetail = {
 };
 
 const sampleFinancialStatement = {
-  id: 700001,
   project_id: 100002,
   name: "Q1 2026 Statement",
-  status: 1,
-  current_amount: "$ 45,000.00",
-  current_amount_value: 45000,
-  contract_value: 250000,
-  costs: 180000,
-  amount_paid: "$ 45,000.00",
-  amount_unpaid: "$ 0.00",
-  aging_days: 0,
-  due_date: "04/30/2026",
-  payment_last: "04/30/2026",
+  status: "1",
+  budget_total: 200000,
+  approved_co_total: 50000,
+  budget_revised: 250000,
+  financial_current_amount: 45000,
+  cost_actual: 180000,
+  margin: 70000,
+  budgetOverviewTotals: {
+    budget_total: 200000,
+    approved_co_total: 50000,
+    budget_revised: 250000,
+    financial_current_amount: 45000,
+    cost_actual: 180000,
+    margin: 70000,
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -317,24 +321,25 @@ describe("get_change_order", () => {
 // ---------------------------------------------------------------------------
 
 describe("find_unbilled_change_orders", () => {
-  it("returns a summary header + table on the happy path", async () => {
+  it("returns a project-level summary table on the happy path", async () => {
     const findUnbilled = vi.fn().mockResolvedValue([
       {
-        ...sampleApprovedChangeOrderRow,
+        id: 100001,
+        name: "Brown Addition",
+        status: 6,
+        budget_revised_value: 250000,
+        requested_amount: 242500,
+        unbilled_gap: 7500,
         total_value: 7500,
       },
       {
-        id: 500003,
-        info: 500003,
-        status: 3,
-        email_status_label: "Approved",
-        project_name: "Smith Kitchen",
-        number: 7,
-        approved_number: 7,
-        name: "Smith - Plumbing Upsize",
-        total: "$ 12,200.00",
+        id: 100002,
+        name: "Smith Kitchen",
+        status: 7,
+        budget_revised_value: 180000,
+        requested_amount: 167800,
+        unbilled_gap: 12200,
         total_value: 12200,
-        created_at: "01/15/2026",
       },
     ]);
     const api = fakeApi({
@@ -346,26 +351,25 @@ describe("find_unbilled_change_orders", () => {
 
     expect(result.isError).toBeFalsy();
     const text = textOf(result);
-    expect(text).toContain("**2 unbilled change orders**");
-    // Summed total: 7500 + 12200 = 19700.
+    expect(text).toContain("**2 active projects**");
     expect(text).toContain("$19,700.00");
-    // Table headers present.
-    expect(text).toContain("| # | CO | Project | Status | Amount | Created |");
-    // Rows present.
+    expect(text).toContain("| ID | Project | Team | Revised Contract | Requested | Unbilled Gap |");
     expect(text).toContain("Brown Addition");
     expect(text).toContain("Smith Kitchen");
-    expect(text).toContain("$7,500.00");
-    expect(text).toContain("$12,200.00");
-    expect(findUnbilled).toHaveBeenCalledWith({
-      min_amount: undefined,
-      older_than_days: undefined,
-    });
+    expect(text).toContain("Omega");
+    expect(text).toContain("Invicta");
+    expect(findUnbilled).toHaveBeenCalledWith({ min_amount: undefined });
   });
 
-  it("passes min_amount and older_than_days through to the client", async () => {
+  it("passes min_amount through to the client", async () => {
     const findUnbilled = vi.fn().mockResolvedValue([
       {
-        ...sampleApprovedChangeOrderRow,
+        id: 100001,
+        name: "Brown Addition",
+        status: 6,
+        budget_revised_value: 250000,
+        requested_amount: 242500,
+        unbilled_gap: 7500,
         total_value: 7500,
       },
     ]);
@@ -375,19 +379,12 @@ describe("find_unbilled_change_orders", () => {
     });
 
     const result = await findUnbilledChangeOrdersTool.handler(
-      { min_amount: 5000, older_than_days: 30 },
+      { min_amount: 5000 },
       api,
     );
 
     expect(result.isError).toBeFalsy();
-    expect(findUnbilled).toHaveBeenCalledWith({
-      min_amount: 5000,
-      older_than_days: 30,
-    });
-    const text = textOf(result);
-    // Both filter values surface in the header.
-    expect(text).toContain("min $5,000.00");
-    expect(text).toContain("older than 30 days");
+    expect(findUnbilled).toHaveBeenCalledWith({ min_amount: 5000 });
   });
 
   it("returns a Markdown 'no unbilled' message when the result is empty", async () => {
@@ -404,7 +401,7 @@ describe("find_unbilled_change_orders", () => {
 
     expect(result.isError).toBeFalsy();
     const text = textOf(result);
-    expect(text).toContain("No unbilled change orders found");
+    expect(text).toContain("No active projects with unbilled change orders found");
     expect(text).toContain("min $10,000.00");
   });
 
@@ -459,15 +456,14 @@ describe("get_financial_statement", () => {
 
     expect(result.isError).toBeFalsy();
     const text = textOf(result);
-    expect(text).toContain("## Financial Statement #700001");
+    expect(text).toContain("Q1 2026 Statement");
     expect(text).toContain("project #100002");
-    // All five required section labels (criterion 6).
-    expect(text).toContain("**Contract value**");
-    expect(text).toContain("**Costs**");
-    expect(text).toContain("**Margin**");
-    expect(text).toContain("**Billing status**");
-    expect(text).toContain("**Outstanding receivables**");
-    // Currency formatting via Intl: $250,000.00 / $180,000.00 / $70,000.00.
+    expect(text).toContain("**Original contract**");
+    expect(text).toContain("**Approved COs**");
+    expect(text).toContain("**Revised contract**");
+    expect(text).toContain("**Current billing**");
+    expect(text).toContain("**Total costs**");
+    expect(text).toContain("**Gross margin**");
     expect(text).toContain("$250,000.00");
     expect(text).toContain("$180,000.00");
     expect(text).toContain("$70,000.00");
@@ -477,7 +473,7 @@ describe("get_financial_statement", () => {
   it("renders missing fields as em-dashes rather than throwing", async () => {
     const getFinancialStatement = vi
       .fn()
-      .mockResolvedValue({ id: 99, name: "Stub" });
+      .mockResolvedValue({ name: "Stub" });
     const api = fakeApi({
       getFinancialStatement:
         getFinancialStatement as BuildToolsAPI["getFinancialStatement"],
@@ -490,10 +486,9 @@ describe("get_financial_statement", () => {
 
     expect(result.isError).toBeFalsy();
     const text = textOf(result);
-    expect(text).toContain("**Contract value**: —");
-    expect(text).toContain("**Costs**: —");
-    expect(text).toContain("**Margin**: —");
-    expect(text).toContain("**Outstanding receivables**: —");
+    expect(text).toContain("**Original contract**: —");
+    expect(text).toContain("**Total costs**: —");
+    expect(text).toContain("**Gross margin**: —");
   });
 
   it("returns a Markdown 'not found' message when the client returns null", async () => {
