@@ -74,3 +74,5 @@ export {
 } from "./selections.js";
 
 export { createMutationTools } from "./mutations.js";
+
+export { createSessionCredentialsTool } from "./sessions.js";
