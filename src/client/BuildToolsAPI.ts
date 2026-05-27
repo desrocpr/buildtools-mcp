@@ -1027,14 +1027,32 @@ export class BuildToolsAPI {
   > {
     await this.ensureAuthenticated();
 
-    // Pull as many rows as BuildTools will return in a single page. The
-    // datatable defaults to `length=50`; we bump to 500 to maximise recall
-    // without paginating (the corpus is small in the moss tenant).
-    const result = (await this.datatable<{
+    // Step 1: Get active projects (status 5-8: Nexus, Omega, Invicta, Alpha).
+    // The reference implementation (find-unbilled-cos.js) filters to these
+    // statuses — non-active projects should never appear in the results.
+    const activeStatuses = new Set([5, 6, 7, 8]);
+    const projectsResult = (await this.datatable<{
+      data?: Array<Record<string, unknown>>;
+    }>("projects", {
+      length: 500,
+      "columns[1][search][value]": "5|6|7|8",
+      "columns[1][search][regex]": "true",
+    })) ?? { data: [] };
+
+    const activeProjectNames = new Set<string>();
+    for (const proj of projectsResult.data ?? []) {
+      const status = typeof proj.status === "number" ? proj.status : Number(proj.status);
+      if (activeStatuses.has(status) && typeof proj.name === "string") {
+        activeProjectNames.add(proj.name.trim());
+      }
+    }
+
+    // Step 2: Pull all change orders.
+    const coResult = (await this.datatable<{
       data?: Array<Record<string, unknown>>;
     }>("change-orders", { length: 500 })) ?? { data: [] };
 
-    const rows = result.data ?? [];
+    const rows = coResult.data ?? [];
     const matches: Array<Record<string, unknown> & { total_value: number }> = [];
 
     const now = Date.now();
@@ -1045,23 +1063,26 @@ export class BuildToolsAPI {
     const minAmount = filters.min_amount;
 
     for (const row of rows) {
-      // ---- approved? -----------------------------------------------------
-      const approvedNumber = row.approved_number;
-      const emailStatusLabel = String(row.email_status_label ?? "");
+      // ---- belongs to an active project? --------------------------------
+      const projectName = typeof row.project_name === "string"
+        ? row.project_name.trim()
+        : "";
+      if (!activeProjectNames.has(projectName)) continue;
+
+      // ---- approved? (status 3 per BUSINESS_LOGIC.md) -------------------
       const status = row.status;
       const approved =
-        (approvedNumber !== null && approvedNumber !== undefined) ||
-        emailStatusLabel.startsWith("Approved") ||
         status === 3 ||
-        String(status) === "3";
+        String(status) === "3" ||
+        (row.approved_number !== null && row.approved_number !== undefined);
       if (!approved) continue;
 
       // ---- already billed? ----------------------------------------------
-      // The change-orders datatable does not surface a canonical "billed"
-      // flag. The reference SQL impl joins against `financial_statements_*`
-      // tables which are not exposed here. Best-effort: skip rows whose
-      // numeric `invoiced_amount` is positive when surfaced, OR whose
-      // `relations` string mentions an invoice/statement number.
+      // The CO datatable does not surface a canonical "billed" flag. The
+      // reference SQL computes (budget_total + approved_co_total -
+      // requested_amount) which is a project-level gap, not per-CO. This
+      // per-CO heuristic is a best-effort approximation: skip COs whose
+      // invoiced_amount is positive.
       const invoicedAmountRaw = row.invoiced_amount;
       if (typeof invoicedAmountRaw === "string") {
         const invoicedValue = Number(invoicedAmountRaw.replace(/[^\d.-]/g, ""));
@@ -1086,9 +1107,6 @@ export class BuildToolsAPI {
       // ---- older_than_days filter --------------------------------------
       if (olderThanMs !== undefined) {
         const created = String(row.created_at ?? "");
-        // BuildTools' MM/DD/YYYY format. `new Date("MM/DD/YYYY")` is
-        // accepted by V8 — we tolerate any unparseable date by skipping
-        // the filter for that row (rather than excluding it silently).
         const parsed = Date.parse(created);
         if (Number.isFinite(parsed)) {
           if (now - parsed < olderThanMs) continue;

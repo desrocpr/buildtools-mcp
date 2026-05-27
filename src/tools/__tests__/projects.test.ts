@@ -53,7 +53,7 @@ function textOf(result: ToolResult): string {
 const sampleListRow = {
   DT_RowId: "row_100002",
   id: 100002,
-  status: 1,
+  status: 6,
   name: "Jones Addition",
   managers:
     '<div title="Project Manager A">Project Manager A</div>',
@@ -66,7 +66,7 @@ const sampleListRow = {
 const sampleDetail = {
   id: 100002,
   name: "Jones Addition",
-  status: "1",
+  status: "6",
   address: "456 Elm Ave",
   city: "Springfield",
   state: "VA",
@@ -119,14 +119,18 @@ describe("list_projects", () => {
     const text = textOf(result);
     expect(text).toContain("**1 project**");
     expect(text).toContain("#100002");
-    expect(text).toContain("[Active]");
+    expect(text).toContain("[Omega]");
     expect(text).toContain("Jones Addition");
     expect(text).toContain("Springfield, VA");
     expect(text).toContain("$ 245,500.50");
-    // Confirm the status filter mapping was passed through to the client.
+    // "Active" maps to codes [5,6,7,8] — passed as pipe-separated regex.
     expect(getProjects).toHaveBeenCalledTimes(1);
     const callArgs = getProjects.mock.calls[0][0];
-    expect(callArgs).toMatchObject({ length: 50, "columns[1][search][value]": "1" });
+    expect(callArgs).toMatchObject({
+      length: 50,
+      "columns[1][search][value]": "5|6|7|8",
+      "columns[1][search][regex]": "true",
+    });
   });
 
   it("passes customer_name via search[value] and respects custom limit", async () => {
@@ -211,7 +215,7 @@ describe("get_project", () => {
     expect(result.isError).toBeFalsy();
     const text = textOf(result);
     expect(text).toContain("## Project #100002 — Jones Addition");
-    expect(text).toContain("- **Status**: Active");
+    expect(text).toContain("- **Status**: Omega");
     expect(text).toContain("- **Contract value**: $ 245,500.50");
     expect(text).toContain("456 Elm Ave");
     expect(text).toContain("Springfield, VA");

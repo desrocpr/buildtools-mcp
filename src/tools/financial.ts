@@ -69,6 +69,25 @@ function changeOrderStatusLabel(code: string | number | undefined): string {
 }
 
 // ---------------------------------------------------------------------------
+// Financial statement status mapping — verified against BUSINESS_LOGIC.md
+// ---------------------------------------------------------------------------
+
+const FINANCIAL_STATEMENT_STATUS_LABELS: Record<number, string> = {
+  1: "Draft",
+  2: "Pending",
+  4: "Partial",
+  5: "Sent",
+  6: "Paid",
+};
+
+function financialStatementStatusLabel(code: string | number | undefined): string {
+  if (code === undefined || code === null || code === "") return "—";
+  const num = typeof code === "number" ? code : Number(code);
+  if (!Number.isFinite(num)) return String(code);
+  return FINANCIAL_STATEMENT_STATUS_LABELS[num] ?? String(code);
+}
+
+// ---------------------------------------------------------------------------
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
@@ -420,7 +439,7 @@ async function findUnbilledChangeOrdersHandler(
 export const findUnbilledChangeOrdersTool: ToolDefinition = {
   name: "find_unbilled_change_orders",
   description:
-    "Find all change orders across all projects that are approved but not yet billed. High-value for accounting cleanup.",
+    "Find approved change orders on active projects (Nexus/Omega/Invicta/Alpha) that have not yet been billed. Useful for accounting cleanup.",
   inputSchema: zodToJsonSchema(FindUnbilledChangeOrdersInputSchema),
   handler: findUnbilledChangeOrdersHandler,
 };
@@ -545,7 +564,9 @@ function formatFinancialStatement(
   const billingStatus = orDash(
     statement.email_status_label ??
       statement.status_label ??
-      (statement.status !== undefined ? `Status code ${statement.status}` : undefined),
+      (statement.status !== undefined
+        ? financialStatementStatusLabel(statement.status)
+        : undefined),
   );
 
   const outstanding =

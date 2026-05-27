@@ -21,10 +21,10 @@
  *     adapt to the existing client and document the mapping in code rather
  *     than touching `src/client/**` (out-of-scope per the planner contract).
  *
- * Status-code mapping: BuildTools wire values are numeric (fixture shows 1, 5,
- * 6) but there is no documented mapping. We use the best-guess assumption
- * below and round-trip the same map when rendering rows, falling back to the
- * raw value when unknown. Refine after live verification (MOS-222 smoke).
+ * Status-code mapping: BuildTools uses team-based project statuses, not generic
+ * lifecycle states. Active projects are assigned to teams: Nexus (5), Omega (6),
+ * Invicta (7), Alpha (8). Verified against desrocpr/buildtools CLAUDE.md and
+ * docs/BUSINESS_LOGIC.md.
  */
 
 import { z } from "zod/v3";
@@ -55,32 +55,44 @@ export interface ToolDefinition {
 }
 
 // ---------------------------------------------------------------------------
-// Status mapping (best-guess pending live verification)
+// Status mapping — verified against desrocpr/buildtools CLAUDE.md + BUSINESS_LOGIC.md
 // ---------------------------------------------------------------------------
 
-/**
- * Best-guess BuildTools project-status label → wire-code mapping. Source
- * fixtures show codes 1, 5, 6. Refine once verified against a live tenant.
- *
- * NOTE: when adding a new label, also add it to the `z.enum` in
- * `ListProjectsInputSchema` below.
- */
-const STATUS_LABEL_TO_CODES: Record<"Active" | "Complete" | "Lost" | "All", number[]> = {
-  Active: [1],
-  Complete: [6],
-  Lost: [5],
+const STATUS_LABEL_TO_CODES: Record<string, number[]> = {
+  Nexus: [5],
+  Omega: [6],
+  Invicta: [7],
+  Alpha: [8],
+  Active: [5, 6, 7, 8],
+  "On Hold": [2],
+  Warranty: [3],
+  Completed: [4],
+  "Maintenance Plans": [10],
+  Cancelled: [12],
+  Templates: [1],
+  "Excluded Reporting": [14],
   All: [],
 };
 
-/** Inverse mapping for rendering: wire code → label, or `String(code)` fallback. */
+const STATUS_CODE_TO_LABEL: Record<number, string> = {
+  1: "Templates",
+  2: "On Hold",
+  3: "Warranty",
+  4: "Completed",
+  5: "Nexus",
+  6: "Omega",
+  7: "Invicta",
+  8: "Alpha",
+  10: "Maintenance Plans",
+  12: "Cancelled",
+  14: "Excluded Reporting",
+};
+
 function statusLabel(code: string | number | undefined): string {
   if (code === undefined || code === null || code === "") return "—";
   const num = typeof code === "number" ? code : Number(code);
-  for (const [label, codes] of Object.entries(STATUS_LABEL_TO_CODES)) {
-    if (label === "All") continue;
-    if (codes.includes(num)) return label;
-  }
-  return String(code);
+  if (!Number.isFinite(num)) return String(code);
+  return STATUS_CODE_TO_LABEL[num] ?? String(code);
 }
 
 // ---------------------------------------------------------------------------
@@ -161,9 +173,25 @@ function formatZodError(err: z.ZodError, toolName: string): ToolResult {
 
 const ListProjectsInputSchema = z.object({
   status: z
-    .enum(["Active", "Complete", "Lost", "All"])
+    .enum([
+      "Active",
+      "Nexus",
+      "Omega",
+      "Invicta",
+      "Alpha",
+      "On Hold",
+      "Warranty",
+      "Completed",
+      "Maintenance Plans",
+      "Cancelled",
+      "Templates",
+      "Excluded Reporting",
+      "All",
+    ])
     .optional()
-    .describe("Filter by project status. Default: Active."),
+    .describe(
+      'Filter by project status. "Active" matches all four active teams (Nexus/Omega/Invicta/Alpha). Default: Active.',
+    ),
   customer_name: z
     .string()
     .optional()
@@ -203,14 +231,15 @@ async function listProjectsHandler(
     length: limit,
   };
 
-  // Status filter: BuildTools' datatable is column-keyed. We don't know the
-  // exact column index without live inspection, so we pass status both as a
-  // generic `search[value]` (broad match) AND in a column-specific slot when
-  // a single code maps. `All` means "no filter".
-  const codes = STATUS_LABEL_TO_CODES[status];
+  // Column index 1 is the status column on the projects datatable.
+  // For single-code statuses we filter directly; for multi-code (e.g. "Active"
+  // = [5,6,7,8]) we use the pipe-separated syntax that DataTables supports.
+  const codes = STATUS_LABEL_TO_CODES[status] ?? [];
   if (codes.length === 1) {
-    // Column index 1 is the documented `status` column on the datatable.
     params["columns[1][search][value]"] = String(codes[0]);
+  } else if (codes.length > 1) {
+    params["columns[1][search][value]"] = codes.join("|");
+    params["columns[1][search][regex]"] = "true";
   }
 
   // Customer-name filter: there is no canonical column for "customer name" on
