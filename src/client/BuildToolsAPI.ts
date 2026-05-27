@@ -1367,6 +1367,116 @@ export class BuildToolsAPI {
   }
 
   /**
+   * Lists individual financial statements for a project.
+   *
+   * GET /financial/statements?PR[]=<projectId> returns JSON with `content`
+   * (HTML table of statements) and `statusCount`. Each <tr> has data-id,
+   * data-amount, data-paid, data-balance attributes. Cells contain status,
+   * name, amount, paid, fees, balance, and date.
+   *
+   * Status codes: 1=Draft, 2=Pending, 4=Partial, 5=Sent, 6=Paid.
+   */
+  async getFinancialStatements(
+    projectId: string | number,
+  ): Promise<{
+    statusCount: Record<string, number>;
+    statements: Array<{
+      id: string;
+      name: string;
+      status: string;
+      amount: number;
+      paid: number;
+      balance: number;
+      date: string;
+    }>;
+  }> {
+    await this.ensureAuthenticated();
+
+    const response = await this.request(
+      `${this.baseUrl}/financial/statements?PR[]=${projectId}`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+
+    if (response.status !== 200) {
+      return { statusCount: {}, statements: [] };
+    }
+
+    let data: { r?: number; content?: string; statusCount?: Record<string, number> };
+    try {
+      data = JSON.parse(response.body);
+    } catch {
+      return { statusCount: {}, statements: [] };
+    }
+
+    const statusCount = data.statusCount ?? {};
+    const html = data.content ?? "";
+    const statements: Array<{
+      id: string;
+      name: string;
+      status: string;
+      amount: number;
+      paid: number;
+      balance: number;
+      date: string;
+    }> = [];
+
+    const STATUS_MAP: Record<number, string> = {
+      1: "Draft", 2: "Pending", 4: "Partial", 5: "Sent", 6: "Paid",
+    };
+
+    const strip = (s: string): string =>
+      s.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"').replace(/\s+/g, " ").trim();
+
+    const parseCurrency = (s: string): number => {
+      const n = Number(s.replace(/[^\d.-]/g, ""));
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    const rowRegex = /<tr[^>]*data-id="(\d+)"[^>]*data-amount="([^"]*)"[^>]*data-paid="([^"]*)"[^>]*data-balance="([^"]*)"[^>]*>([\s\S]*?)<\/tr>/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = rowRegex.exec(html)) !== null) {
+      const id = match[1];
+      const amount = parseCurrency(match[2]);
+      const paid = parseCurrency(match[3]);
+      const balance = parseCurrency(match[4]);
+      const rowHtml = match[5];
+
+      const cells: string[] = [];
+      const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/g;
+      let cellMatch: RegExpExecArray | null;
+      while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
+        cells.push(strip(cellMatch[1]));
+      }
+
+      // Cells: status, name, amount, paid, fees, balance, date
+      const statusText = cells[0] ?? "";
+      const statusCode = Object.entries(STATUS_MAP).find(([, v]) => v === statusText)?.[0];
+      const name = cells[1] ?? "";
+      const date = cells.find((c) => /^\d{2}\/\d{2}\/\d{4}$/.test(c)) ?? "";
+
+      statements.push({
+        id,
+        name,
+        status: statusText || (statusCode ? STATUS_MAP[Number(statusCode)] : "Unknown"),
+        amount,
+        paid,
+        balance,
+        date,
+      });
+    }
+
+    return { statusCount, statements };
+  }
+
+  /**
    * Project-level unbilled change order analysis. Matches the logic in the
    * reference implementation (find-unbilled-cos.js:39-71):
    *

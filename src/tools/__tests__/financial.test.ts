@@ -128,13 +128,14 @@ const sampleFinancialStatement = {
 // ---------------------------------------------------------------------------
 
 describe("financialTools registry", () => {
-  it("exports exactly four tools with the contract-mandated names in order", () => {
+  it("exports five tools with the expected names in order", () => {
     const names = financialTools.map((t) => t.name);
     expect(names).toEqual([
       "list_change_orders",
       "get_change_order",
       "find_unbilled_change_orders",
       "get_financial_statement",
+      "list_financial_statements",
     ]);
   });
 

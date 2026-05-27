@@ -24,7 +24,8 @@ describe("buildtools-mcp", () => {
     expect(allNames).toContain("list_customers");
     expect(allNames).toContain("get_customer");
     expect(allNames).toContain("list_project_attachments");
-    expect(allNames.length).toBe(10);
+    expect(allNames).toContain("list_financial_statements");
+    expect(allNames.length).toBe(11);
   });
 
   it("mutation tool factory produces 9 confirmed tools", async () => {
