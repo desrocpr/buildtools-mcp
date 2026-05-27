@@ -40,3 +40,9 @@ export {
   searchTasksTool,
   taskTools,
 } from "./tasks.js";
+
+export {
+  listPurchaseOrdersTool,
+  searchPurchaseOrdersTool,
+  purchaseOrderTools,
+} from "./purchase-orders.js";
