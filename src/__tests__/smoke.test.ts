@@ -27,6 +27,51 @@ describe("buildtools-mcp", () => {
     expect(allNames.length).toBe(10);
   });
 
+  it("mutation tool factory produces 9 confirmed tools", async () => {
+    const { createMutationTools } = await import("../tools/mutations.js");
+    const { BuildToolsAPI } = await import("../client/BuildToolsAPI.js");
+    const { ConfirmationStore } = await import("../confirm/Confirmation.js");
+
+    const api = new BuildToolsAPI({ tenant: "test" });
+    const store = new ConfirmationStore();
+    const tools = createMutationTools(() => api, store);
+
+    expect(tools.length).toBe(9);
+    const names = tools.map((t) => t.name);
+    expect(names).toContain("create_project");
+    expect(names).toContain("create_change_order");
+    expect(names).toContain("create_purchase_order");
+    expect(names).toContain("create_task");
+    expect(names).toContain("create_rfi");
+    expect(names).toContain("create_invoice");
+    expect(names).toContain("create_financial_statement");
+    expect(names).toContain("delete_financial_statement");
+    expect(names).toContain("create_service");
+  });
+
+  it("mutation tools return confirmation prompt on first call (no confirmation_id)", async () => {
+    const { createMutationTools } = await import("../tools/mutations.js");
+    const { BuildToolsAPI } = await import("../client/BuildToolsAPI.js");
+    const { ConfirmationStore } = await import("../confirm/Confirmation.js");
+
+    const api = new BuildToolsAPI({ tenant: "test" });
+    const store = new ConfirmationStore();
+    const tools = createMutationTools(() => api, store);
+
+    const createProject = tools.find((t) => t.name === "create_project")!;
+    const result = await createProject.handler(
+      { name: "Test Project", project_manager_id: 1 },
+      api,
+    );
+
+    const text = result.content[0].text;
+    expect(text).toContain("⚠️");
+    expect(text).toContain("create_project");
+    expect(text).toContain("confirmation_id");
+    expect(text).toContain("Test Project");
+    expect(store.size).toBe(1);
+  });
+
   it("every tool has a valid JSON Schema input definition", async () => {
     const { projectTools } = await import("../tools/projects.js");
     const { financialTools } = await import("../tools/financial.js");

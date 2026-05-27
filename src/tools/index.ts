@@ -63,3 +63,5 @@ export {
   searchUsersTool,
   operationTools,
 } from "./operations.js";
+
+export { createMutationTools } from "./mutations.js";
