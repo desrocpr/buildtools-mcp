@@ -1030,6 +1030,102 @@ export class BuildToolsAPI {
   }
 
   /**
+   * Fetches detail for a single selection including its items/options, files,
+   * descriptions, vendor info, and prices.
+   *
+   * GET /selections/form/{selectionId}?itemsData=1&PR[]={projectId}
+   * Returns: { r: 1, itemsData: [{ id, selection_id, title, description,
+   *   model, url, price, company_id, company_name, selected, files: [...],
+   *   subitems: [...] }] }
+   *
+   * Verified against live BuildTools — files[] contains download URLs at
+   * file.buildtools.app for attached specs/documents.
+   */
+  async getSelectionDetail(
+    selectionId: string | number,
+    projectId: string | number,
+  ): Promise<null | {
+    items: Array<{
+      id: number;
+      selectionId: number;
+      title: string;
+      description: string;
+      model: string;
+      url: string;
+      price: number | null;
+      companyId: number | null;
+      companyName: string;
+      selected: boolean;
+      files: Array<{
+        id: number;
+        name: string;
+        size: number;
+        type: string;
+        url: string;
+        isImage: boolean;
+      }>;
+      subitems: Array<Record<string, unknown>>;
+    }>;
+  } | null> {
+    await this.ensureAuthenticated();
+
+    const numSelId = Number(selectionId);
+    const numProjId = Number(projectId);
+    if (!Number.isFinite(numSelId) || !Number.isFinite(numProjId)) return null;
+
+    const response = await this.requestWithReauthRetry(
+      `${this.baseUrl}/selections/form/${numSelId}?itemsData=1&PR[]=${numProjId}`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+
+    if (response.status !== 200) return null;
+
+    let data: {
+      r?: number;
+      itemsData?: Array<Record<string, unknown>>;
+    };
+    try {
+      data = JSON.parse(response.body);
+    } catch {
+      return null;
+    }
+
+    if (data.r !== 1 || !Array.isArray(data.itemsData)) return null;
+
+    const items = data.itemsData.map((item) => ({
+      id: Number(item.id) || 0,
+      selectionId: Number(item.selection_id) || 0,
+      title: String(item.title ?? ""),
+      description: String(item.description ?? ""),
+      model: String(item.model ?? ""),
+      url: String(item.url ?? ""),
+      price: item.price !== null && item.price !== undefined ? Number(item.price) : null,
+      companyId: item.company_id !== null && item.company_id !== undefined ? Number(item.company_id) : null,
+      companyName: String(item.company_name ?? ""),
+      selected: item.selected === 1 || item.selected === true,
+      files: Array.isArray(item.files)
+        ? item.files.map((f: Record<string, unknown>) => ({
+            id: Number(f.id) || 0,
+            name: String(f.name ?? ""),
+            size: Number(f.size) || 0,
+            type: String(f.type ?? ""),
+            url: String(f.url ?? ""),
+            isImage: f.is_image === 1 || f.is_image === true,
+          }))
+        : [],
+      subitems: Array.isArray(item.subitems) ? item.subitems as Array<Record<string, unknown>> : [],
+    }));
+
+    return { items };
+  }
+
+  /**
    * Creates a selection on a project. Requires CSRF from the form.
    * Verified working against live BuildTools.
    *
