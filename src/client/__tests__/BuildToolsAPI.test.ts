@@ -470,20 +470,29 @@ describe("createProject()", () => {
 });
 
 describe("getProject()", () => {
-  it("hits the form endpoint (NOT /api/projects/:id)", async () => {
+  it("finds a project by ID from the datatable", async () => {
+    const dtPayload = {
+      data: [
+        { ...projectAlpha, id: 101, DT_RowId: "row_101" },
+        { id: 102, DT_RowId: "row_102", name: "Other" },
+      ],
+    };
     const { stub, recorded } = makeFetchStub([
-      { status: 200, body: JSON.stringify(projectAlpha) },
+      { status: 200, body: JSON.stringify(dtPayload) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
 
     const out = await api.getProject(101);
-    expect(out).toEqual(projectAlpha);
-    expect(recorded[0].url).toBe("https://moss.buildtools.app/projects/101/form");
+    expect(out).toMatchObject({ id: 101, name: projectAlpha.name });
+    expect(recorded[0].url).toContain("projects/datatable");
   });
 
-  it("returns null on non-200", async () => {
-    const { stub } = makeFetchStub([{ status: 404, body: "" }]);
+  it("returns null when the ID is not in the datatable", async () => {
+    const dtPayload = { data: [{ id: 999, DT_RowId: "row_999", name: "X" }] };
+    const { stub } = makeFetchStub([
+      { status: 200, body: JSON.stringify(dtPayload) },
+    ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
     expect(await api.getProject(404)).toBeNull();
@@ -557,32 +566,31 @@ describe("createChangeOrder()", () => {
 // ---------------------------------------------------------------------------
 
 describe("getChangeOrder() — MOS-215", () => {
-  it("hits the form endpoint /change-orders/:id/form", async () => {
-    const detail = { id: 500001, name: "X" };
+  it("finds a CO by ID (info field) from the datatable", async () => {
+    const dtPayload = {
+      data: [
+        { info: 500001, DT_RowId: "row_500001", name: "X", status: 3 },
+        { info: 500002, DT_RowId: "row_500002", name: "Y", status: 1 },
+      ],
+    };
     const { stub, recorded } = makeFetchStub([
-      { status: 200, body: JSON.stringify(detail) },
+      { status: 200, body: JSON.stringify(dtPayload) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
     const out = await api.getChangeOrder(500001);
-    expect(out).toEqual(detail);
-    expect(recorded[0].url).toBe(
-      "https://moss.buildtools.app/change-orders/500001/form",
-    );
+    expect(out).toMatchObject({ info: 500001, name: "X" });
+    expect(recorded[0].url).toContain("change-orders/datatable");
   });
 
-  it("returns null on non-200", async () => {
-    const { stub } = makeFetchStub([{ status: 404, body: "" }]);
+  it("returns null when the CO ID is not in the datatable", async () => {
+    const dtPayload = { data: [{ info: 999, DT_RowId: "row_999", name: "Z" }] };
+    const { stub } = makeFetchStub([
+      { status: 200, body: JSON.stringify(dtPayload) },
+    ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    expect(await api.getChangeOrder(1)).toBeNull();
-  });
-
-  it("returns null when response body is not JSON", async () => {
-    const { stub } = makeFetchStub([{ status: 200, body: "not-json" }]);
-    const api = new BuildToolsAPI({ fetch: stub });
-    api.authenticated = true;
-    expect(await api.getChangeOrder(1)).toBeNull();
+    expect(await api.getChangeOrder(404)).toBeNull();
   });
 
   it("requires authentication", async () => {
@@ -633,44 +641,65 @@ describe("getFinancialStatement() — MOS-215", () => {
 });
 
 describe("findUnbilledChangeOrders() — MOS-215", () => {
-  it("returns approved-but-not-billed rows from the datatable", async () => {
-    const payload = {
+  // Helper: the method now makes two datatable calls (projects then COs).
+  const activeProjectsPayload = {
+    data: [
+      { id: 500, status: 6, name: "Active Project Alpha" },
+      { id: 501, status: 7, name: "Active Project Beta" },
+    ],
+  };
+
+  it("returns approved-but-not-billed rows from active projects", async () => {
+    const coPayload = {
       data: [
         {
-          // Approved by email_status_label.
           id: 1,
           status: 3,
           approved_number: 5,
           email_status_label: "Approved",
           name: "CO A",
+          project_name: "Active Project Alpha",
           total: "$ 7,500.00",
           created_at: "01/15/2025",
         },
         {
-          // Not approved (no approved_number, no Approved label, status !== 3).
+          // Not approved.
           id: 2,
           status: 1,
           approved_number: null,
           email_status_label: "",
           name: "CO B",
+          project_name: "Active Project Alpha",
           total: "$ 3,000.00",
           created_at: "01/15/2025",
         },
         {
-          // Approved but already invoiced — must be filtered out.
+          // Approved but already invoiced.
           id: 3,
           status: 3,
           approved_number: 6,
           email_status_label: "Approved",
           name: "CO C",
+          project_name: "Active Project Beta",
           total: "$ 9,000.00",
           invoiced_amount: "$ 9,000.00",
+          created_at: "01/15/2025",
+        },
+        {
+          // Approved but on an inactive project — must be filtered out.
+          id: 4,
+          status: 3,
+          approved_number: 7,
+          name: "CO D",
+          project_name: "Completed Old Project",
+          total: "$ 5,000.00",
           created_at: "01/15/2025",
         },
       ],
     };
     const { stub, recorded } = makeFetchStub([
-      { status: 200, body: JSON.stringify(payload) },
+      { status: 200, body: JSON.stringify(activeProjectsPayload) },
+      { status: 200, body: JSON.stringify(coPayload) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
@@ -678,18 +707,21 @@ describe("findUnbilledChangeOrders() — MOS-215", () => {
     expect(out).toHaveLength(1);
     expect(out[0].id).toBe(1);
     expect(out[0].total_value).toBe(7500);
-    // Bumped length=500 for recall.
-    expect(recorded[0].url).toContain("length=500");
+    // First call is projects datatable, second is change-orders datatable.
+    expect(recorded[0].url).toContain("projects/datatable");
+    expect(recorded[1].url).toContain("change-orders/datatable");
+    expect(recorded[1].url).toContain("length=500");
   });
 
   it("applies min_amount filter", async () => {
-    const payload = {
+    const coPayload = {
       data: [
         {
           id: 10,
           status: 3,
           approved_number: 1,
           name: "Small",
+          project_name: "Active Project Alpha",
           total: "$ 500.00",
           created_at: "01/15/2025",
         },
@@ -698,13 +730,15 @@ describe("findUnbilledChangeOrders() — MOS-215", () => {
           status: 3,
           approved_number: 2,
           name: "Big",
+          project_name: "Active Project Beta",
           total: "$ 25,000.00",
           created_at: "01/15/2025",
         },
       ],
     };
     const { stub } = makeFetchStub([
-      { status: 200, body: JSON.stringify(payload) },
+      { status: 200, body: JSON.stringify(activeProjectsPayload) },
+      { status: 200, body: JSON.stringify(coPayload) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
@@ -716,30 +750,31 @@ describe("findUnbilledChangeOrders() — MOS-215", () => {
   it("applies older_than_days filter using created_at as the proxy", async () => {
     const today = new Date();
     const recent = `${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}/${today.getFullYear()}`;
-    const payload = {
+    const coPayload = {
       data: [
         {
-          // Approved today — should be filtered out by older_than_days=7.
           id: 20,
           status: 3,
           approved_number: 1,
           name: "Today",
+          project_name: "Active Project Alpha",
           total: "$ 1,000.00",
           created_at: recent,
         },
         {
-          // Approved very long ago — should pass.
           id: 21,
           status: 3,
           approved_number: 2,
           name: "Old",
+          project_name: "Active Project Beta",
           total: "$ 1,000.00",
           created_at: "01/01/2000",
         },
       ],
     };
     const { stub } = makeFetchStub([
-      { status: 200, body: JSON.stringify(payload) },
+      { status: 200, body: JSON.stringify(activeProjectsPayload) },
+      { status: 200, body: JSON.stringify(coPayload) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
@@ -748,8 +783,9 @@ describe("findUnbilledChangeOrders() — MOS-215", () => {
     expect(ids).toEqual([21]);
   });
 
-  it("returns [] when the datatable is empty or returns null", async () => {
+  it("returns [] when the projects datatable is empty", async () => {
     const { stub } = makeFetchStub([
+      { status: 200, body: JSON.stringify({ data: [] }) },
       { status: 200, body: JSON.stringify({ data: [] }) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
@@ -766,13 +802,14 @@ describe("findUnbilledChangeOrders() — MOS-215", () => {
   });
 
   it("treats invoiced_amount numeric > 0 as already billed", async () => {
-    const payload = {
+    const coPayload = {
       data: [
         {
           id: 30,
           status: 3,
           approved_number: 1,
           name: "Billed already",
+          project_name: "Active Project Alpha",
           total: "$ 9,000.00",
           invoiced_amount: 9000,
           created_at: "01/15/2025",
@@ -782,6 +819,7 @@ describe("findUnbilledChangeOrders() — MOS-215", () => {
           status: 3,
           approved_number: 2,
           name: "Not billed",
+          project_name: "Active Project Beta",
           total: "$ 4,000.00",
           invoiced_amount: 0,
           created_at: "01/15/2025",
@@ -789,7 +827,8 @@ describe("findUnbilledChangeOrders() — MOS-215", () => {
       ],
     };
     const { stub } = makeFetchStub([
-      { status: 200, body: JSON.stringify(payload) },
+      { status: 200, body: JSON.stringify(activeProjectsPayload) },
+      { status: 200, body: JSON.stringify(coPayload) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
@@ -803,32 +842,31 @@ describe("findUnbilledChangeOrders() — MOS-215", () => {
 // ---------------------------------------------------------------------------
 
 describe("getCustomer() — MOS-216", () => {
-  it("hits the form endpoint /companies/:id/form", async () => {
-    const detail = { id: 300001, name: "Acme" };
+  it("finds a customer by DT_RowId from the companies datatable", async () => {
+    const dtPayload = {
+      data: [
+        { DT_RowId: "row_300001", name: "Acme", status: "Active" },
+        { DT_RowId: "row_300002", name: "Other", status: "Active" },
+      ],
+    };
     const { stub, recorded } = makeFetchStub([
-      { status: 200, body: JSON.stringify(detail) },
+      { status: 200, body: JSON.stringify(dtPayload) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
     const out = await api.getCustomer(300001);
-    expect(out).toEqual(detail);
-    expect(recorded[0].url).toBe(
-      "https://moss.buildtools.app/companies/300001/form",
-    );
+    expect(out).toMatchObject({ DT_RowId: "row_300001", name: "Acme" });
+    expect(recorded[0].url).toContain("companies/datatable");
   });
 
-  it("returns null on non-200", async () => {
-    const { stub } = makeFetchStub([{ status: 404, body: "" }]);
+  it("returns null when the customer ID is not in the datatable", async () => {
+    const dtPayload = { data: [{ DT_RowId: "row_999", name: "X" }] };
+    const { stub } = makeFetchStub([
+      { status: 200, body: JSON.stringify(dtPayload) },
+    ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    expect(await api.getCustomer(1)).toBeNull();
-  });
-
-  it("returns null when response body is not JSON", async () => {
-    const { stub } = makeFetchStub([{ status: 200, body: "not-json" }]);
-    const api = new BuildToolsAPI({ fetch: stub });
-    api.authenticated = true;
-    expect(await api.getCustomer(1)).toBeNull();
+    expect(await api.getCustomer(404)).toBeNull();
   });
 
   it("requires authentication", async () => {

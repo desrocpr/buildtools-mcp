@@ -670,31 +670,24 @@ export class BuildToolsAPI {
   }
 
   /**
-   * Source L306–325. NOTE: uses the form endpoint `/projects/${id}/form`
-   * (not `/api/projects/${id}`), per source.
+   * Fetches a single project by ID. BuildTools does not expose a JSON detail
+   * endpoint — `/projects/:id/form` returns 404. Instead we pull from the
+   * projects datatable and match by the `id` field client-side.
    */
   async getProject<T = unknown>(projectId: string | number): Promise<T | null> {
-    await this.ensureAuthenticated();
+    const numericId = Number(projectId);
+    const result = await this.datatable<{
+      data?: Array<Record<string, unknown>>;
+    }>("projects", { length: 5000 });
 
-    const response = await this.request(
-      `${this.baseUrl}/projects/${projectId}/form`,
-      {
-        headers: {
-          Accept: "application/json",
-          "X-Requested-With": "XMLHttpRequest",
-        },
-      },
-      false,
+    const rows = result?.data ?? [];
+    const match = rows.find(
+      (r) =>
+        r.id === numericId ||
+        r.id === String(numericId) ||
+        r.DT_RowId === `row_${numericId}`,
     );
-
-    if (response.status === 200) {
-      try {
-        return JSON.parse(response.body) as T;
-      } catch {
-        return null;
-      }
-    }
-    return null;
+    return (match as T) ?? null;
   }
 
   /** Source L333–365. */
@@ -755,39 +748,28 @@ export class BuildToolsAPI {
   }
 
   /**
-   * Phase 3.3 (MOS-216). Fetches a single customer/company detail payload
-   * from `/companies/:id/form`, mirroring the `/projects/:id/form` /
-   * `/change-orders/:id/form` form-endpoint convention used by other read
-   * methods. The source `api-client.js` does not expose a single-customer
-   * detail method, so the form path is the natural read surface. **Path is
-   * inferred and pending live verification** (MOS-222 smoke).
-   *
-   * Returns the parsed JSON body on 200, `null` on non-200 or non-JSON body.
+   * Fetches a single customer/company by ID. BuildTools does not expose a JSON
+   * detail endpoint — `/companies/:id/form` returns 404. Instead we pull from
+   * the companies datatable and match by `DT_RowId` client-side (companies use
+   * `row_${id}` format; the raw `id` field is not in the datatable row).
    */
   async getCustomer<T = unknown>(
     customerId: string | number,
   ): Promise<T | null> {
-    await this.ensureAuthenticated();
+    const numericId = Number(customerId);
+    const result = await this.datatable<{
+      data?: Array<Record<string, unknown>>;
+    }>("companies", { length: 5000 });
 
-    const response = await this.request(
-      `${this.baseUrl}/companies/${customerId}/form`,
-      {
-        headers: {
-          Accept: "application/json",
-          "X-Requested-With": "XMLHttpRequest",
-        },
-      },
-      false,
+    const rows = result?.data ?? [];
+    const rowIdKey = `row_${numericId}`;
+    const match = rows.find(
+      (r) =>
+        r.DT_RowId === rowIdKey ||
+        r.id === numericId ||
+        r.id === String(numericId),
     );
-
-    if (response.status === 200) {
-      try {
-        return JSON.parse(response.body) as T;
-      } catch {
-        return null;
-      }
-    }
-    return null;
+    return (match as T) ?? null;
   }
 
   /**
@@ -916,39 +898,28 @@ export class BuildToolsAPI {
   }
 
   /**
-   * Phase 3.2 (MOS-215). Fetches a single change-order's detail payload from
-   * the form endpoint, mirroring `getProject()`'s `/projects/${id}/form`
-   * convention. No documented "GET /change-orders/:id" detail endpoint exists
-   * in source `api-client.js`; the form path is the natural read surface and
-   * is consistent with how change-order edit/save flows load. **Path is
-   * inferred and pending live verification** (MOS-222 smoke).
-   *
-   * Returns the parsed JSON body on 200, `null` on non-200 or non-JSON body.
+   * Fetches a single change order by ID. BuildTools does not expose a JSON
+   * detail endpoint — `/change-orders/:id/form` returns 404. Instead we pull
+   * from the change-orders datatable and match by the `info` field (which
+   * holds the CO's numeric ID) client-side.
    */
   async getChangeOrder<T = unknown>(
     changeOrderId: string | number,
   ): Promise<T | null> {
-    await this.ensureAuthenticated();
+    const numericId = Number(changeOrderId);
+    const result = await this.datatable<{
+      data?: Array<Record<string, unknown>>;
+    }>("change-orders", { length: 10000 });
 
-    const response = await this.request(
-      `${this.baseUrl}/change-orders/${changeOrderId}/form`,
-      {
-        headers: {
-          Accept: "application/json",
-          "X-Requested-With": "XMLHttpRequest",
-        },
-      },
-      false,
+    const rows = result?.data ?? [];
+    const match = rows.find(
+      (r) =>
+        r.info === numericId ||
+        r.info === String(numericId) ||
+        r.id === numericId ||
+        r.DT_RowId === `row_${numericId}`,
     );
-
-    if (response.status === 200) {
-      try {
-        return JSON.parse(response.body) as T;
-      } catch {
-        return null;
-      }
-    }
-    return null;
+    return (match as T) ?? null;
   }
 
   /**
@@ -1027,14 +998,32 @@ export class BuildToolsAPI {
   > {
     await this.ensureAuthenticated();
 
-    // Pull as many rows as BuildTools will return in a single page. The
-    // datatable defaults to `length=50`; we bump to 500 to maximise recall
-    // without paginating (the corpus is small in the moss tenant).
-    const result = (await this.datatable<{
+    // Step 1: Get active projects (status 5-8: Nexus, Omega, Invicta, Alpha).
+    // The reference implementation (find-unbilled-cos.js) filters to these
+    // statuses — non-active projects should never appear in the results.
+    const activeStatuses = new Set([5, 6, 7, 8]);
+    const projectsResult = (await this.datatable<{
+      data?: Array<Record<string, unknown>>;
+    }>("projects", {
+      length: 500,
+      "columns[1][search][value]": "5|6|7|8",
+      "columns[1][search][regex]": "true",
+    })) ?? { data: [] };
+
+    const activeProjectNames = new Set<string>();
+    for (const proj of projectsResult.data ?? []) {
+      const status = typeof proj.status === "number" ? proj.status : Number(proj.status);
+      if (activeStatuses.has(status) && typeof proj.name === "string") {
+        activeProjectNames.add(proj.name.trim());
+      }
+    }
+
+    // Step 2: Pull all change orders.
+    const coResult = (await this.datatable<{
       data?: Array<Record<string, unknown>>;
     }>("change-orders", { length: 500 })) ?? { data: [] };
 
-    const rows = result.data ?? [];
+    const rows = coResult.data ?? [];
     const matches: Array<Record<string, unknown> & { total_value: number }> = [];
 
     const now = Date.now();
@@ -1045,23 +1034,26 @@ export class BuildToolsAPI {
     const minAmount = filters.min_amount;
 
     for (const row of rows) {
-      // ---- approved? -----------------------------------------------------
-      const approvedNumber = row.approved_number;
-      const emailStatusLabel = String(row.email_status_label ?? "");
+      // ---- belongs to an active project? --------------------------------
+      const projectName = typeof row.project_name === "string"
+        ? row.project_name.trim()
+        : "";
+      if (!activeProjectNames.has(projectName)) continue;
+
+      // ---- approved? (status 3 per BUSINESS_LOGIC.md) -------------------
       const status = row.status;
       const approved =
-        (approvedNumber !== null && approvedNumber !== undefined) ||
-        emailStatusLabel.startsWith("Approved") ||
         status === 3 ||
-        String(status) === "3";
+        String(status) === "3" ||
+        (row.approved_number !== null && row.approved_number !== undefined);
       if (!approved) continue;
 
       // ---- already billed? ----------------------------------------------
-      // The change-orders datatable does not surface a canonical "billed"
-      // flag. The reference SQL impl joins against `financial_statements_*`
-      // tables which are not exposed here. Best-effort: skip rows whose
-      // numeric `invoiced_amount` is positive when surfaced, OR whose
-      // `relations` string mentions an invoice/statement number.
+      // The CO datatable does not surface a canonical "billed" flag. The
+      // reference SQL computes (budget_total + approved_co_total -
+      // requested_amount) which is a project-level gap, not per-CO. This
+      // per-CO heuristic is a best-effort approximation: skip COs whose
+      // invoiced_amount is positive.
       const invoicedAmountRaw = row.invoiced_amount;
       if (typeof invoicedAmountRaw === "string") {
         const invoicedValue = Number(invoicedAmountRaw.replace(/[^\d.-]/g, ""));
@@ -1086,9 +1078,6 @@ export class BuildToolsAPI {
       // ---- older_than_days filter --------------------------------------
       if (olderThanMs !== undefined) {
         const created = String(row.created_at ?? "");
-        // BuildTools' MM/DD/YYYY format. `new Date("MM/DD/YYYY")` is
-        // accepted by V8 — we tolerate any unparseable date by skipping
-        // the filter for that row (rather than excluding it silently).
         const parsed = Date.parse(created);
         if (Number.isFinite(parsed)) {
           if (now - parsed < olderThanMs) continue;
