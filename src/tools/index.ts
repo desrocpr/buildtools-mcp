@@ -66,6 +66,7 @@ export {
 
 export {
   listSelectionsTool,
+  getSelectionTool,
   listAllowancesTool,
   listSelectionCategoriesTool,
   selectionTools,

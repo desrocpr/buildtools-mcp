@@ -126,6 +126,100 @@ export const listSelectionsTool: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// get_selection
+// ---------------------------------------------------------------------------
+
+const GetSelectionInputSchema = z.object({
+  selection_id: z.number().describe("BuildTools selection ID."),
+  project_id: z.number().describe("BuildTools project ID."),
+});
+
+async function getSelectionHandler(
+  args: unknown,
+  api: BuildToolsAPI,
+): Promise<ToolResult> {
+  const parsed = GetSelectionInputSchema.safeParse(args ?? {});
+  if (!parsed.success) return formatZodError(parsed.error, "get_selection");
+  const { selection_id, project_id } = parsed.data;
+
+  try {
+    const detail = await api.getSelectionDetail(selection_id, project_id);
+    if (!detail || detail.items.length === 0) {
+      return markdown(`No detail found for selection #${selection_id} on project #${project_id}.`);
+    }
+
+    const formatUsd = (n: number | null): string =>
+      n !== null
+        ? new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(n)
+        : "—";
+
+    const formatSize = (bytes: number): string => {
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    };
+
+    const lines: string[] = [];
+    lines.push(`## Selection #${selection_id} (project #${project_id})\n`);
+
+    const selected = detail.items.find((i) => i.selected);
+    const others = detail.items.filter((i) => !i.selected);
+
+    if (selected) {
+      lines.push(`### Selected: ${selected.title}`);
+      lines.push("");
+      if (selected.description) lines.push(`- **Description**: ${selected.description}`);
+      if (selected.model) lines.push(`- **Model**: ${selected.model}`);
+      lines.push(`- **Price**: ${formatUsd(selected.price)}`);
+      if (selected.companyName) lines.push(`- **Vendor**: ${selected.companyName}`);
+      if (selected.url) lines.push(`- **Product link**: ${selected.url}`);
+
+      if (selected.files.length > 0) {
+        lines.push("");
+        lines.push(`**Attached files** (${selected.files.length}):`);
+        for (const f of selected.files) {
+          lines.push(`- [${f.name}](${f.url}) (${formatSize(f.size)}, ${f.type}${f.isImage ? ", image" : ""})`);
+        }
+      }
+
+      if (selected.subitems.length > 0) {
+        lines.push("");
+        lines.push(`**Sub-items** (${selected.subitems.length}):`);
+        for (const s of selected.subitems) {
+          lines.push(`- ${s.title ?? s.name ?? JSON.stringify(s)}`);
+        }
+      }
+    }
+
+    if (others.length > 0) {
+      lines.push("");
+      lines.push(`### Other options (${others.length})`);
+      lines.push("");
+      for (const item of others) {
+        const pricePart = item.price !== null ? ` — ${formatUsd(item.price)}` : "";
+        const filesPart = item.files.length > 0 ? ` (${item.files.length} file${item.files.length > 1 ? "s" : ""})` : "";
+        lines.push(`- **${item.title}**${pricePart}${filesPart}`);
+        if (item.description && item.description !== item.title) {
+          lines.push(`  ${item.description}`);
+        }
+      }
+    }
+
+    return markdown(lines.join("\n"));
+  } catch (err) {
+    return formatError(err, "get_selection");
+  }
+}
+
+export const getSelectionTool: ToolDefinition = {
+  name: "get_selection",
+  description:
+    "Get full detail for a selection including all options/choices, descriptions, models, vendor info, prices, and attached files (installation specs, PDFs, images). Requires both selection_id and project_id.",
+  inputSchema: zodToJsonSchema(GetSelectionInputSchema),
+  handler: getSelectionHandler,
+};
+
+// ---------------------------------------------------------------------------
 // list_allowances
 // ---------------------------------------------------------------------------
 
@@ -253,6 +347,7 @@ export const listSelectionCategoriesTool: ToolDefinition = {
 
 export const selectionTools: ToolDefinition[] = [
   listSelectionsTool,
+  getSelectionTool,
   listAllowancesTool,
   listSelectionCategoriesTool,
 ];
