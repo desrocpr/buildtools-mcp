@@ -989,7 +989,7 @@ describe("updateProject()", () => {
     await expect(
       // @ts-expect-error — intentional bad shape
       api.updateProject(1, {}),
-    ).rejects.toBeInstanceOf(BuildToolsAuthError);
+    ).rejects.toBeInstanceOf(BuildToolsServerError);
   });
 
   it("maps r:1 to success and uses provided projectId", async () => {

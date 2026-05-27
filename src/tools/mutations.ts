@@ -408,15 +408,20 @@ export function createMutationTools(
   function makeTool(
     name: string,
     description: string,
-    schema: z.ZodType,
+    schema: z.ZodTypeAny,
     confirmed: (args: any, store: ConfirmationStore) => Promise<ToolResult>,
   ): ToolDefinition {
     return {
       name,
       description,
       inputSchema: zodToJsonSchema(schema),
+      // _api is intentionally unused — mutation tools access the API via
+      // closure over getApi() to ensure the lazy singleton is resolved at
+      // execution time, not at registration time.
       handler: async (rawArgs: unknown, _api: BuildToolsAPI) => {
-        const parsed = (schema as z.ZodObject<any>).safeParse(rawArgs ?? {});
+        // confirmed() must only receive Zod-validated data — the confirmation
+        // framework stores and replays these args on the second call.
+        const parsed = schema.safeParse(rawArgs ?? {});
         if (!parsed.success) return formatZodError(parsed.error, name);
         return confirmed(parsed.data, store);
       },

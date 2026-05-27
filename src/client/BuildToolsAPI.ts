@@ -673,6 +673,9 @@ export class BuildToolsAPI {
    * Fetches a single project by ID. BuildTools does not expose a JSON detail
    * endpoint — `/projects/:id/form` returns 404. Instead we pull from the
    * projects datatable and match by the `id` field client-side.
+   *
+   * Limitation: requests up to 5000 rows. If the tenant has more projects,
+   * older ones may be silently missed. The moss tenant has ~3500 total.
    */
   async getProject<T = unknown>(projectId: string | number): Promise<T | null> {
     const numericId = Number(projectId);
@@ -707,7 +710,7 @@ export class BuildToolsAPI {
   ): Promise<{ success: boolean; projectId?: string | number; errors?: unknown }> {
     await this.ensureAuthenticated();
     if (!projectData.projectManager) {
-      throw new BuildToolsAuthError("projectManager is required for updates");
+      throw new BuildToolsServerError("projectManager is required for updates");
     }
 
     const data: PostData = {
@@ -752,6 +755,8 @@ export class BuildToolsAPI {
    * detail endpoint — `/companies/:id/form` returns 404. Instead we pull from
    * the companies datatable and match by `DT_RowId` client-side (companies use
    * `row_${id}` format; the raw `id` field is not in the datatable row).
+   *
+   * Limitation: requests up to 5000 rows. Moss tenant has ~1100 companies.
    */
   async getCustomer<T = unknown>(
     customerId: string | number,
@@ -987,39 +992,38 @@ export class BuildToolsAPI {
       cells: string[];
     }> = [];
 
-    // Budget rows have data-id and data-category attributes (order varies)
-    const rowRegex = /<tr[^>]*data-id="(\d+)"[^>]*data-category="(\d+)"[^>]*>([\s\S]*?)<\/tr>/g;
-    const rowRegex2 = /<tr[^>]*data-category="(\d+)"[^>]*data-id="(\d+)"[^>]*>([\s\S]*?)<\/tr>/g;
+    // Budget rows have data-id and data-category attrs in any order.
+    // Match all <tr> tags that contain both, extract attrs from the tag string.
+    const rowRegex = /<tr([^>]*data-id="[^"]*"[^>]*data-category="[^"]*"[^>]*|[^>]*data-category="[^"]*"[^>]*data-id="[^"]*"[^>]*)>([\s\S]*?)<\/tr>/g;
+    let match: RegExpExecArray | null;
+    while ((match = rowRegex.exec(html)) !== null) {
+      const attrs = match[1];
+      const idMatch = attrs.match(/data-id="(\d+)"/);
+      const catMatch = attrs.match(/data-category="(\d+)"/);
+      if (!idMatch || !catMatch) continue;
 
-    for (const re of [rowRegex, rowRegex2]) {
-      let match: RegExpExecArray | null;
-      while ((match = re.exec(html)) !== null) {
-        const id = re === rowRegex ? match[1] : match[2];
-        const categoryId = re === rowRegex ? match[2] : match[1];
-        const rowHtml = match[3];
+      const id = idMatch[1];
+      const categoryId = catMatch[1];
+      const rowHtml = match[2];
 
-        const cells: string[] = [];
-        const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/g;
-        let cellMatch: RegExpExecArray | null;
-        while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
-          cells.push(strip(cellMatch[1]));
-        }
-
-        const name = cells[0] ?? "";
-        if (!/allowance/i.test(name)) continue;
-
-        // Avoid duplicates
-        if (allowances.some((a) => a.id === id)) continue;
-
-        const dataValue = match[0].match(/data-value="([^"]*)"/);
-        const budgetedAmount = dataValue ? Number(dataValue[1]) || 0 : 0;
-
-        // Find the revised amount (typically a $ value in the cells)
-        const amounts = cells.filter((c) => /^\$\s*[\d,]+\.\d{2}/.test(c));
-        const revisedAmount = amounts[0] ?? "";
-
-        allowances.push({ id, categoryId, name, budgetedAmount, revisedAmount, cells });
+      const cells: string[] = [];
+      const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/g;
+      let cellMatch: RegExpExecArray | null;
+      while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
+        cells.push(strip(cellMatch[1]));
       }
+
+      const name = cells[0] ?? "";
+      if (!/allowance/i.test(name)) continue;
+      if (allowances.some((a) => a.id === id)) continue;
+
+      const dataValue = attrs.match(/data-value="([^"]*)"/);
+      const budgetedAmount = dataValue ? Number(dataValue[1]) || 0 : 0;
+
+      const amounts = cells.filter((c) => /^\$\s*[\d,]+\.\d{2}/.test(c));
+      const revisedAmount = amounts[0] ?? "";
+
+      allowances.push({ id, categoryId, name, budgetedAmount, revisedAmount, cells });
     }
 
     return allowances;
@@ -1271,6 +1275,9 @@ export class BuildToolsAPI {
    * detail endpoint — `/change-orders/:id/form` returns 404. Instead we pull
    * from the change-orders datatable and match by the `info` field (which
    * holds the CO's numeric ID) client-side.
+   *
+   * Limitation: requests up to 10000 rows. Moss tenant has ~7800 COs.
+   * If the corpus grows past 10000, older COs may be silently missed.
    */
   async getChangeOrder<T = unknown>(
     changeOrderId: string | number,
