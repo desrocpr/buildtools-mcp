@@ -603,15 +603,28 @@ describe("getChangeOrder() — MOS-215", () => {
 });
 
 describe("getFinancialStatement() — MOS-215", () => {
-  it("hits the form endpoint /financial/statements/form?PR[]=<id>", async () => {
-    const statement = { id: 700001, name: "Q1" };
+  const fsFormHtml = [
+    '<input name="budgetOverviewTotals" type="hidden" value="',
+    '{ &quot;budget_total&quot;: 200000, &quot;approved_co_total&quot;: 50000, ',
+    '&quot;budget_revised&quot;: 250000, &quot;financial_current_amount&quot;: 45000 }',
+    '">',
+    '<input name="FinancialStatement[name]" type="text" value="Q1 2026">',
+    '<input name="FinancialStatement[status]" type="hidden" value="1">',
+  ].join("");
+
+  it("parses budgetOverviewTotals from form HTML", async () => {
     const { stub, recorded } = makeFetchStub([
-      { status: 200, body: JSON.stringify(statement) },
+      { status: 200, body: fsFormHtml },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.getFinancialStatement(100002);
-    expect(out).toEqual(statement);
+    const out = await api.getFinancialStatement<Record<string, unknown>>(100002);
+    expect(out).not.toBeNull();
+    expect(out!.budget_total).toBe(200000);
+    expect(out!.approved_co_total).toBe(50000);
+    expect(out!.financial_current_amount).toBe(45000);
+    expect(out!.name).toBe("Q1 2026");
+    expect(out!.status).toBe("1");
     expect(recorded[0].url).toBe(
       "https://moss.buildtools.app/financial/statements/form?PR[]=100002",
     );
@@ -624,8 +637,8 @@ describe("getFinancialStatement() — MOS-215", () => {
     expect(await api.getFinancialStatement(1)).toBeNull();
   });
 
-  it("returns null when response body is not JSON", async () => {
-    const { stub } = makeFetchStub([{ status: 200, body: "<html/>" }]);
+  it("returns null when form has no budgetOverviewTotals", async () => {
+    const { stub } = makeFetchStub([{ status: 200, body: "<html>no totals here</html>" }]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
     expect(await api.getFinancialStatement(1)).toBeNull();
@@ -641,152 +654,58 @@ describe("getFinancialStatement() — MOS-215", () => {
 });
 
 describe("findUnbilledChangeOrders() — MOS-215", () => {
-  // Helper: the method now makes two datatable calls (projects then COs).
-  const activeProjectsPayload = {
-    data: [
-      { id: 500, status: 6, name: "Active Project Alpha" },
-      { id: 501, status: 7, name: "Active Project Beta" },
-    ],
-  };
+  const makeFsFormHtml = (currentAmount: number): string =>
+    `<input name="budgetOverviewTotals" type="hidden" value="{ &quot;financial_current_amount&quot;: ${currentAmount} }">`;
 
-  it("returns approved-but-not-billed rows from active projects", async () => {
-    const coPayload = {
+  it("returns projects where budget_revised > requested_amount", async () => {
+    const projectsPayload = {
       data: [
-        {
-          id: 1,
-          status: 3,
-          approved_number: 5,
-          email_status_label: "Approved",
-          name: "CO A",
-          project_name: "Active Project Alpha",
-          total: "$ 7,500.00",
-          created_at: "01/15/2025",
-        },
-        {
-          // Not approved.
-          id: 2,
-          status: 1,
-          approved_number: null,
-          email_status_label: "",
-          name: "CO B",
-          project_name: "Active Project Alpha",
-          total: "$ 3,000.00",
-          created_at: "01/15/2025",
-        },
-        {
-          // Approved but already invoiced.
-          id: 3,
-          status: 3,
-          approved_number: 6,
-          email_status_label: "Approved",
-          name: "CO C",
-          project_name: "Active Project Beta",
-          total: "$ 9,000.00",
-          invoiced_amount: "$ 9,000.00",
-          created_at: "01/15/2025",
-        },
-        {
-          // Approved but on an inactive project — must be filtered out.
-          id: 4,
-          status: 3,
-          approved_number: 7,
-          name: "CO D",
-          project_name: "Completed Old Project",
-          total: "$ 5,000.00",
-          created_at: "01/15/2025",
-        },
+        { id: 500, status: 6, name: "Has Gap", budget_revised: "$ 100,000.00", change_orders_approved: "$ 10,000.00" },
+        { id: 501, status: 7, name: "Fully Billed", budget_revised: "$ 50,000.00", change_orders_approved: "$ 5,000.00" },
+        { id: 502, status: 4, name: "Completed", budget_revised: "$ 80,000.00", change_orders_approved: "$ 8,000.00" },
       ],
     };
     const { stub, recorded } = makeFetchStub([
-      { status: 200, body: JSON.stringify(activeProjectsPayload) },
-      { status: 200, body: JSON.stringify(coPayload) },
+      { status: 200, body: JSON.stringify(projectsPayload) },
+      { status: 200, body: makeFsFormHtml(90000) },
+      { status: 200, body: makeFsFormHtml(50000) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
     const out = await api.findUnbilledChangeOrders();
     expect(out).toHaveLength(1);
-    expect(out[0].id).toBe(1);
-    expect(out[0].total_value).toBe(7500);
-    // First call is projects datatable, second is change-orders datatable.
+    expect(out[0].id).toBe(500);
+    expect(out[0].unbilled_gap).toBe(10000);
     expect(recorded[0].url).toContain("projects/datatable");
-    expect(recorded[1].url).toContain("change-orders/datatable");
-    expect(recorded[1].url).toContain("length=500");
   });
 
   it("applies min_amount filter", async () => {
-    const coPayload = {
+    const projectsPayload = {
       data: [
-        {
-          id: 10,
-          status: 3,
-          approved_number: 1,
-          name: "Small",
-          project_name: "Active Project Alpha",
-          total: "$ 500.00",
-          created_at: "01/15/2025",
-        },
-        {
-          id: 11,
-          status: 3,
-          approved_number: 2,
-          name: "Big",
-          project_name: "Active Project Beta",
-          total: "$ 25,000.00",
-          created_at: "01/15/2025",
-        },
+        { id: 600, status: 6, name: "Small Gap", budget_revised: "$ 100,000.00", change_orders_approved: "$ 5,000.00" },
+        { id: 601, status: 7, name: "Big Gap", budget_revised: "$ 200,000.00", change_orders_approved: "$ 50,000.00" },
       ],
     };
     const { stub } = makeFetchStub([
-      { status: 200, body: JSON.stringify(activeProjectsPayload) },
-      { status: 200, body: JSON.stringify(coPayload) },
+      { status: 200, body: JSON.stringify(projectsPayload) },
+      { status: 200, body: makeFsFormHtml(99500) },
+      { status: 200, body: makeFsFormHtml(150000) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
     const out = await api.findUnbilledChangeOrders({ min_amount: 10000 });
     expect(out).toHaveLength(1);
-    expect(out[0].id).toBe(11);
+    expect(out[0].id).toBe(601);
   });
 
-  it("applies older_than_days filter using created_at as the proxy", async () => {
-    const today = new Date();
-    const recent = `${String(today.getMonth() + 1).padStart(2, "0")}/${String(today.getDate()).padStart(2, "0")}/${today.getFullYear()}`;
-    const coPayload = {
+  it("returns [] when no active projects have approved COs", async () => {
+    const projectsPayload = {
       data: [
-        {
-          id: 20,
-          status: 3,
-          approved_number: 1,
-          name: "Today",
-          project_name: "Active Project Alpha",
-          total: "$ 1,000.00",
-          created_at: recent,
-        },
-        {
-          id: 21,
-          status: 3,
-          approved_number: 2,
-          name: "Old",
-          project_name: "Active Project Beta",
-          total: "$ 1,000.00",
-          created_at: "01/01/2000",
-        },
+        { id: 700, status: 6, name: "No COs", budget_revised: "$ 100,000.00", change_orders_approved: "-" },
       ],
     };
     const { stub } = makeFetchStub([
-      { status: 200, body: JSON.stringify(activeProjectsPayload) },
-      { status: 200, body: JSON.stringify(coPayload) },
-    ]);
-    const api = new BuildToolsAPI({ fetch: stub });
-    api.authenticated = true;
-    const out = await api.findUnbilledChangeOrders({ older_than_days: 7 });
-    const ids = out.map((r) => r.id);
-    expect(ids).toEqual([21]);
-  });
-
-  it("returns [] when the projects datatable is empty", async () => {
-    const { stub } = makeFetchStub([
-      { status: 200, body: JSON.stringify({ data: [] }) },
-      { status: 200, body: JSON.stringify({ data: [] }) },
+      { status: 200, body: JSON.stringify(projectsPayload) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
@@ -799,41 +718,6 @@ describe("findUnbilledChangeOrders() — MOS-215", () => {
     await expect(api.findUnbilledChangeOrders()).rejects.toBeInstanceOf(
       BuildToolsAuthError,
     );
-  });
-
-  it("treats invoiced_amount numeric > 0 as already billed", async () => {
-    const coPayload = {
-      data: [
-        {
-          id: 30,
-          status: 3,
-          approved_number: 1,
-          name: "Billed already",
-          project_name: "Active Project Alpha",
-          total: "$ 9,000.00",
-          invoiced_amount: 9000,
-          created_at: "01/15/2025",
-        },
-        {
-          id: 31,
-          status: 3,
-          approved_number: 2,
-          name: "Not billed",
-          project_name: "Active Project Beta",
-          total: "$ 4,000.00",
-          invoiced_amount: 0,
-          created_at: "01/15/2025",
-        },
-      ],
-    };
-    const { stub } = makeFetchStub([
-      { status: 200, body: JSON.stringify(activeProjectsPayload) },
-      { status: 200, body: JSON.stringify(coPayload) },
-    ]);
-    const api = new BuildToolsAPI({ fetch: stub });
-    api.authenticated = true;
-    const out = await api.findUnbilledChangeOrders();
-    expect(out.map((r) => r.id)).toEqual([31]);
   });
 });
 
