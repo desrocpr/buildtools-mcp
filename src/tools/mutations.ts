@@ -403,6 +403,83 @@ export function createMutationTools(
     },
   );
 
+  // -- create_budget_item ---------------------------------------------------
+  const CreateBudgetItemSchema = z.object({
+    project_id: z.number().describe("BuildTools project ID."),
+    budget_category_id: z.number().describe("Leaf budget category ID (e.g. 1614 = '4520 - Interior Trim Materials'). Use list_selection_categories to find valid IDs."),
+    confirmation_id: z.string().optional(),
+  });
+  type CreateBudgetItemArgs = z.infer<typeof CreateBudgetItemSchema>;
+
+  const createBudgetItemConfirmed = requiresConfirmation<CreateBudgetItemArgs>(
+    "create_budget_item",
+    (a) => `Add budget category #${a.budget_category_id} to project #${a.project_id}.`,
+    async (a) => {
+      try {
+        const result = await getApi().createBudgetItem({
+          projectId: a.project_id,
+          budgetCategoryId: a.budget_category_id,
+        });
+        if (result.success) return markdown(`Budget item **#${result.budgetItemId}** created. Use update_budget_item to set its amount.`);
+        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+      } catch (err) { return formatError(err, "create_budget_item"); }
+    },
+  );
+
+  // -- update_budget_item ---------------------------------------------------
+  const UpdateBudgetItemSchema = z.object({
+    project_id: z.number().describe("BuildTools project ID."),
+    budget_item_id: z.number().describe("Budget item ID (from list_budget)."),
+    budget_category_id: z.number().describe("Budget category ID — must match the item's existing category."),
+    amount_working: z.number().optional().describe("New working budget amount in dollars."),
+    is_allowance: z.boolean().optional().describe("Mark this budget item as a customer-facing allowance."),
+    confirmation_id: z.string().optional(),
+  });
+  type UpdateBudgetItemArgs = z.infer<typeof UpdateBudgetItemSchema>;
+
+  const updateBudgetItemConfirmed = requiresConfirmation<UpdateBudgetItemArgs>(
+    "update_budget_item",
+    (a) => {
+      const parts: string[] = [];
+      if (a.amount_working !== undefined) parts.push(`amount = $${a.amount_working.toFixed(2)}`);
+      if (a.is_allowance !== undefined) parts.push(`allowance = ${a.is_allowance}`);
+      return `Update budget item #${a.budget_item_id} on project #${a.project_id}: ${parts.join(", ") || "(no changes)"}.`;
+    },
+    async (a) => {
+      try {
+        const result = await getApi().updateBudgetItem({
+          projectId: a.project_id,
+          budgetItemId: a.budget_item_id,
+          budgetCategoryId: a.budget_category_id,
+          amountWorking: a.amount_working,
+          isAllowance: a.is_allowance,
+        });
+        if (result.success) return markdown(`Budget item **#${a.budget_item_id}** updated.`);
+        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+      } catch (err) { return formatError(err, "update_budget_item"); }
+    },
+  );
+
+  // -- delete_budget_item ---------------------------------------------------
+  const DeleteBudgetItemSchema = z.object({
+    project_id: z.number().describe("BuildTools project ID."),
+    budget_item_id: z.number().describe("Budget item ID to delete."),
+    confirmation_id: z.string().optional(),
+  });
+  type DeleteBudgetItemArgs = z.infer<typeof DeleteBudgetItemSchema>;
+
+  const deleteBudgetItemConfirmed = requiresConfirmation<DeleteBudgetItemArgs>(
+    "delete_budget_item",
+    (a) => `Delete budget item #${a.budget_item_id} from project #${a.project_id}.`,
+    async (a) => {
+      try {
+        const result = await getApi().deleteBudgetItem(a.budget_item_id, a.project_id);
+        if (result.success) return markdown(`Budget item **#${a.budget_item_id}** deleted (${result.succeeded} succeeded).`);
+        return errorMarkdown(`Delete failed: succeeded=${result.succeeded}, failed=${result.failed}, errors=${JSON.stringify(result.errors)?.substring(0, 200)}`);
+      } catch (err) { return formatError(err, "delete_budget_item"); }
+    },
+  );
+
   // -- Build ToolDefinition array ------------------------------------------
 
   function makeTool(
@@ -494,6 +571,24 @@ export function createMutationTools(
       "Delete one or more selections from a project. Requires confirmation. This is destructive.",
       DeleteSelectionSchema,
       deleteSelectionConfirmed,
+    ),
+    makeTool(
+      "create_budget_item",
+      "Add a budget category line item to a project. The amount is set separately via update_budget_item. Requires confirmation.",
+      CreateBudgetItemSchema,
+      createBudgetItemConfirmed,
+    ),
+    makeTool(
+      "update_budget_item",
+      "Update a budget line item's working amount and/or allowance flag. Requires confirmation.",
+      UpdateBudgetItemSchema,
+      updateBudgetItemConfirmed,
+    ),
+    makeTool(
+      "delete_budget_item",
+      "Delete a budget line item from a project. Will fail if the item has related change orders. Requires confirmation.",
+      DeleteBudgetItemSchema,
+      deleteBudgetItemConfirmed,
     ),
   ];
 }

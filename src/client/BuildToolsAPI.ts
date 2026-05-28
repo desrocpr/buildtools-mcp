@@ -1039,6 +1039,303 @@ export class BuildToolsAPI {
   }
 
   /**
+   * Fetches the full budget for a project. Returns all line-item categories
+   * (not just allowances) with all 16 financial columns.
+   *
+   * GET /budget?PR[]=<projectId> returns JSON with `content` (HTML grid).
+   * Each <tr> has data-id (budget item id), data-category (category id),
+   * data-value (working budget amount), data-published/data-working flags.
+   */
+  async getBudget(projectId: string | number): Promise<{
+    items: Array<{
+      id: string;
+      categoryId: string;
+      name: string;
+      isAllowance: boolean;
+      budgetedAmount: number;
+      cells: string[];
+    }>;
+    columns: string[];
+  }> {
+    await this.ensureAuthenticated();
+
+    const response = await this.request(
+      `${this.baseUrl}/budget?PR[]=${projectId}`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+
+    if (response.status !== 200) return { items: [], columns: [] };
+
+    let data: { content?: string };
+    try {
+      data = JSON.parse(response.body);
+    } catch {
+      return { items: [], columns: [] };
+    }
+
+    const html = data.content ?? "";
+    const strip = (s: string): string =>
+      s
+        .replace(/<[^>]*>/g, "")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&bullet;/g, "")
+        .replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"')
+        .replace(/&#039;/g, "'")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    // Pull column headers from <thead>
+    const columns: string[] = [];
+    const theadMatch = html.match(/<thead[\s\S]*?<\/thead>/);
+    if (theadMatch) {
+      const thRegex = /<th[^>]*>([\s\S]*?)<\/th>/g;
+      let thMatch: RegExpExecArray | null;
+      while ((thMatch = thRegex.exec(theadMatch[0])) !== null) {
+        columns.push(strip(thMatch[1]));
+      }
+    }
+
+    const items: Array<{
+      id: string;
+      categoryId: string;
+      name: string;
+      isAllowance: boolean;
+      budgetedAmount: number;
+      cells: string[];
+    }> = [];
+
+    // Match all <tr> with data-id (any attribute order)
+    const rowRegex = /<tr([^>]*data-id="[^"]*"[^>]*)>([\s\S]*?)<\/tr>/g;
+    let match: RegExpExecArray | null;
+    while ((match = rowRegex.exec(html)) !== null) {
+      const attrs = match[1];
+      const idMatch = attrs.match(/data-id="(\d+)"/);
+      const catMatch = attrs.match(/data-category="(\d+)"/);
+      if (!idMatch || !catMatch) continue;
+
+      const id = idMatch[1];
+      const categoryId = catMatch[1];
+      const dataValue = attrs.match(/data-value="([^"]*)"/);
+      const budgetedAmount = dataValue ? Number(dataValue[1]) || 0 : 0;
+      const rowHtml = match[2];
+
+      const cells: string[] = [];
+      const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/g;
+      let cellMatch: RegExpExecArray | null;
+      while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
+        cells.push(strip(cellMatch[1]));
+      }
+
+      const name = cells.find((c) => /^\d{3,5}\s*-\s*\S/.test(c)) ?? "";
+      if (!name) continue;
+
+      const isAllowance = /allowance/i.test(name);
+      if (items.some((it) => it.id === id)) continue;
+
+      items.push({ id, categoryId, name, isAllowance, budgetedAmount, cells });
+    }
+
+    return { items, columns };
+  }
+
+  /**
+   * Creates a new budget line item on a project. Adds a budget category
+   * (must be a leaf category, e.g. "4520 - Interior Trim Materials").
+   *
+   * POST /budget/save?PR[]=<projectId> with `Budget[budget_category_id]=<leafCatId>`
+   * Returns: { result: "success", id: <newBudgetItemId>, message: "..." }
+   *
+   * Verified live: works against both Templates and active projects.
+   */
+  async createBudgetItem(data: {
+    projectId: string | number;
+    budgetCategoryId: string | number;
+  }): Promise<{ success: boolean; budgetItemId?: number; errors?: unknown }> {
+    await this.ensureAuthenticated();
+    if (!data.projectId) throw new BuildToolsServerError("projectId is required");
+    if (!data.budgetCategoryId) {
+      throw new BuildToolsServerError("budgetCategoryId is required");
+    }
+
+    const fd = new URLSearchParams();
+    fd.append("Budget[budget_category_id]", String(data.budgetCategoryId));
+
+    const resp = await this.request(
+      `${this.baseUrl}/budget/save?PR[]=${data.projectId}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-Requested-With": "XMLHttpRequest",
+          Accept: "application/json",
+          "X-XSRF-TOKEN": this.xsrfToken ?? "",
+        },
+        body: fd.toString(),
+      },
+      false,
+    );
+
+    try {
+      const result = JSON.parse(resp.body) as {
+        result?: string;
+        id?: number;
+        message?: string;
+      };
+      if (result.result === "success") {
+        return { success: true, budgetItemId: result.id };
+      }
+      return { success: false, errors: result.message };
+    } catch {
+      return {
+        success: false,
+        errors: `HTTP ${resp.status}: ${resp.body.slice(0, 200)}`,
+      };
+    }
+  }
+
+  /**
+   * Updates a budget item's working amount and/or allowance flag.
+   *
+   * POST /budget/save/<budgetItemId>?PR[]=<projectId> with form fields
+   * including CSRF token harvested from /budget/form/<id>.
+   *
+   * Verified live: changing amount_working updates data-value attr.
+   */
+  async updateBudgetItem(data: {
+    projectId: string | number;
+    budgetItemId: string | number;
+    budgetCategoryId: string | number;
+    amountWorking?: number;
+    isAllowance?: boolean;
+  }): Promise<{ success: boolean; errors?: unknown }> {
+    await this.ensureAuthenticated();
+    if (!data.projectId) throw new BuildToolsServerError("projectId is required");
+    if (!data.budgetItemId) throw new BuildToolsServerError("budgetItemId is required");
+    if (!data.budgetCategoryId) {
+      throw new BuildToolsServerError("budgetCategoryId is required");
+    }
+
+    // Harvest CSRF from the edit form
+    const formResp = await this.request(
+      `${this.baseUrl}/budget/form/${data.budgetItemId}?published=0&PR[]=${data.projectId}`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+    const csrf = (formResp.body.match(/name="_token"[^>]*value="([^"]+)"/) ?? [])[1];
+    if (!csrf) {
+      return { success: false, errors: "Could not harvest CSRF token from budget form" };
+    }
+
+    const fd = new URLSearchParams();
+    fd.append("_token", csrf);
+    fd.append("Budget[budget_category_id]", String(data.budgetCategoryId));
+    if (data.amountWorking !== undefined) {
+      fd.append("Budget[amount_working]", String(data.amountWorking));
+    }
+    if (data.isAllowance) {
+      fd.append("Budget[allowance]", "1");
+    }
+
+    const resp = await this.request(
+      `${this.baseUrl}/budget/save/${data.budgetItemId}?PR[]=${data.projectId}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-Requested-With": "XMLHttpRequest",
+          Accept: "application/json",
+          "X-CSRF-TOKEN": csrf,
+          "X-XSRF-TOKEN": this.xsrfToken ?? "",
+        },
+        body: fd.toString(),
+      },
+      false,
+    );
+
+    try {
+      const result = JSON.parse(resp.body) as {
+        result?: string;
+        message?: string;
+      };
+      if (result.result === "success") return { success: true };
+      return { success: false, errors: result.message };
+    } catch {
+      return {
+        success: false,
+        errors: `HTTP ${resp.status}: ${resp.body.slice(0, 200)}`,
+      };
+    }
+  }
+
+  /**
+   * Deletes a budget line item from a project.
+   *
+   * POST /budget/delete?PR[]=<projectId> with `id=<budgetItemId>` (singular).
+   * Response: { r: 1, s: <succeeded>, f: <failed>, mg: <error details> }.
+   * Deletion fails (f > 0) if the budget item has related change orders.
+   */
+  async deleteBudgetItem(
+    budgetItemId: string | number,
+    projectId: string | number,
+  ): Promise<{ success: boolean; succeeded: number; failed: number; errors?: unknown }> {
+    await this.ensureAuthenticated();
+    if (!projectId) throw new BuildToolsServerError("projectId is required");
+    if (!budgetItemId) throw new BuildToolsServerError("budgetItemId is required");
+
+    const fd = new URLSearchParams();
+    fd.append("id", String(budgetItemId));
+
+    const resp = await this.request(
+      `${this.baseUrl}/budget/delete?PR[]=${projectId}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-Requested-With": "XMLHttpRequest",
+          Accept: "application/json",
+          "X-XSRF-TOKEN": this.xsrfToken ?? "",
+        },
+        body: fd.toString(),
+      },
+      false,
+    );
+
+    try {
+      const result = JSON.parse(resp.body) as {
+        r?: number;
+        s?: number;
+        f?: number;
+        mg?: unknown;
+      };
+      const succeeded = result.s ?? 0;
+      const failed = result.f ?? 0;
+      // success means the row is gone — verify by checking succeeded > 0 OR
+      // (both are 0 which means already-deleted/no-op)
+      const success = result.r === 1 && failed === 0;
+      return { success, succeeded, failed, errors: failed > 0 ? result.mg : undefined };
+    } catch {
+      return {
+        success: false,
+        succeeded: 0,
+        failed: 1,
+        errors: `HTTP ${resp.status}: ${resp.body.slice(0, 200)}`,
+      };
+    }
+  }
+
+  /**
    * Fetches detail for a single selection including its items/options, files,
    * descriptions, vendor info, and prices.
    *

@@ -49,6 +49,7 @@ import { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { ConfirmationStore } from "../confirm/index.js";
 import {
   attachmentTools,
+  budgetTools,
   createMutationTools,
   createSessionCredentialsTool,
   customerTools,
@@ -146,6 +147,7 @@ function buildPerSessionServer(opts: {
     ...workTrackingTools.map((t) => [t.name, t] as const),
     ...operationTools.map((t) => [t.name, t] as const),
     ...selectionTools.map((t) => [t.name, t] as const),
+    ...budgetTools.map((t) => [t.name, t] as const),
     ...mutationTools.map((t) => [t.name, t] as const),
   ]);
 
