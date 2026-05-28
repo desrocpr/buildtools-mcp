@@ -1467,10 +1467,11 @@ export class BuildToolsAPI {
    *
    * GET /financial/statements?PR[]=<projectId> returns JSON with `content`
    * (HTML table of statements) and `statusCount`. Each <tr> has data-id,
-   * data-amount, data-paid, data-balance attributes. Cells contain status,
-   * name, amount, paid, fees, balance, and date.
-   *
-   * Status codes: 1=Draft, 2=Pending, 4=Partial, 5=Sent, 6=Paid.
+   * data-amount, data-paid, data-balance attributes. The BuildTools datatable
+   * layout for cells is, in order: [icon, status_label, name, amount,
+   * paid, fees, balance, date]. The status label is rendered text — one of
+   * Draft / Pending / Partial / Sent / Paid / Partly Paid / To Pay — so the
+   * parser reads it directly rather than mapping numeric codes.
    */
   async getFinancialStatements(
     projectId: string | number,
@@ -1522,10 +1523,6 @@ export class BuildToolsAPI {
       date: string;
     }> = [];
 
-    const STATUS_MAP: Record<number, string> = {
-      1: "Draft", 2: "Pending", 4: "Partial", 5: "Sent", 6: "Paid",
-    };
-
     const strip = (s: string): string =>
       s.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
         .replace(/&quot;/g, '"').replace(/\s+/g, " ").trim();
@@ -1534,6 +1531,18 @@ export class BuildToolsAPI {
       const n = Number(s.replace(/[^\d.-]/g, ""));
       return Number.isFinite(n) ? n : 0;
     };
+
+    // The seven canonical status labels rendered by BuildTools. Anything
+    // outside this set is collapsed to "Unknown" as a defensive fallback.
+    const KNOWN_STATUSES = new Set([
+      "Draft",
+      "Pending",
+      "Partial",
+      "Sent",
+      "Paid",
+      "Partly Paid",
+      "To Pay",
+    ]);
 
     // Match <tr> tags containing data-id (attribute order may vary).
     const rowRegex = /<tr([^>]*data-id="[^"]*"[^>]*)>([\s\S]*?)<\/tr>/g;
@@ -1561,14 +1570,18 @@ export class BuildToolsAPI {
         cells.push(strip(cellMatch[1]));
       }
 
-      const statusText = cells[0] ?? "";
-      const name = cells[1] ?? "";
+      // BuildTools datatable layout: cells[0] is an icon/empty cell,
+      // cells[1] is the rendered status label, cells[2] is the statement
+      // name. Read by index so the status label never leaks into `name`.
+      const statusLabel = cells[1] ?? "";
+      const name = cells[2] ?? "";
       const date = cells.find((c) => /^\d{2}\/\d{2}\/\d{4}$/.test(c)) ?? "";
+      const status = KNOWN_STATUSES.has(statusLabel) ? statusLabel : "Unknown";
 
       statements.push({
         id,
         name,
-        status: statusText || "Unknown",
+        status,
         amount,
         paid,
         balance,

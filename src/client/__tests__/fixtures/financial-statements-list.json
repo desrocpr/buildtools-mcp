@@ -1,0 +1,13 @@
+{
+  "_comment": "MOS-303 — fixture for getFinancialStatements() row parser. The `content` field is the HTML datatable body returned by GET /financial/statements?PR[]=<id>. The real BuildTools layout puts an empty/icon cell at cells[0], the status label at cells[1], the human-readable statement name at cells[2], then amount, paid, fees, balance, date. All IDs and names are scrubbed of real customer data — names use the placeholders already invented in other fixtures (Smith Renovation, Q1 2026 Statement, fake 7xxxxx IDs).",
+  "statusCount": {
+    "Draft": 1,
+    "Pending": 1,
+    "Partial": 0,
+    "Sent": 0,
+    "Paid": 1,
+    "Partly Paid": 1,
+    "To Pay": 1
+  },
+  "content": "<table><tbody><tr data-id=\"700001\" data-amount=\"45000.00\" data-paid=\"45000.00\" data-balance=\"0.00\"><td><i class=\"icon-paid\"></i></td><td>Paid</td><td>Draw #1</td><td>$ 45,000.00</td><td>$ 45,000.00</td><td>$ 0.00</td><td>$ 0.00</td><td>04/30/2026</td></tr><tr data-id=\"700002\" data-amount=\"30000.00\" data-paid=\"15000.00\" data-balance=\"15000.00\"><td><i class=\"icon-partly\"></i></td><td>Partly Paid</td><td>Draw #2</td><td>$ 30,000.00</td><td>$ 15,000.00</td><td>$ 0.00</td><td>$ 15,000.00</td><td>05/15/2026</td></tr><tr data-id=\"700003\" data-amount=\"20000.00\" data-paid=\"0.00\" data-balance=\"20000.00\"><td><i class=\"icon-topay\"></i></td><td>To Pay</td><td>Initial Deposit</td><td>$ 20,000.00</td><td>$ 0.00</td><td>$ 0.00</td><td>$ 20,000.00</td><td>06/01/2026</td></tr><tr data-id=\"700004\" data-amount=\"10000.00\" data-paid=\"0.00\" data-balance=\"10000.00\"><td><i class=\"icon-draft\"></i></td><td>Draft</td><td>Q1 2026 Statement</td><td>$ 10,000.00</td><td>$ 0.00</td><td>$ 0.00</td><td>$ 10,000.00</td><td>06/15/2026</td></tr><tr data-id=\"700005\" data-amount=\"5000.00\" data-paid=\"0.00\" data-balance=\"5000.00\"><td><i class=\"icon-pending\"></i></td><td>Pending</td><td>Smith Renovation Final</td><td>$ 5,000.00</td><td>$ 0.00</td><td>$ 0.00</td><td>$ 5,000.00</td><td>07/01/2026</td></tr></tbody></table>"
+}

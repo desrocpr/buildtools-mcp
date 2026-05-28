@@ -97,6 +97,11 @@ const financialStatementFixture = loadJsonFixture<{
   payment_last: string;
   [k: string]: unknown;
 }>("financial-statement.json");
+const financialStatementsListFixture = loadJsonFixture<{
+  content: string;
+  statusCount: Record<string, number>;
+  [k: string]: unknown;
+}>("financial-statements-list.json");
 const loginSuccessResponseFixture = loadJsonFixture<{
   redirect: string;
   status: string;
@@ -249,6 +254,7 @@ describe("fixtures themselves", () => {
     "customer-detail.json": customerDetailFixture,
     "daily-logs.json": dailyLogsFixture,
     "financial-statement.json": financialStatementFixture,
+    "financial-statements-list.json": financialStatementsListFixture,
     "login-success-response.json": loginSuccessResponseFixture,
     "project-detail.json": projectDetailFixture,
     "projects-list.json": projectsListFixture,
@@ -867,6 +873,125 @@ describe("FinancialStatementSchema — financial-statement.json", () => {
     expect(parsed.created_at).toBe("04/01/2026");
     expect(parsed.due_date).toBe("04/30/2026");
     expect(parsed.payment_last).toBe("04/30/2026");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getFinancialStatements() — financial-statements-list.json (MOS-303)
+//
+// Regression coverage for the row-parser bug where `status` came back as
+// "Unknown" and `name` carried the status label (e.g. "Paid", "To Pay"). The
+// real cell layout is [icon, status_label, name, amount, paid, fees, balance,
+// date]; the fixture's HTML mirrors that and exercises all four labels that
+// the prior parser collapsed: Draft, Pending, Paid, Partly Paid, To Pay.
+// ---------------------------------------------------------------------------
+
+describe("getFinancialStatements() — financial-statements-list.json (MOS-303)", () => {
+  const ALLOWED_STATUSES = new Set([
+    "Draft",
+    "Pending",
+    "Partial",
+    "Sent",
+    "Paid",
+    "Partly Paid",
+    "To Pay",
+  ]);
+
+  it("hits /financial/statements?PR[]=<id> and returns statusCount + statements", async () => {
+    const { api, recorded } = authedApi([
+      { status: 200, body: JSON.stringify(financialStatementsListFixture) },
+    ]);
+    const out = await api.getFinancialStatements(100002);
+    expect(recorded[0].url).toBe(
+      "https://moss.buildtools.app/financial/statements?PR[]=100002",
+    );
+    expect(out.statusCount).toEqual(
+      financialStatementsListFixture.statusCount,
+    );
+    expect(out.statements).toHaveLength(5);
+  });
+
+  it("parses the real statement name into `name` (NOT the status label)", async () => {
+    const { api } = authedApi([
+      { status: 200, body: JSON.stringify(financialStatementsListFixture) },
+    ]);
+    const { statements } = await api.getFinancialStatements(100002);
+
+    // Every name must be the human-readable statement name. The bug regressed
+    // these to the status label, so the assertion is twofold: positive match
+    // on the expected name AND a negative guard that no row's name equals a
+    // status label.
+    const expected: Record<string, string> = {
+      "700001": "Draw #1",
+      "700002": "Draw #2",
+      "700003": "Initial Deposit",
+      "700004": "Q1 2026 Statement",
+      "700005": "Smith Renovation Final",
+    };
+    for (const row of statements) {
+      expect(row.name).toBe(expected[row.id]);
+      expect(ALLOWED_STATUSES.has(row.name)).toBe(false);
+    }
+  });
+
+  it("maps every row's `status` to one of the seven canonical labels", async () => {
+    const { api } = authedApi([
+      { status: 200, body: JSON.stringify(financialStatementsListFixture) },
+    ]);
+    const { statements } = await api.getFinancialStatements(100002);
+
+    const expectedStatuses: Record<string, string> = {
+      "700001": "Paid",
+      "700002": "Partly Paid",
+      "700003": "To Pay",
+      "700004": "Draft",
+      "700005": "Pending",
+    };
+    for (const row of statements) {
+      expect(ALLOWED_STATUSES.has(row.status)).toBe(true);
+      expect(row.status).toBe(expectedStatuses[row.id]);
+      expect(row.status).not.toBe("Unknown");
+    }
+  });
+
+  it("reads amount / paid / balance numerically from data-* attrs", async () => {
+    const { api } = authedApi([
+      { status: 200, body: JSON.stringify(financialStatementsListFixture) },
+    ]);
+    const { statements } = await api.getFinancialStatements(100002);
+
+    const byId = Object.fromEntries(statements.map((r) => [r.id, r]));
+    expect(byId["700001"]).toMatchObject({
+      amount: 45000,
+      paid: 45000,
+      balance: 0,
+    });
+    expect(byId["700002"]).toMatchObject({
+      amount: 30000,
+      paid: 15000,
+      balance: 15000,
+    });
+    expect(byId["700003"]).toMatchObject({
+      amount: 20000,
+      paid: 0,
+      balance: 20000,
+    });
+
+    for (const row of statements) {
+      expect(typeof row.amount).toBe("number");
+      expect(typeof row.paid).toBe("number");
+      expect(typeof row.balance).toBe("number");
+    }
+  });
+
+  it("captures the MM/DD/YYYY date for every row", async () => {
+    const { api } = authedApi([
+      { status: 200, body: JSON.stringify(financialStatementsListFixture) },
+    ]);
+    const { statements } = await api.getFinancialStatements(100002);
+    for (const row of statements) {
+      expect(row.date).toMatch(/^\d{2}\/\d{2}\/\d{4}$/);
+    }
   });
 });
 
