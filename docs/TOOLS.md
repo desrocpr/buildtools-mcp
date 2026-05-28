@@ -46,7 +46,7 @@ projects by default; raise `limit` (max 200) for wider sweeps.
 
 | Name | Type | Required | Notes |
 |---|---|---|---|
-| `status` | `"Active"` \| `"Complete"` \| `"Lost"` \| `"All"` | no | Defaults to `Active`. `All` removes the status filter. |
+| `status` | enum (see Notes) | no | Defaults to `Active`. `Active` matches all four active-team codes (Nexus/Omega/Invicta/Alpha). `All` removes the status filter. Accepted values: `Active`, `Nexus`, `Omega`, `Invicta`, `Alpha`, `On Hold`, `Warranty`, `Completed`, `Maintenance Plans`, `Cancelled`, `Templates`, `Excluded Reporting`, `All`. |
 | `customer_name` | string | no | Passed to the datatable's free-text `search[value]` (BuildTools' datatable searches across all columns). |
 | `limit` | number (1–200) | no | Defaults to 50. |
 
@@ -57,11 +57,15 @@ projects by default; raise `limit` (max 200) for wider sweeps.
 ```markdown
 **2 projects** (filtered 2 total, status: Active):
 
-- #100002 [Active] Smith Kitchen Remodel — Springfield, VA — $ 42,500.00 contract value
-- #100007 [Active] Smith Pool House — Falls Church, VA — $ 138,500.00 contract value
+- #100002 [Omega] Smith Kitchen Remodel — Springfield, VA — $ 42,500.00 contract value
+- #100007 [Alpha] Smith Pool House — Falls Church, VA — $ 138,500.00 contract value
 ```
 
-Empty-result responses are returned as Markdown ("No projects matched the filter…"), not errors.
+Row brackets render the resolved team label (`Nexus` / `Omega` / `Invicta` /
+`Alpha` for active projects, or one of `Templates` / `On Hold` / `Warranty` /
+`Completed` / `Maintenance Plans` / `Cancelled` / `Excluded Reporting` for the
+lifecycle codes) — never the literal filter value. Empty-result responses are
+returned as Markdown ("No projects matched the filter…"), not errors.
 
 ## `get_project`
 
@@ -117,9 +121,9 @@ matches as a Markdown list.
 ```markdown
 **3 matches** for "Vienna kitchen":
 
-- #100005 [Active] Vienna Kitchen Remodel — Vienna, VA — $ 87,300.00 contract value
-- #100012 [Active] Tysons Kitchen + Pantry — Vienna, VA — $ 64,800.00 contract value
-- #100018 [Complete] Vienna Whole-Home — Vienna, VA — $ 412,000.00 contract value
+- #100005 [Omega] Vienna Kitchen Remodel — Vienna, VA — $ 87,300.00 contract value
+- #100012 [Nexus] Tysons Kitchen + Pantry — Vienna, VA — $ 64,800.00 contract value
+- #100018 [Completed] Vienna Whole-Home — Vienna, VA — $ 412,000.00 contract value
 ```
 
 Empty-result responses are returned as Markdown ("No projects matched query…"),
@@ -250,7 +254,7 @@ financial-statements datatable read is documented as broken.
 - **Contract value**: $250,000.00
 - **Costs**: $180,000.00
 - **Margin**: $70,000.00
-- **Billing status**: Status code 1
+- **Billing status**: Draft
 - **Outstanding receivables**: $0.00
 - **Amount paid to date**: $ 45,000.00
 - **Due date**: 04/30/2026
@@ -480,8 +484,8 @@ substring filter. Returns up to 50 POs by default.
 ```
 
 PO status labels are inferred from the change-order status enum
-(1=Draft, 2=Pending, 3=Approved, 4=Rejected) — BuildTools does not document
-PO statuses, and the mapping is pending live verification.
+(1=Draft, 2=Pending Approval, 3=Approved, 4=Rejected) — BuildTools does not
+document PO statuses, and the mapping is pending live verification.
 
 ## `search_purchase_orders`
 
@@ -554,8 +558,9 @@ notes). Returns up to 50 entries by default.
 - #1100002 [1] 02/05/2026 — Smith Pool House — 8h — Cloudy — Foundation pour completed; cure cycle started
 ```
 
-Notes are truncated at 80 characters for scannability. The full notes blob is
-not available through this tool.
+Status codes ship as raw integers from the API and are rendered as-is — no
+client-side label mapping exists yet. Notes are truncated at 80 characters
+for scannability; the full notes blob is not available through this tool.
 
 ## `list_weekly_reports`
 
@@ -578,7 +583,9 @@ progress summaries). Returns up to 50 entries by default.
 - #1200001 [1] 02/01/2026 → 02/07/2026 — Smith Kitchen Remodel — 32h — Tile install complete on shower walls; plumbing rough-in next week
 ```
 
-Summary text is truncated at 80 characters.
+Status codes ship as raw integers from the API and are rendered as-is — no
+client-side label mapping exists yet. Summary text is truncated at 80
+characters.
 
 ## `list_work_days`
 
