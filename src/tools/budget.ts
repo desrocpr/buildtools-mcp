@@ -94,18 +94,19 @@ async function listBudgetHandler(
       );
     }
 
-    const total = items.reduce((sum, i) => sum + i.budgetedAmount, 0);
-    const header = `**${items.length} budget item${items.length === 1 ? "" : "s"}** for project #${project_id}${allowances_only ? " (allowances)" : ""} — total budgeted: ${formatUsd(total)}\n`;
+    const totalPublished = items.reduce((sum, i) => sum + i.publishedBudget, 0);
+    const totalRevised = items.reduce((sum, i) => sum + i.workingRevised, 0);
+    const header = `**${items.length} budget item${items.length === 1 ? "" : "s"}** for project #${project_id}${allowances_only ? " (allowances)" : ""} — published: ${formatUsd(totalPublished)} · revised: ${formatUsd(totalRevised)}\n`;
 
     const tableHeader = [
-      "| ID | Category | Allowance | Working Budget |",
-      "|---|---|---|---|",
+      "| ID | Category | Allowance | Published | Approved COs | Revised |",
+      "|---|---|---|---|---|---|",
     ].join("\n");
 
     const tableBody = items
       .map(
         (i) =>
-          `| ${i.id} | ${escapeMarkdownCell(i.name)} | ${i.isAllowance ? "✓" : ""} | ${formatUsd(i.budgetedAmount)} |`,
+          `| ${i.id} | ${escapeMarkdownCell(i.name)} | ${i.isAllowance ? "✓" : ""} | ${formatUsd(i.publishedBudget)} | ${i.approvedCOs ? formatUsd(i.approvedCOs) : ""} | ${formatUsd(i.workingRevised)} |`,
       )
       .join("\n");
 

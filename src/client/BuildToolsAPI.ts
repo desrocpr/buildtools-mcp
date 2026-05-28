@@ -84,6 +84,55 @@ type PostFieldValue =
 export type PostData = Record<string, PostFieldValue>;
 
 // ---------------------------------------------------------------------------
+// Budget cell helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the first "$ X.XX" amount from a string (handles negatives).
+ * Returns 0 if no match or if the captured value isn't numeric. Used for
+ * single-value columns (APPROVED CO's, REMAINING BUDGET, etc.).
+ */
+function parseFirstAmount(s: string): number {
+  if (!s || s === "-") return 0;
+  // Match $X.XX or -$X.XX (sign attached, no whitespace between sign and $).
+  // A standalone "- " before $ is the BuildTools placeholder for "empty", not a sign.
+  const m = s.match(/(-)?\$\s*-?[\d,]+\.\d{2}/);
+  if (!m) return 0;
+  const sign = m[1] === "-" ? -1 : 1;
+  const digits = m[0].replace(/[^\d.-]/g, "").replace(/^-/, "");
+  const n = Number(digits);
+  return Number.isFinite(n) ? sign * n : 0;
+}
+
+/**
+ * Parse two "$ X.XX" amounts from a string into [published, working].
+ * Cells in the BUDGET / REVISED BUDGET columns concatenate published and
+ * working values like "$ 2,200.00 $ 2,200.00" or "- $ 1,500.00" (published
+ * empty, working = 1500). Returns [0, 0] if no amounts found.
+ */
+function parseDualAmount(s: string): [number, number] {
+  if (!s) return [0, 0];
+  // Match each "$X.XX" or "-$X.XX" — sign must be attached to $ (no whitespace).
+  // A standalone "- " before $ is the BuildTools placeholder for "empty".
+  const matches = s.match(/(-)?\$\s*-?[\d,]+\.\d{2}/g) ?? [];
+  const toNum = (raw: string | undefined): number => {
+    if (!raw) return 0;
+    const sign = raw.startsWith("-") ? -1 : 1;
+    const digits = raw.replace(/[^\d.-]/g, "").replace(/^-/, "");
+    const n = Number(digits);
+    return Number.isFinite(n) ? sign * n : 0;
+  };
+  if (matches.length === 0) return [0, 0];
+  if (matches.length === 1) {
+    // One value present. The leading "-" placeholder (e.g. "- $ 1,500.00")
+    // indicates published is empty/zero and the single value is working.
+    if (/^\s*-\s/.test(s)) return [0, toNum(matches[0])];
+    return [toNum(matches[0]), toNum(matches[0])];
+  }
+  return [toNum(matches[0]), toNum(matches[1])];
+}
+
+// ---------------------------------------------------------------------------
 // Class
 // ---------------------------------------------------------------------------
 
@@ -941,10 +990,24 @@ export class BuildToolsAPI {
     return { statusCount, selections };
   }
 
+  // (parseDualAmount and parseFirstAmount are defined at module scope below.)
+
   /**
    * Fetches allowance budget categories for a project. Parses the budget HTML
    * from GET /budget?PR[]=<projectId> and extracts rows whose category name
    * contains "Allowance".
+   *
+   * Each budget row has 16 cells. The key columns are:
+   *   [1]  category name
+   *   [6]  BUDGET           — original (published + working)
+   *   [7]  APPROVED CO's
+   *   [8]  REVISED BUDGET   — after approved COs (published + working)
+   *
+   * Cells [6] and [8] often contain TWO concatenated dollar values
+   * (published + working). We split them and surface both. The user-facing
+   * "budgeted amount" for allowance reconciliation is the working revised
+   * value (cell[8] second amount), which reflects the current allowance
+   * after change orders.
    */
   async getAllowances(
     projectId: string | number,
@@ -952,8 +1015,11 @@ export class BuildToolsAPI {
     id: string;
     categoryId: string;
     name: string;
-    budgetedAmount: number;
-    revisedAmount: string;
+    publishedBudget: number;
+    workingBudget: number;
+    approvedCOs: number;
+    publishedRevised: number;
+    workingRevised: number;
     cells: string[];
   }>> {
     await this.ensureAuthenticated();
@@ -993,13 +1059,15 @@ export class BuildToolsAPI {
       id: string;
       categoryId: string;
       name: string;
-      budgetedAmount: number;
-      revisedAmount: string;
+      publishedBudget: number;
+      workingBudget: number;
+      approvedCOs: number;
+      publishedRevised: number;
+      workingRevised: number;
       cells: string[];
     }> = [];
 
     // Budget rows have data-id and data-category attrs in any order.
-    // Match all <tr> tags that contain both, extract attrs from the tag string.
     const rowRegex = /<tr([^>]*data-id="[^"]*"[^>]*data-category="[^"]*"[^>]*|[^>]*data-category="[^"]*"[^>]*data-id="[^"]*"[^>]*)>([\s\S]*?)<\/tr>/g;
     let match: RegExpExecArray | null;
     while ((match = rowRegex.exec(html)) !== null) {
@@ -1019,20 +1087,20 @@ export class BuildToolsAPI {
         cells.push(strip(cellMatch[1]));
       }
 
-      // The name lives in the first cell that contains a budget-category
-      // code (e.g. "4531 - Interior Trim Material Allowance"). cells[0] is
-      // an icon/expand column and is always empty.
       const name = cells.find((c) => /^\d{3,5}\s*-\s*\S/.test(c)) ?? "";
       if (!/allowance/i.test(name)) continue;
       if (allowances.some((a) => a.id === id)) continue;
 
-      const dataValue = attrs.match(/data-value="([^"]*)"/);
-      const budgetedAmount = dataValue ? Number(dataValue[1]) || 0 : 0;
+      const [publishedBudget, workingBudget] = parseDualAmount(cells[6] ?? "");
+      const approvedCOs = parseFirstAmount(cells[7] ?? "");
+      const [publishedRevised, workingRevised] = parseDualAmount(cells[8] ?? "");
 
-      const amounts = cells.filter((c) => /^\$\s*-?[\d,]+\.\d{2}/.test(c));
-      const revisedAmount = amounts[0] ?? "";
-
-      allowances.push({ id, categoryId, name, budgetedAmount, revisedAmount, cells });
+      allowances.push({
+        id, categoryId, name,
+        publishedBudget, workingBudget, approvedCOs,
+        publishedRevised, workingRevised,
+        cells,
+      });
     }
 
     return allowances;
@@ -1052,7 +1120,11 @@ export class BuildToolsAPI {
       categoryId: string;
       name: string;
       isAllowance: boolean;
-      budgetedAmount: number;
+      publishedBudget: number;
+      workingBudget: number;
+      approvedCOs: number;
+      publishedRevised: number;
+      workingRevised: number;
       cells: string[];
     }>;
     columns: string[];
@@ -1107,7 +1179,11 @@ export class BuildToolsAPI {
       categoryId: string;
       name: string;
       isAllowance: boolean;
-      budgetedAmount: number;
+      publishedBudget: number;
+      workingBudget: number;
+      approvedCOs: number;
+      publishedRevised: number;
+      workingRevised: number;
       cells: string[];
     }> = [];
 
@@ -1122,8 +1198,6 @@ export class BuildToolsAPI {
 
       const id = idMatch[1];
       const categoryId = catMatch[1];
-      const dataValue = attrs.match(/data-value="([^"]*)"/);
-      const budgetedAmount = dataValue ? Number(dataValue[1]) || 0 : 0;
       const rowHtml = match[2];
 
       const cells: string[] = [];
@@ -1139,7 +1213,16 @@ export class BuildToolsAPI {
       const isAllowance = /allowance/i.test(name);
       if (items.some((it) => it.id === id)) continue;
 
-      items.push({ id, categoryId, name, isAllowance, budgetedAmount, cells });
+      const [publishedBudget, workingBudget] = parseDualAmount(cells[6] ?? "");
+      const approvedCOs = parseFirstAmount(cells[7] ?? "");
+      const [publishedRevised, workingRevised] = parseDualAmount(cells[8] ?? "");
+
+      items.push({
+        id, categoryId, name, isAllowance,
+        publishedBudget, workingBudget, approvedCOs,
+        publishedRevised, workingRevised,
+        cells,
+      });
     }
 
     return { items, columns };
