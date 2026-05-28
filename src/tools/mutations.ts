@@ -359,13 +359,33 @@ export function createMutationTools(
     location_room_id: z.number().optional().describe("Location/room ID. Default: 2 (Non-Specified)."),
     notes: z.string().optional(),
     due_date: z.string().optional().describe("MM/DD/YYYY format."),
+    items: z
+      .array(
+        z.object({
+          title: z.string().describe("Option name (e.g. 'Steel Grey Granite')."),
+          price: z.union([z.number(), z.string()]).optional().describe("Option price in dollars (number or string)."),
+          description: z.string().optional(),
+          model: z.string().optional().describe("Model number or SKU."),
+          url: z.string().optional().describe("Product URL."),
+          company_id: z.union([z.number(), z.string()]).optional().describe("Vendor company ID."),
+          selected: z.boolean().optional().describe("True if this is the chosen option. Default: true."),
+        }),
+      )
+      .optional()
+      .describe("Selection options/choices. Each has its own price + vendor. Omit for an empty selection (add options later via the UI)."),
     confirmation_id: z.string().optional(),
   });
   type CreateSelectionArgs = z.infer<typeof CreateSelectionSchema>;
 
   const createSelectionConfirmed = requiresConfirmation<CreateSelectionArgs>(
     "create_selection",
-    (a) => `Create selection **"${a.name}"** on project #${a.project_id} (category #${a.budget_category_id}).`,
+    (a) => {
+      const itemCount = a.items?.length ?? 0;
+      const itemSummary = itemCount > 0
+        ? ` with ${itemCount} option${itemCount === 1 ? "" : "s"}`
+        : "";
+      return `Create selection **"${a.name}"** on project #${a.project_id} (category #${a.budget_category_id})${itemSummary}.`;
+    },
     async (a) => {
       try {
         const result = await getApi().createSelection({
@@ -376,8 +396,22 @@ export function createMutationTools(
           locationRoomId: a.location_room_id,
           notes: a.notes,
           dueDate: a.due_date,
+          items: a.items?.map((it) => ({
+            title: it.title,
+            price: it.price,
+            description: it.description,
+            model: it.model,
+            url: it.url,
+            companyId: it.company_id,
+            selected: it.selected,
+          })),
         });
-        if (result.success) return markdown(`Selection **#${result.selectionId}** created successfully.`);
+        if (result.success) {
+          const itemsNote = result.itemsSaved !== undefined && result.itemsSaved > 0
+            ? ` with ${result.itemsSaved} option${result.itemsSaved === 1 ? "" : "s"}`
+            : "";
+          return markdown(`Selection **#${result.selectionId}** created${itemsNote}.`);
+        }
         return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
       } catch (err) { return formatError(err, "create_selection"); }
     },

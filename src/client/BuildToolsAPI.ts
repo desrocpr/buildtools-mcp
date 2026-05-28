@@ -1446,7 +1446,16 @@ export class BuildToolsAPI {
     locationRoomId?: string | number;
     notes?: string;
     dueDate?: string;
-  }): Promise<{ success: boolean; selectionId?: number; errors?: unknown }> {
+    items?: Array<{
+      title: string;
+      price?: number | string;
+      description?: string;
+      model?: string;
+      url?: string;
+      companyId?: string | number;
+      selected?: boolean;
+    }>;
+  }): Promise<{ success: boolean; selectionId?: number; itemsSaved?: number; errors?: unknown }> {
     await this.ensureAuthenticated();
     if (!selectionData.projectId) throw new BuildToolsServerError("projectId is required");
     if (!selectionData.name) throw new BuildToolsServerError("name is required");
@@ -1460,6 +1469,28 @@ export class BuildToolsAPI {
     const csrf = (formResp.body.match(/name="_token"[^>]*value="([^"]+)"/) ?? [])[1];
     if (!csrf) return { success: false, errors: "Could not harvest CSRF token from selections form" };
 
+    // Build the items JSON in the EXACT shape BuildTools accepts. All keys
+    // must be present (even empty strings) or the server returns 500.
+    // Schema verified live: required keys are id, selection_id, title,
+    // description, model, url, price, subitems, company_id, company_name,
+    // selected, files. Use id=0/selection_id=0 sentinels for new items.
+    const itemsJson = JSON.stringify(
+      (selectionData.items ?? []).map((it) => ({
+        id: 0,
+        selection_id: 0,
+        title: it.title,
+        description: it.description ?? "",
+        model: it.model ?? "",
+        url: it.url ?? "",
+        price: it.price !== undefined ? String(it.price) : "",
+        subitems: [],
+        company_id: it.companyId !== undefined ? String(it.companyId) : "",
+        company_name: "",
+        selected: it.selected === false ? 0 : 1,
+        files: [],
+      })),
+    );
+
     const fd = new URLSearchParams();
     fd.append("_token", csrf);
     fd.append("Selection[name]", selectionData.name);
@@ -1469,6 +1500,7 @@ export class BuildToolsAPI {
     fd.append("Selection[locations_room_id][]", String(selectionData.locationRoomId ?? 2));
     if (selectionData.notes) fd.append("Selection[notes]", selectionData.notes);
     if (selectionData.dueDate) fd.append("Selection[due_date]", selectionData.dueDate);
+    fd.append("items", itemsJson);
 
     const resp = await this.request(
       `${this.baseUrl}/selections/save?PR[]=${selectionData.projectId}`,
@@ -1491,9 +1523,14 @@ export class BuildToolsAPI {
         result?: string;
         id?: number;
         message?: string | string[];
+        returnParams?: { selectionsItem?: number };
       };
       if (result.result === "success") {
-        return { success: true, selectionId: result.id };
+        return {
+          success: true,
+          selectionId: result.id,
+          itemsSaved: result.returnParams?.selectionsItem ?? 0,
+        };
       }
       return { success: false, errors: result.message };
     } catch {
