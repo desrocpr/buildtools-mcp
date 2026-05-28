@@ -103,8 +103,14 @@ export function auditLog(opts: {
 }): void {
   const ts = new Date().toISOString();
   const user = opts.username && opts.username.length > 0 ? opts.username : "unauthenticated";
+  // Strip CR/LF from any caller-supplied field so a malicious username or
+  // tool name cannot forge fake audit lines via log injection. The
+  // BuildTools username is taken from `set_session_credentials` input,
+  // and the tool name comes from the MCP request — both are attacker-
+  // controllable behind a valid bearer. (MEDIUM-2, MOS-220 review.)
+  const sanitize = (s: string): string => s.replace(/[\r\n]+/g, " ");
   // eslint-disable-next-line no-console
   process.stderr.write(
-    `[${ts}] audit sessionId=${opts.sessionId} user=${user} tool=${opts.tool} result=${opts.result}\n`,
+    `[${ts}] audit sessionId=${sanitize(opts.sessionId)} user=${sanitize(user)} tool=${sanitize(opts.tool)} result=${opts.result}\n`,
   );
 }

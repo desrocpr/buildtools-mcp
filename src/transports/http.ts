@@ -41,6 +41,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { timingSafeEqual } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import type { Server as HttpServer } from "node:http";
 
@@ -189,6 +190,15 @@ function buildPerSessionServer(opts: {
       // requires the second arg, so pass an un-callable sentinel cast.
       const sentinel = undefined as unknown as BuildToolsAPI;
       const result = await tool.handler(args, sentinel);
+      // Invalidate any cached BuildToolsAPI from a prior handshake so the
+      // next BuildTools-bound call reconstructs the client from the new
+      // credentials (and discards the old cookie jar). Without this,
+      // repeated `set_session_credentials` calls within the same SSE
+      // session would silently keep using the original user's session
+      // because `resolveApi` is memoised. (HIGH-1, MOS-220 review.)
+      if (!result.isError) {
+        apiInstance = null;
+      }
       // After-the-fact: pull the username back out of the store for the
       // audit line (only present on success).
       const stored = opts.sessionStore.get(sessionId);
@@ -270,12 +280,21 @@ export async function startHttpTransport(
 
   const app = express();
 
-  // Bearer-token middleware — applied to ALL routes. The constant-time
-  // check is fine here because the failure mode is just a 401 and we don't
-  // expose any timing oracles on the success path.
+  // Pre-compute the expected `Authorization` header value once, then use
+  // `timingSafeEqual` on every request so the comparison does not leak bytes
+  // of the bearer via response timing. (MEDIUM-1, MOS-220 review.)
+  const expectedAuthHeader = Buffer.from(`Bearer ${opts.bearerToken}`);
+
+  // Bearer-token middleware — applied to ALL routes.
   app.use((req: Request, res: Response, next: NextFunction) => {
-    const auth = req.headers.authorization ?? "";
-    if (auth !== `Bearer ${opts.bearerToken}`) {
+    const presented = Buffer.from(req.headers.authorization ?? "");
+    // `timingSafeEqual` throws on length mismatch, so length-check first.
+    // Both branches return the same 401 body so a length-difference path
+    // is not itself a meaningful oracle.
+    if (
+      presented.length !== expectedAuthHeader.length ||
+      !timingSafeEqual(presented, expectedAuthHeader)
+    ) {
       // NOTE: do NOT log either the presented header or the configured
       // bearer. Acceptance criterion 11.
       res.status(401).type("text/plain").send("Unauthorized");
@@ -298,7 +317,13 @@ export async function startHttpTransport(
 
     // Clean up the session store + transport map on disconnect. Both events
     // are wired so we cover both client-initiated close and transport errors.
+    // A `cleaned` guard makes the double-fire idempotent in a way that
+    // survives future extensions to cleanup (today `Map.delete` is itself
+    // idempotent, but future cleanup steps may not be). (MEDIUM-3, review.)
+    let cleaned = false;
     const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       transports.delete(sessionId);
       sessionStore.delete(sessionId);
     };
