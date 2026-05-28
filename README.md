@@ -2,7 +2,7 @@
 
 MCP server for BuildTools (third-party construction PM SaaS at `moss.buildtools.app`). Exposes BuildTools data + operations as tools/resources to Claude Desktop and other MCP-aware agents.
 
-**Status:** Phase 1-7 complete. Production-ready. See [STATE.md](./STATE.md) for first-run validation results.
+**Status:** Phase 1-7 complete. First-run validation against the live tenant is pending — see [STATE.md](./STATE.md) for the validation template the operator (Paul) will fill in once `tests/integration/full-smoke.test.ts` has been run against production.
 
 ## What this is
 
