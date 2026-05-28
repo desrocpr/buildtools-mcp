@@ -2,7 +2,7 @@
 
 MCP server for BuildTools (third-party construction PM SaaS at `moss.buildtools.app`). Exposes BuildTools data + operations as tools/resources to Claude Desktop and other MCP-aware agents.
 
-**Status:** Phase 1-7 complete. Production-ready.
+**Status:** Phase 1-7 complete. Production-ready. See [STATE.md](./STATE.md) for first-run validation results.
 
 ## What this is
 
