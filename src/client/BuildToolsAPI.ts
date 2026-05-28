@@ -980,8 +980,14 @@ export class BuildToolsAPI {
 
     const html = data.content ?? "";
     const strip = (s: string): string =>
-      s.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
-        .replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/\s+/g, " ").trim();
+      s.replace(/<[^>]*>/g, "")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&bullet;/g, "")
+        .replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"')
+        .replace(/&#039;/g, "'")
+        .replace(/\s+/g, " ")
+        .trim();
 
     const allowances: Array<{
       id: string;
@@ -1013,14 +1019,17 @@ export class BuildToolsAPI {
         cells.push(strip(cellMatch[1]));
       }
 
-      const name = cells[0] ?? "";
+      // The name lives in the first cell that contains a budget-category
+      // code (e.g. "4531 - Interior Trim Material Allowance"). cells[0] is
+      // an icon/expand column and is always empty.
+      const name = cells.find((c) => /^\d{3,5}\s*-\s*\S/.test(c)) ?? "";
       if (!/allowance/i.test(name)) continue;
       if (allowances.some((a) => a.id === id)) continue;
 
       const dataValue = attrs.match(/data-value="([^"]*)"/);
       const budgetedAmount = dataValue ? Number(dataValue[1]) || 0 : 0;
 
-      const amounts = cells.filter((c) => /^\$\s*[\d,]+\.\d{2}/.test(c));
+      const amounts = cells.filter((c) => /^\$\s*-?[\d,]+\.\d{2}/.test(c));
       const revisedAmount = amounts[0] ?? "";
 
       allowances.push({ id, categoryId, name, budgetedAmount, revisedAmount, cells });
