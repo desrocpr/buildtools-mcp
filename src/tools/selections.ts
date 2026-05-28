@@ -275,13 +275,20 @@ async function listAllowancesHandler(
     lines.push(`**${allowances.length} allowance${allowances.length === 1 ? "" : "s"}** for project #${project_id}:\n`);
 
     for (const a of allowances) {
-      const budgeted = a.budgetedAmount || parseCurrency(a.revisedAmount);
+      // For reconciliation we use the WORKING REVISED budget — that's the
+      // current allowance after change orders. The PUBLISHED budget is what
+      // the customer signed off on originally; we surface both.
+      const budgeted = a.workingRevised;
       const catSelections = selectionsByCategory[a.name] ?? [];
       const spent = catSelections.reduce((sum, s) => sum + parseCurrency(s.price), 0);
       const remaining = budgeted - spent;
 
       lines.push(`### ${a.name}`);
-      lines.push(`- **Budgeted**: ${formatUsd(budgeted)}`);
+      lines.push(`- **Published budget**: ${formatUsd(a.publishedBudget)}`);
+      if (a.approvedCOs !== 0) {
+        lines.push(`- **Approved COs**: ${formatUsd(a.approvedCOs)}`);
+      }
+      lines.push(`- **Revised budget**: ${formatUsd(budgeted)}`);
       lines.push(`- **Selected/Spent**: ${formatUsd(spent)}`);
       lines.push(`- **Remaining**: ${formatUsd(remaining)}${remaining < 0 ? " ⚠️ over budget" : ""}`);
 
