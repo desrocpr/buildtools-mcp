@@ -247,9 +247,12 @@ async function listProjectAttachmentsHandler(
         const size = formatSize(row.size);
         const uploaded = escapeCell(row.created_at);
         const user = escapeCell(row.user_name);
+        // Prefer `url_main` — the session-scoped owner URL that actually
+        // serves the bytes. `public_url` (the /f/.../<hash>.<ext> shape)
+        // returns 500 "Core owner is not imported" on this tenant.
         const url =
-          (typeof row.public_url === "string" && row.public_url) ||
           (typeof row.url_main === "string" && row.url_main) ||
+          (typeof row.public_url === "string" && row.public_url) ||
           "";
         const downloadCell = url ? `[Download](${url})` : "—";
         sections.push(
@@ -273,7 +276,75 @@ export const listProjectAttachmentsTool: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// download_attachment
+// ---------------------------------------------------------------------------
+
+const DownloadAttachmentInputSchema = z.object({
+  url: z
+    .string()
+    .url()
+    .describe(
+      "A BuildTools-hosted attachment URL (typically https://file.buildtools.app/...). Get these from list_project_attachments' Download column. Only *.buildtools.app and the S3 hosts it redirects to are allowed.",
+    ),
+});
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB"];
+  let i = -1;
+  let v = n;
+  do {
+    v /= 1024;
+    i++;
+  } while (v >= 1024 && i < units.length - 1);
+  return `${v.toFixed(1)} ${units[i]}`;
+}
+
+async function downloadAttachmentHandler(
+  args: unknown,
+  api: BuildToolsAPI,
+): Promise<ToolResult> {
+  const parsed = DownloadAttachmentInputSchema.safeParse(args ?? {});
+  if (!parsed.success) {
+    return formatZodError(parsed.error, "download_attachment");
+  }
+  const { url } = parsed.data;
+
+  try {
+    const { buffer, mimeType, filename, finalUrl } = await api.downloadAttachment(url);
+    const base64 = buffer.toString("base64");
+    const summary = `Downloaded **${filename}** (${mimeType}, ${formatBytes(buffer.byteLength)}).`;
+    return {
+      content: [
+        { type: "text", text: summary },
+        {
+          type: "resource",
+          resource: {
+            uri: finalUrl,
+            mimeType,
+            blob: base64,
+          },
+        },
+      ],
+    };
+  } catch (err) {
+    return formatError(err, "download_attachment");
+  }
+}
+
+export const downloadAttachmentTool: ToolDefinition = {
+  name: "download_attachment",
+  description:
+    "Download a BuildTools-hosted attachment (PDF, image, doc, etc.) using the authenticated session. Returns the file as an embedded resource so it can be read directly by Claude without going through any external proxy. Pass a download URL from list_project_attachments. Max 25 MB.",
+  inputSchema: zodToJsonSchema(DownloadAttachmentInputSchema),
+  handler: downloadAttachmentHandler,
+};
+
+// ---------------------------------------------------------------------------
 // Exported registry
 // ---------------------------------------------------------------------------
 
-export const attachmentTools: ToolDefinition[] = [listProjectAttachmentsTool];
+export const attachmentTools: ToolDefinition[] = [
+  listProjectAttachmentsTool,
+  downloadAttachmentTool,
+];

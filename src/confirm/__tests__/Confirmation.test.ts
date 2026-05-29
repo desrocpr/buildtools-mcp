@@ -48,7 +48,7 @@ const UUID_RE =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 function textOf(result: ToolResult): string {
-  return result.content.map((c) => c.text).join("");
+  return result.content.map((c) => ("text" in c ? c.text : "")).join("");
 }
 
 // ---------------------------------------------------------------------------
