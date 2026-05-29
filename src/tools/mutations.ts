@@ -441,20 +441,36 @@ export function createMutationTools(
   const CreateBudgetItemSchema = z.object({
     project_id: z.number().describe("BuildTools project ID."),
     budget_category_id: z.number().describe("Leaf budget category ID (e.g. 1614 = '4520 - Interior Trim Materials'). Use list_selection_categories to find valid IDs."),
+    if_exists: z
+      .enum(["skip", "error", "force"])
+      .optional()
+      .describe(
+        "Behavior when a budget row for (project_id, budget_category_id) already exists. \"skip\" (default) returns the existing row's id without writing. \"error\" returns a tool error. \"force\" inserts a duplicate — NOT recommended (breaks Power BI's m budgets_selections measure which keys on category||project).",
+      ),
     confirmation_id: z.string().optional(),
   });
   type CreateBudgetItemArgs = z.infer<typeof CreateBudgetItemSchema>;
 
   const createBudgetItemConfirmed = requiresConfirmation<CreateBudgetItemArgs>(
     "create_budget_item",
-    (a) => `Add budget category #${a.budget_category_id} to project #${a.project_id}.`,
+    (a) => `Add budget category #${a.budget_category_id} to project #${a.project_id}${a.if_exists ? ` (if_exists: ${a.if_exists})` : ""}.`,
     async (a) => {
       try {
         const result = await getApi().createBudgetItem({
           projectId: a.project_id,
           budgetCategoryId: a.budget_category_id,
+          ifExists: a.if_exists,
         });
-        if (result.success) return markdown(`Budget item **#${result.budgetItemId}** created. Use update_budget_item to set its amount.`);
+        if (result.success) {
+          if (result.existed) {
+            return markdown(
+              `Budget item **#${result.budgetItemId}** already exists for category #${a.budget_category_id} on project #${a.project_id}. Returning existing row (no write). Use update_budget_item to change its amount.`,
+            );
+          }
+          return markdown(
+            `Budget item **#${result.budgetItemId}** created. Use update_budget_item to set its amount.`,
+          );
+        }
         return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
       } catch (err) { return formatError(err, "create_budget_item"); }
     },

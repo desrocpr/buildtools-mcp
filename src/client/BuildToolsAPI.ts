@@ -1392,11 +1392,54 @@ export class BuildToolsAPI {
   async createBudgetItem(data: {
     projectId: string | number;
     budgetCategoryId: string | number;
-  }): Promise<{ success: boolean; budgetItemId?: number; errors?: unknown }> {
+    ifExists?: "skip" | "error" | "force";
+  }): Promise<{
+    success: boolean;
+    budgetItemId?: number;
+    existed?: boolean;
+    errors?: unknown;
+  }> {
     await this.ensureAuthenticated();
     if (!data.projectId) throw new BuildToolsServerError("projectId is required");
     if (!data.budgetCategoryId) {
       throw new BuildToolsServerError("budgetCategoryId is required");
+    }
+
+    // Idempotency: BuildTools' `budgets` table has a natural unique key on
+    // (project_id, budget_category_id) for active (deleted_working=0) rows,
+    // but the /budget/save endpoint is a plain INSERT — calling it twice with
+    // the same category produces duplicate rows that break downstream reports
+    // (Power BI's `m budgets_selections` model keys on category||project and
+    // chokes on the dupe). Default behavior here is `skip`: look up the
+    // existing row first and return it without writing.
+    const ifExists = data.ifExists ?? "skip";
+    if (ifExists !== "force") {
+      try {
+        const grid = await this.getBudget(data.projectId);
+        const existing = grid.items.find(
+          (i) => Number(i.categoryId) === Number(data.budgetCategoryId),
+        );
+        if (existing) {
+          if (ifExists === "error") {
+            return {
+              success: false,
+              budgetItemId: Number(existing.id),
+              existed: true,
+              errors: `A budget item for category ${data.budgetCategoryId} already exists on project ${data.projectId} (budget_item_id=${existing.id}). Pass ifExists: "skip" to return the existing row, or "force" to insert a duplicate (not recommended).`,
+            };
+          }
+          return {
+            success: true,
+            budgetItemId: Number(existing.id),
+            existed: true,
+          };
+        }
+      } catch (err) {
+        // If the dup-check fetch itself fails (network blip, auth churn),
+        // don't fall through silently to an INSERT — that's how dupes get
+        // created. Surface the error.
+        throw err;
+      }
     }
 
     const fd = new URLSearchParams();
@@ -1424,7 +1467,7 @@ export class BuildToolsAPI {
         message?: string;
       };
       if (result.result === "success") {
-        return { success: true, budgetItemId: result.id };
+        return { success: true, budgetItemId: result.id, existed: false };
       }
       return { success: false, errors: result.message };
     } catch {
@@ -1517,7 +1560,9 @@ export class BuildToolsAPI {
   /**
    * Deletes a budget line item from a project.
    *
-   * POST /budget/delete?PR[]=<projectId> with `id=<budgetItemId>` (singular).
+   * POST /budget/delete?PR[]=<projectId> with `ids[]=<budgetItemId>` (array).
+   * Must include the form's _token plus X-CSRF-TOKEN header — without them
+   * the server returns 200 with {r:1, s:0, f:0} and silently no-ops.
    * Response: { r: 1, s: <succeeded>, f: <failed>, mg: <error details> }.
    * Deletion fails (f > 0) if the budget item has related change orders.
    */
@@ -1529,8 +1574,24 @@ export class BuildToolsAPI {
     if (!projectId) throw new BuildToolsServerError("projectId is required");
     if (!budgetItemId) throw new BuildToolsServerError("budgetItemId is required");
 
+    // Harvest a fresh CSRF token from the budget edit form. Without `_token`
+    // in the form body the server returns 200 with {r:1,s:0,f:0} and silently
+    // ignores the delete — we'd never know it didn't fire.
+    const formResp = await this.request(
+      `${this.baseUrl}/budget/form/${budgetItemId}?published=0&PR[]=${projectId}`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+    const csrf = (formResp.body.match(/name="_token"[^>]*value="([^"]+)"/) ?? [])[1];
+
     const fd = new URLSearchParams();
-    fd.append("id", String(budgetItemId));
+    if (csrf) fd.append("_token", csrf);
+    fd.append("ids[]", String(budgetItemId));
 
     const resp = await this.request(
       `${this.baseUrl}/budget/delete?PR[]=${projectId}`,
@@ -1540,6 +1601,7 @@ export class BuildToolsAPI {
           "Content-Type": "application/x-www-form-urlencoded",
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
+          "X-CSRF-TOKEN": csrf ?? "",
           "X-XSRF-TOKEN": this.xsrfToken ?? "",
         },
         body: fd.toString(),
@@ -1556,9 +1618,11 @@ export class BuildToolsAPI {
       };
       const succeeded = result.s ?? 0;
       const failed = result.f ?? 0;
-      // success means the row is gone — verify by checking succeeded > 0 OR
-      // (both are 0 which means already-deleted/no-op)
-      const success = result.r === 1 && failed === 0;
+      // Real success requires r=1, no failures, AND at least one row deleted.
+      // The server returns {r:1, s:0, f:0} for silent no-ops (e.g. missing
+      // CSRF, or attempting to delete a row that doesn't exist) — that's NOT
+      // success.
+      const success = result.r === 1 && failed === 0 && succeeded > 0;
       return { success, succeeded, failed, errors: failed > 0 ? result.mg : undefined };
     } catch {
       return {

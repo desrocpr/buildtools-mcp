@@ -1875,3 +1875,150 @@ describe("barrel exports — config surface (MOS-212)", () => {
     expect(typeof barrel.loadConfigFromEnv).toBe("function");
   });
 });
+
+// ---------------------------------------------------------------------------
+// createBudgetItem() — idempotency
+// ---------------------------------------------------------------------------
+
+describe("createBudgetItem() — idempotency", () => {
+  // getBudget expects JSON {content: "<html>..."} from /budget?PR[]=:id
+  const budgetEnvelope = (innerHtml: string): string =>
+    JSON.stringify({ content: innerHtml });
+  const budgetHtmlWith = (categoryId: number, rowId: number): string =>
+    budgetEnvelope(`
+      <table id="budgets-grid">
+        <thead><tr><th>cat</th></tr></thead>
+        <tr data-id="${rowId}" data-category="${categoryId}">
+          <td>icon</td><td>${categoryId} - Test Category</td>
+          <td></td><td></td><td></td><td></td>
+          <td>$ 0.00 $ 0.00</td><td></td><td>$ 0.00 $ 0.00</td>
+        </tr>
+      </table>`);
+  const emptyBudgetHtml = budgetEnvelope(`
+      <table id="budgets-grid">
+        <thead><tr><th>cat</th></tr></thead>
+      </table>`);
+
+  it("skip (default): returns existing row id without writing when one exists", async () => {
+    const { stub, recorded } = makeFetchStub([
+      { status: 200, body: budgetHtmlWith(1614, 63477) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.createBudgetItem({
+      projectId: 185966,
+      budgetCategoryId: 1614,
+    });
+    expect(out).toEqual({
+      success: true,
+      budgetItemId: 63477,
+      existed: true,
+    });
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].url).toContain("/budget?PR[]=185966");
+    expect(recorded[0].init.method ?? "GET").toBe("GET");
+  });
+
+  it("error: returns success=false with existing budgetItemId when a row exists", async () => {
+    const { stub } = makeFetchStub([
+      { status: 200, body: budgetHtmlWith(1614, 63477) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.createBudgetItem({
+      projectId: 185966,
+      budgetCategoryId: 1614,
+      ifExists: "error",
+    });
+    expect(out.success).toBe(false);
+    expect(out.budgetItemId).toBe(63477);
+    expect(out.existed).toBe(true);
+    expect(String(out.errors)).toMatch(/already exists/);
+  });
+
+  it("skip: when no existing row, inserts and returns new id with existed:false", async () => {
+    const { stub, recorded } = makeFetchStub([
+      { status: 200, body: emptyBudgetHtml },
+      { status: 200, body: JSON.stringify({ result: "success", id: 99999 }) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.createBudgetItem({
+      projectId: 185966,
+      budgetCategoryId: 9999,
+    });
+    expect(out).toEqual({
+      success: true,
+      budgetItemId: 99999,
+      existed: false,
+    });
+    expect(recorded).toHaveLength(2);
+    expect(recorded[1].url).toContain("/budget/save?PR[]=185966");
+    expect(recorded[1].init.method).toBe("POST");
+  });
+
+  it("force: skips the existence check entirely and POSTs", async () => {
+    const { stub, recorded } = makeFetchStub([
+      { status: 200, body: JSON.stringify({ result: "success", id: 99998 }) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.createBudgetItem({
+      projectId: 185966,
+      budgetCategoryId: 1614,
+      ifExists: "force",
+    });
+    expect(out).toEqual({
+      success: true,
+      budgetItemId: 99998,
+      existed: false,
+    });
+    // Exactly one HTTP call — no dup-check GET.
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].init.method).toBe("POST");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deleteBudgetItem() — CSRF wiring + success check
+// ---------------------------------------------------------------------------
+
+describe("deleteBudgetItem() — CSRF + success check", () => {
+  const formHtml = `<form><input name="_token" value="csrf-tok-xyz" /></form>`;
+
+  it("harvests _token and posts ids[]= (NOT id=)", async () => {
+    const { stub, recorded } = makeFetchStub([
+      { status: 200, body: formHtml },
+      {
+        status: 200,
+        body: JSON.stringify({ r: 1, s: 1, f: 0, mg: [] }),
+      },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.deleteBudgetItem(63478, 185966);
+    expect(out).toEqual({
+      success: true,
+      succeeded: 1,
+      failed: 0,
+      errors: undefined,
+    });
+    expect(recorded[1].url).toContain("/budget/delete?PR[]=185966");
+    const body = String(recorded[1].init.body ?? "");
+    expect(body).toContain("_token=csrf-tok-xyz");
+    expect(body).toContain("ids%5B%5D=63478");
+    expect(body).not.toMatch(/(^|&)id=/);
+  });
+
+  it("treats {r:1, s:0, f:0} as failure — server silently no-op'd", async () => {
+    const { stub } = makeFetchStub([
+      { status: 200, body: formHtml },
+      { status: 200, body: JSON.stringify({ r: 1, s: 0, f: 0, mg: [] }) },
+    ]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.deleteBudgetItem(99, 1);
+    expect(out.success).toBe(false);
+    expect(out.succeeded).toBe(0);
+  });
+});
