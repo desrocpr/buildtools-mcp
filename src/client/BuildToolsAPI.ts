@@ -827,40 +827,64 @@ export class BuildToolsAPI {
   }
 
   /**
-   * Phase 3.3 (MOS-216). Lists ALL attachments for a project (any module),
-   * via `/documents?PR[]=:id` with no `list=` filter. This is the
-   * module-agnostic listing path documented inline in source — the
-   * `list=m-<projectId>-<module>-0` filter selects a single module (e.g.
-   * 600=Change Orders); omitting `list` returns everything visible to the
-   * user on the project's Documents tab. **Path semantics are inferred and
-   * pending live verification** (MOS-222 smoke).
+   * Lists attachments and folders for a project's Documents tab.
    *
-   * Returns the raw snake_case items as returned by BuildTools (no camelCase
-   * mapping — the Phase 3.3 tool renders the markdown directly). Returns
-   * `[]` on non-200 or unparseable body.
+   * - **Root listing** (no `folderId`): `GET /documents?PR[]=<id>` returns
+   *   the full HTML page with the root tree embedded as a
+   *   `mapInit([...], rootId)` JS call. We parse the array literal out.
+   * - **Folder drilldown** (with `folderId`): `GET /documents?PR[]=<id>&list=d-<projectId>-<folderId>`
+   *   returns JSON `{ r: 1, items: [...] }` with the folder's direct children.
+   *
+   * Both paths return the same item shape (raw snake_case). Each item carries
+   * `is_dir` (true for folders), `id`, `name`, `parent_id`, `extension`,
+   * `size`, `created_at`, `user_name`, `public_url`, `url_main`, and `key`
+   * (e.g. `d-185936-134629` for folders, `f-185936-137530` for files).
+   *
+   * Returns `[]` on non-200 or unparseable body.
    */
   async getProjectAttachments(
     projectId: string | number,
+    options?: { folderId?: string | number },
   ): Promise<Array<Record<string, unknown>>> {
     await this.ensureAuthenticated();
     if (!projectId) throw new BuildToolsServerError("projectId is required");
 
+    const drilldown = options?.folderId !== undefined && options.folderId !== null;
+    const listParam = drilldown
+      ? `&list=d-${projectId}-${options!.folderId}`
+      : "";
+
     const response = await this.request(
-      `${this.baseUrl}/documents?PR[]=${projectId}`,
+      `${this.baseUrl}/documents?PR[]=${projectId}${listParam}`,
       {
         method: "GET",
-        headers: { "X-Requested-With": "XMLHttpRequest" },
+        headers: {
+          Accept: drilldown ? "application/json" : "text/html",
+          "X-Requested-With": "XMLHttpRequest",
+        },
       },
       false,
     );
 
     if (response.status !== 200) return [];
 
+    if (drilldown) {
+      try {
+        const data = JSON.parse(response.body) as {
+          items?: Array<Record<string, unknown>>;
+        };
+        return data.items ?? [];
+      } catch {
+        return [];
+      }
+    }
+
+    const match = response.body.match(/mapInit\(\[([\s\S]*?)\],\s*rootId\)/);
+    if (!match) return [];
+    const inner = match[1].trim();
+    if (inner === "") return [];
     try {
-      const data = JSON.parse(response.body) as {
-        items?: Array<Record<string, unknown>>;
-      };
-      return data.items ?? [];
+      return JSON.parse("[" + inner + "]") as Array<Record<string, unknown>>;
     } catch {
       return [];
     }
