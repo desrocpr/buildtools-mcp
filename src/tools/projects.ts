@@ -41,8 +41,20 @@ import { BuildToolsError } from "../client/errors.js";
  * MCP tool-call response shape. Mirrors the SDK's `CallToolResult` — we keep
  * a local alias so this module doesn't depend on the SDK's deep types.
  */
+export type ToolResultContent =
+  | { type: "text"; text: string }
+  | {
+      type: "resource";
+      resource: {
+        uri: string;
+        mimeType?: string;
+        text?: string;
+        blob?: string;
+      };
+    };
+
 export interface ToolResult {
-  content: Array<{ type: "text"; text: string }>;
+  content: ToolResultContent[];
   isError?: boolean;
 }
 

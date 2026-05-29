@@ -890,6 +890,134 @@ export class BuildToolsAPI {
     }
   }
 
+  /**
+   * Downloads the bytes of a BuildTools-hosted attachment using the
+   * authenticated session. Designed for the public download URLs surfaced by
+   * `getProjectAttachments` (typically `https://file.buildtools.app/...`),
+   * which 302 to short-lived presigned S3 URLs. We follow that redirect chain
+   * in-process so cookies stay per-host (BuildTools cookies don't leak to S3
+   * and the S3 hop doesn't need any auth header of its own).
+   *
+   * SSRF guard: only URLs under `*.buildtools.app` (or the configured base
+   * tenant host) and `*.amazonaws.com` (the redirected S3 location) are
+   * followed. Size cap defaults to 25 MB to keep responses inside MCP
+   * tool-result limits; throws on overrun.
+   */
+  async downloadAttachment(
+    urlString: string,
+    options: { maxSizeBytes?: number; timeoutMs?: number } = {},
+  ): Promise<{ buffer: Buffer; mimeType: string; filename: string; finalUrl: string }> {
+    await this.ensureAuthenticated();
+    if (!urlString) throw new BuildToolsServerError("url is required");
+
+    const maxSize = options.maxSizeBytes ?? 25 * 1024 * 1024;
+    const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
+
+    const isAllowedHost = (host: string): boolean =>
+      /(^|\.)buildtools\.app$/i.test(host) || /\.amazonaws\.com$/i.test(host);
+
+    let currentUrl = urlString;
+    for (let hop = 0; hop < 10; hop++) {
+      const url = new URL(currentUrl);
+      if (!isAllowedHost(url.hostname)) {
+        throw new BuildToolsServerError(
+          `Refusing to download from non-allowlisted host: ${url.hostname}`,
+        );
+      }
+
+      const headers: Record<string, string> = {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        Accept: "*/*",
+      };
+      const cookie = this.getCookieString(url.hostname);
+      if (cookie) headers.Cookie = cookie;
+
+      const controller = new AbortController();
+      const timer =
+        timeoutMs !== undefined
+          ? setTimeout(() => controller.abort(), timeoutMs)
+          : undefined;
+
+      let resp: Response;
+      try {
+        resp = await this.fetchImpl(currentUrl, {
+          method: "GET",
+          headers,
+          redirect: "manual",
+          signal: controller.signal,
+        });
+      } catch (err) {
+        throw new BuildToolsNetworkError(
+          `Network error downloading ${currentUrl}: ${(err as Error)?.message ?? String(err)}`,
+          { cause: err, url: currentUrl },
+        );
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+
+      if (resp.status >= 300 && resp.status < 400) {
+        const location = resp.headers.get("location");
+        if (!location) {
+          throw new BuildToolsServerError(
+            `Redirect with no Location header at ${currentUrl}`,
+          );
+        }
+        currentUrl = new URL(location, currentUrl).toString();
+        continue;
+      }
+
+      if (resp.status !== 200) {
+        throw new BuildToolsServerError(
+          `Download failed: HTTP ${resp.status} for ${currentUrl}`,
+        );
+      }
+
+      const contentLengthHeader = resp.headers.get("content-length");
+      if (contentLengthHeader !== null) {
+        const declared = Number(contentLengthHeader);
+        if (Number.isFinite(declared) && declared > maxSize) {
+          throw new BuildToolsServerError(
+            `Attachment too large: ${declared} bytes (max ${maxSize}).`,
+          );
+        }
+      }
+
+      const ab = await resp.arrayBuffer();
+      if (ab.byteLength > maxSize) {
+        throw new BuildToolsServerError(
+          `Attachment too large: ${ab.byteLength} bytes (max ${maxSize}).`,
+        );
+      }
+      const buffer = Buffer.from(ab);
+
+      const mimeType =
+        resp.headers.get("content-type")?.split(";")[0].trim() ||
+        "application/octet-stream";
+
+      let filename = "";
+      const disposition = resp.headers.get("content-disposition") ?? "";
+      const dispMatch = disposition.match(
+        /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i,
+      );
+      if (dispMatch) {
+        try {
+          filename = decodeURIComponent(dispMatch[1]);
+        } catch {
+          filename = dispMatch[1];
+        }
+      } else {
+        const lastSegment = new URL(currentUrl).pathname.split("/").pop();
+        filename = lastSegment ? decodeURIComponent(lastSegment) : "download";
+      }
+
+      return { buffer, mimeType, filename, finalUrl: currentUrl };
+    }
+    throw new BuildToolsServerError(
+      `Too many redirects fetching ${urlString}`,
+    );
+  }
+
   // ========================================================================
   // SELECTION METHODS
   // ========================================================================

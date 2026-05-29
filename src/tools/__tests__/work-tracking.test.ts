@@ -49,7 +49,7 @@ function fakeApi(overrides: {
 }
 
 function textOf(result: ToolResult): string {
-  return result.content.map((c) => c.text).join("");
+  return result.content.map((c) => "text" in c ? c.text : "").join("");
 }
 
 // ---------------------------------------------------------------------------

@@ -23,6 +23,7 @@ import {
 
 import {
   attachmentTools,
+  downloadAttachmentTool,
   listProjectAttachmentsTool,
 } from "../attachments.js";
 import { type ToolResult } from "../projects.js";
@@ -33,12 +34,13 @@ import { type ToolResult } from "../projects.js";
 
 function fakeApi(overrides: {
   getProjectAttachments?: BuildToolsAPI["getProjectAttachments"];
+  downloadAttachment?: BuildToolsAPI["downloadAttachment"];
 }): BuildToolsAPI {
   return overrides as unknown as BuildToolsAPI;
 }
 
 function textOf(result: ToolResult): string {
-  return result.content.map((c) => c.text).join("");
+  return result.content.map((c) => "text" in c ? c.text : "").join("");
 }
 
 const samplePdfAttachment = {
@@ -85,9 +87,9 @@ const samplePngAttachment = {
 // ---------------------------------------------------------------------------
 
 describe("attachmentTools registry", () => {
-  it("exports exactly one tool with the contract-mandated name", () => {
+  it("exports the contract-mandated tools", () => {
     const names = attachmentTools.map((t) => t.name);
-    expect(names).toEqual(["list_project_attachments"]);
+    expect(names).toEqual(["list_project_attachments", "download_attachment"]);
   });
 
   it("the tool exposes a JSON Schema for its input", () => {
@@ -338,5 +340,94 @@ describe("list_project_attachments", () => {
     );
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("type_filter");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// download_attachment
+// ---------------------------------------------------------------------------
+
+describe("download_attachment", () => {
+  it("returns an embedded resource block with base64 blob, mime, and filename", async () => {
+    const downloadAttachment = vi.fn().mockResolvedValue({
+      buffer: Buffer.from("%PDF-1.4 fake pdf bytes"),
+      mimeType: "application/pdf",
+      filename: "plans.pdf",
+      finalUrl: "https://s3.amazonaws.com/bucket/plans.pdf?sig=abc",
+    });
+    const api = fakeApi({
+      downloadAttachment:
+        downloadAttachment as BuildToolsAPI["downloadAttachment"],
+    });
+
+    const result = await downloadAttachmentTool.handler(
+      { url: "https://file.buildtools.app/o/0ye79w/file/hash/abc" },
+      api,
+    );
+
+    expect(result.isError).toBeFalsy();
+    const summary = (result.content[0] as { text?: string }).text ?? "";
+    expect(summary).toContain("plans.pdf");
+    expect(summary).toContain("application/pdf");
+
+    const resource = result.content[1] as {
+      type: string;
+      resource: { uri: string; mimeType: string; blob: string };
+    };
+    expect(resource.type).toBe("resource");
+    expect(resource.resource.mimeType).toBe("application/pdf");
+    expect(resource.resource.blob).toBe(
+      Buffer.from("%PDF-1.4 fake pdf bytes").toString("base64"),
+    );
+    expect(resource.resource.uri).toContain("s3.amazonaws.com");
+    expect(downloadAttachment).toHaveBeenCalledWith(
+      "https://file.buildtools.app/o/0ye79w/file/hash/abc",
+    );
+  });
+
+  it("returns Markdown error content (isError: true) when the URL is not a URL", async () => {
+    const api = fakeApi({});
+    const result = await downloadAttachmentTool.handler(
+      { url: "not-a-url" },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Invalid input for `download_attachment`");
+  });
+
+  it("surfaces BuildToolsError thrown by the client (e.g. SSRF reject) as a tool error", async () => {
+    const downloadAttachment = vi
+      .fn()
+      .mockRejectedValue(
+        new BuildToolsServerError(
+          "Refusing to download from non-allowlisted host: evil.example.com",
+        ),
+      );
+    const api = fakeApi({
+      downloadAttachment:
+        downloadAttachment as BuildToolsAPI["downloadAttachment"],
+    });
+    const result = await downloadAttachmentTool.handler(
+      { url: "https://evil.example.com/exfil" },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("non-allowlisted host");
+  });
+
+  it("surfaces auth errors as tool errors", async () => {
+    const downloadAttachment = vi
+      .fn()
+      .mockRejectedValue(new BuildToolsAuthError("Not authenticated"));
+    const api = fakeApi({
+      downloadAttachment:
+        downloadAttachment as BuildToolsAPI["downloadAttachment"],
+    });
+    const result = await downloadAttachmentTool.handler(
+      { url: "https://file.buildtools.app/o/abc" },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Not authenticated");
   });
 });

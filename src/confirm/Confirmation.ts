@@ -72,8 +72,20 @@ export interface PendingMutation<T> {
  * imported from `src/tools/projects.ts` to keep `src/confirm/**` independent
  * of the read-tool surface — Phase 5 will eventually unify these.
  */
+export type ToolResultContent =
+  | { type: "text"; text: string }
+  | {
+      type: "resource";
+      resource: {
+        uri: string;
+        mimeType?: string;
+        text?: string;
+        blob?: string;
+      };
+    };
+
 export interface ToolResult {
-  content: Array<{ type: "text"; text: string }>;
+  content: ToolResultContent[];
   isError?: boolean;
 }
 
