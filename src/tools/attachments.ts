@@ -147,17 +147,27 @@ function escapeCell(value: unknown): string {
 
 const ListProjectAttachmentsInputSchema = z.object({
   project_id: z.number().describe("BuildTools project ID."),
+  folder_id: z
+    .number()
+    .optional()
+    .describe(
+      "Folder ID to drill into. Omit for the root listing (top-level folders + files). Get folder IDs from a prior call's `📁 #<id>` entries.",
+    ),
   type_filter: z
     .enum(["images", "documents", "all"])
     .optional()
     .describe(
-      "Filter attachments by type. images = png/jpg/jpeg/gif/webp/svg/bmp; documents = everything else. Default: all.",
+      "Filter file types. images = png/jpg/jpeg/gif/webp/svg/bmp; documents = everything else. Folders are always shown. Default: all.",
     ),
 });
 
 export type ListProjectAttachmentsInput = z.infer<
   typeof ListProjectAttachmentsInputSchema
 >;
+
+function isFolder(row: Record<string, unknown>): boolean {
+  return row.is_dir === true || row.is_dir === 1;
+}
 
 async function listProjectAttachmentsHandler(
   args: unknown,
@@ -167,55 +177,88 @@ async function listProjectAttachmentsHandler(
   if (!parsed.success) {
     return formatZodError(parsed.error, "list_project_attachments");
   }
-  const { project_id } = parsed.data;
+  const { project_id, folder_id } = parsed.data;
   const typeFilter = parsed.data.type_filter ?? "all";
 
   try {
-    const items = await api.getProjectAttachments(project_id);
-    let rows: Array<Record<string, unknown>> = items;
+    const items = await api.getProjectAttachments(project_id, {
+      folderId: folder_id,
+    });
+    // BuildTools' root listing also embeds UI pseudo-entries (System
+    // Documents, Recycle Bin) that have no numeric `id`. Drop them so
+    // only real folders and files render.
+    const realItems = items.filter((r) => typeof r.id === "number");
+    const folders = realItems.filter(isFolder);
+    let files = realItems.filter((r) => !isFolder(r));
 
     if (typeFilter === "images") {
-      rows = rows.filter((r) => classifyAttachment(r) === "image");
+      files = files.filter((r) => classifyAttachment(r) === "image");
     } else if (typeFilter === "documents") {
-      rows = rows.filter((r) => classifyAttachment(r) === "document");
+      files = files.filter((r) => classifyAttachment(r) === "document");
     }
 
-    if (rows.length === 0) {
-      const trailer =
-        typeFilter === "all" ? "" : ` (type_filter: ${typeFilter})`;
-      return markdown(
-        `No attachments found for project #${project_id}${trailer}.`,
+    const locationLabel =
+      folder_id !== undefined
+        ? `folder #${folder_id} of project #${project_id}`
+        : `project #${project_id}`;
+    const filterTrailer =
+      typeFilter === "all" ? "" : ` (type_filter: ${typeFilter})`;
+
+    if (folders.length === 0 && files.length === 0) {
+      return markdown(`No attachments found in ${locationLabel}${filterTrailer}.`);
+    }
+
+    const sections: string[] = [];
+    sections.push(
+      `**${folders.length} folder${folders.length === 1 ? "" : "s"}** and **${files.length} file${files.length === 1 ? "" : "s"}** in ${locationLabel}${filterTrailer}:`,
+    );
+
+    if (folders.length > 0) {
+      sections.push("### Folders");
+      sections.push("| Name | Folder ID | Created | Created By |");
+      sections.push("|---|---|---|---|");
+      for (const row of folders) {
+        const name = escapeCell(row.name ?? "(unnamed)");
+        const id = escapeCell(row.id);
+        const created = escapeCell(row.created_at);
+        const user = escapeCell(row.user_name);
+        sections.push(`| 📁 ${name} | ${id} | ${created} | ${user} |`);
+      }
+      sections.push(
+        `\n_To list a folder's contents, call list_project_attachments with project_id=${project_id} and folder_id=<Folder ID>._`,
       );
     }
 
-    const header = `**${rows.length} attachment${rows.length === 1 ? "" : "s"}** for project #${project_id}${typeFilter === "all" ? "" : ` (type_filter: ${typeFilter})`}:`;
-    const tableHeader = [
-      "| Name | Type | Size | Uploaded | Download |",
-      "|---|---|---|---|---|",
-    ].join("\n");
-    const tableBody = rows
-      .map((row) => {
+    if (files.length > 0) {
+      sections.push("### Files");
+      sections.push("| Name | Type | Size | Uploaded | By | Download |");
+      sections.push("|---|---|---|---|---|---|");
+      for (const row of files) {
         const name = escapeCell(row.name ?? "(unnamed)");
         const ext =
           typeof row.extension === "string" && row.extension !== ""
             ? row.extension
-            : (typeof row.name === "string"
-                ? row.name.match(/\.([A-Za-z0-9]+)$/)?.[1] ?? ""
-                : "");
+            : typeof row.name === "string"
+              ? (row.name.match(/\.([A-Za-z0-9]+)$/)?.[1] ?? "")
+              : "";
         const typeLabel = ext
           ? `${ext.toLowerCase()} (${classifyAttachment(row)})`
           : `(${classifyAttachment(row)})`;
         const size = formatSize(row.size);
         const uploaded = escapeCell(row.created_at);
-        const url = typeof row.public_url === "string" ? row.public_url : "";
-        const downloadCell = url
-          ? `[Download](${url})`
-          : "—";
-        return `| ${name} | ${escapeCell(typeLabel)} | ${size} | ${uploaded} | ${downloadCell} |`;
-      })
-      .join("\n");
+        const user = escapeCell(row.user_name);
+        const url =
+          (typeof row.public_url === "string" && row.public_url) ||
+          (typeof row.url_main === "string" && row.url_main) ||
+          "";
+        const downloadCell = url ? `[Download](${url})` : "—";
+        sections.push(
+          `| ${name} | ${escapeCell(typeLabel)} | ${size} | ${uploaded} | ${user} | ${downloadCell} |`,
+        );
+      }
+    }
 
-    return markdown(`${header}\n\n${tableHeader}\n${tableBody}`);
+    return markdown(sections.join("\n"));
   } catch (err) {
     return formatError(err, "list_project_attachments");
   }
@@ -224,7 +267,7 @@ async function listProjectAttachmentsHandler(
 export const listProjectAttachmentsTool: ToolDefinition = {
   name: "list_project_attachments",
   description:
-    "List files/attachments associated with a BuildTools project. Returns name, type, size, upload date, and a clickable download URL.",
+    "List folders and files on a BuildTools project's Documents tab. Returns a Markdown listing with folders (drillable via folder_id) and files (with name, type, size, upload date, and download URL). Call with no folder_id for the root listing; pass folder_id to drill into a subfolder.",
   inputSchema: zodToJsonSchema(ListProjectAttachmentsInputSchema),
   handler: listProjectAttachmentsHandler,
 };

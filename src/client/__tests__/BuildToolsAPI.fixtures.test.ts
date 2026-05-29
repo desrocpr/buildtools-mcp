@@ -533,11 +533,10 @@ describe("getCustomer() — customer-detail.json", () => {
 // getProjectAttachments() — attachments.json (MOS-216)
 // ---------------------------------------------------------------------------
 
-describe("getProjectAttachments() — attachments.json (MOS-216)", () => {
-  it("returns the snake_case items array verbatim", async () => {
-    const { api, recorded } = authedApi([
-      { status: 200, body: JSON.stringify(attachmentsFixture) },
-    ]);
+describe("getProjectAttachments() — attachments.json", () => {
+  it("parses items wrapped in a mapInit([...]) JS call in the /documents HTML", async () => {
+    const html = `<html><body><script>mapInit(${JSON.stringify(attachmentsFixture.items)}, rootId);</script></body></html>`;
+    const { api, recorded } = authedApi([{ status: 200, body: html }]);
     const out = await api.getProjectAttachments(100002);
     expect(out).toHaveLength(attachmentsFixture.items.length);
     expect(out[0]).toMatchObject({
@@ -545,7 +544,6 @@ describe("getProjectAttachments() — attachments.json (MOS-216)", () => {
       name: "scope-revision-1.pdf",
       extension: "pdf",
     });
-    // Module-agnostic path: /documents?PR[]=:id (no list= filter).
     expect(recorded[0].url).toBe(
       "https://moss.buildtools.app/documents?PR[]=100002",
     );
@@ -560,9 +558,9 @@ describe("getProjectAttachments() — attachments.json (MOS-216)", () => {
     }
   });
 
-  it("returns [] on empty items array", async () => {
+  it("returns [] when mapInit([]) is rendered with no items", async () => {
     const { api } = authedApi([
-      { status: 200, body: JSON.stringify({ items: [] }) },
+      { status: 200, body: "<script>mapInit([], rootId);</script>" },
     ]);
     expect(await api.getProjectAttachments(100002)).toEqual([]);
   });

@@ -120,9 +120,8 @@ describe("list_project_attachments", () => {
 
     expect(result.isError).toBeFalsy();
     const text = textOf(result);
-    expect(text).toContain("**3 attachments** for project #100002");
-    expect(text).toContain("| Name | Type | Size | Uploaded | Download |");
-    expect(text).toContain("|---|---|---|---|---|");
+    expect(text).toContain("**0 folders** and **3 files** in project #100002");
+    expect(text).toContain("| Name | Type | Size | Uploaded | By | Download |");
     expect(text).toContain("scope-revision-1.pdf");
     expect(text).toContain("approval-signed.pdf");
     expect(text).toContain("bathroom-rendering.png");
@@ -133,7 +132,9 @@ describe("list_project_attachments", () => {
     expect(text).toContain(
       "[Download](https://example.com/attachments/scope-revision-1.pdf)",
     );
-    expect(getProjectAttachments).toHaveBeenCalledWith(100002);
+    expect(getProjectAttachments).toHaveBeenCalledWith(100002, {
+      folderId: undefined,
+    });
   });
 
   it("filters to images-only when type_filter='images'", async () => {
@@ -152,7 +153,7 @@ describe("list_project_attachments", () => {
 
     expect(result.isError).toBeFalsy();
     const text = textOf(result);
-    expect(text).toContain("**1 attachment** for project #100002");
+    expect(text).toContain("**0 folders** and **1 file** in project #100002");
     expect(text).toContain("type_filter: images");
     expect(text).toContain("bathroom-rendering.png");
     expect(text).not.toContain("scope-revision-1.pdf");
@@ -174,7 +175,7 @@ describe("list_project_attachments", () => {
 
     expect(result.isError).toBeFalsy();
     const text = textOf(result);
-    expect(text).toContain("**1 attachment** for project #100002");
+    expect(text).toContain("**0 folders** and **1 file** in project #100002");
     expect(text).toContain("type_filter: documents");
     expect(text).toContain("scope-revision-1.pdf");
     expect(text).not.toContain("bathroom-rendering.png");
@@ -193,7 +194,7 @@ describe("list_project_attachments", () => {
     );
 
     expect(result.isError).toBeFalsy();
-    expect(textOf(result)).toContain("No attachments found for project #9");
+    expect(textOf(result)).toContain("No attachments found in project #9");
   });
 
   it("returns 'no attachments' with the type_filter trailer when filtered to empty", async () => {
@@ -211,8 +212,55 @@ describe("list_project_attachments", () => {
     );
 
     expect(result.isError).toBeFalsy();
-    expect(textOf(result)).toContain("No attachments found for project #100002");
+    expect(textOf(result)).toContain("No attachments found in project #100002");
     expect(textOf(result)).toContain("type_filter: images");
+  });
+
+  it("renders folders and files in separate sections and links folder IDs", async () => {
+    const getProjectAttachments = vi.fn().mockResolvedValue([
+      {
+        id: 134629,
+        name: "Drawings",
+        is_dir: true,
+        created_at: "2025-12-24 16:35:00",
+        user_name: "Emmett Zamani",
+      },
+      samplePdfAttachment,
+    ]);
+    const api = fakeApi({
+      getProjectAttachments:
+        getProjectAttachments as BuildToolsAPI["getProjectAttachments"],
+    });
+
+    const result = await listProjectAttachmentsTool.handler(
+      { project_id: 185936 },
+      api,
+    );
+    expect(result.isError).toBeFalsy();
+    const text = textOf(result);
+    expect(text).toContain("**1 folder** and **1 file** in project #185936");
+    expect(text).toContain("### Folders");
+    expect(text).toContain("### Files");
+    expect(text).toContain("📁 Drawings");
+    expect(text).toContain("| 134629 |");
+    expect(text).toContain("folder_id=<Folder ID>");
+    expect(text).toContain("scope-revision-1.pdf");
+  });
+
+  it("passes folder_id through to the client method on drilldown", async () => {
+    const getProjectAttachments = vi.fn().mockResolvedValue([]);
+    const api = fakeApi({
+      getProjectAttachments:
+        getProjectAttachments as BuildToolsAPI["getProjectAttachments"],
+    });
+
+    await listProjectAttachmentsTool.handler(
+      { project_id: 185936, folder_id: 134629 },
+      api,
+    );
+    expect(getProjectAttachments).toHaveBeenCalledWith(185936, {
+      folderId: 134629,
+    });
   });
 
   it("renders missing fields as em-dashes rather than throwing", async () => {

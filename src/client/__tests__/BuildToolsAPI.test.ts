@@ -760,17 +760,51 @@ describe("getCustomer() — MOS-216", () => {
   });
 });
 
-describe("getProjectAttachments() — MOS-216", () => {
-  it("hits /documents?PR[]=:id with no list= filter", async () => {
+describe("getProjectAttachments()", () => {
+  it("parses mapInit([...]) embedded in the /documents HTML page (root)", async () => {
+    const itemsLiteral = JSON.stringify([
+      {
+        id: 134629,
+        name: "Drawings",
+        is_dir: true,
+        created_at: "2025-12-24 16:35:00",
+        user_name: "Emmett Zamani",
+      },
+      {
+        id: 1,
+        name: "scope.pdf",
+        is_dir: false,
+        extension: "pdf",
+        public_url: "https://example.com/s.pdf",
+        size: 100,
+        created_at: "01/01/2026",
+      },
+    ]);
+    const html = `<html><body><script>mapInit(${itemsLiteral}, rootId);</script></body></html>`;
+    const { stub, recorded } = makeFetchStub([{ status: 200, body: html }]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    const out = await api.getProjectAttachments(100002);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toMatchObject({ id: 134629, is_dir: true, name: "Drawings" });
+    expect(out[1]).toMatchObject({ id: 1, name: "scope.pdf", extension: "pdf" });
+    expect(recorded[0].url).toBe(
+      "https://moss.buildtools.app/documents?PR[]=100002",
+    );
+    expect(recorded[0].url).not.toContain("list=");
+  });
+
+  it("drills into a folder via list=d-<projectId>-<folderId> and parses JSON {items: [...]}", async () => {
     const payload = {
+      r: 1,
       items: [
         {
-          id: 1,
-          name: "scope.pdf",
+          id: 99,
+          name: "elevation.pdf",
+          is_dir: false,
           extension: "pdf",
-          public_url: "https://example.com/s.pdf",
-          size: 100,
-          created_at: "01/01/2026",
+          parent_id: 134629,
+          public_url: "https://example.com/e.pdf",
         },
       ],
     };
@@ -779,14 +813,12 @@ describe("getProjectAttachments() — MOS-216", () => {
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.getProjectAttachments(100002);
+    const out = await api.getProjectAttachments(100002, { folderId: 134629 });
     expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ id: 1, name: "scope.pdf", extension: "pdf" });
+    expect(out[0]).toMatchObject({ id: 99, name: "elevation.pdf" });
     expect(recorded[0].url).toBe(
-      "https://moss.buildtools.app/documents?PR[]=100002",
+      "https://moss.buildtools.app/documents?PR[]=100002&list=d-100002-134629",
     );
-    // No `list=` filter — module-agnostic listing.
-    expect(recorded[0].url).not.toContain("list=");
   });
 
   it("returns [] on non-200", async () => {
@@ -796,18 +828,31 @@ describe("getProjectAttachments() — MOS-216", () => {
     expect(await api.getProjectAttachments(100002)).toEqual([]);
   });
 
-  it("returns [] on non-JSON body", async () => {
-    const { stub } = makeFetchStub([{ status: 200, body: "<html/>" }]);
+  it("returns [] when the page has no mapInit() call", async () => {
+    const { stub } = makeFetchStub([
+      { status: 200, body: "<html><body>no docs here</body></html>" },
+    ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
     expect(await api.getProjectAttachments(100002)).toEqual([]);
   });
 
-  it("returns [] when items is missing from the JSON envelope", async () => {
-    const { stub } = makeFetchStub([{ status: 200, body: "{}" }]);
+  it("returns [] when mapInit() is called with an empty array", async () => {
+    const { stub } = makeFetchStub([
+      { status: 200, body: "<script>mapInit([], rootId);</script>" },
+    ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
     expect(await api.getProjectAttachments(100002)).toEqual([]);
+  });
+
+  it("returns [] when folder drilldown items is missing from the JSON envelope", async () => {
+    const { stub } = makeFetchStub([{ status: 200, body: "{}" }]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+    expect(
+      await api.getProjectAttachments(100002, { folderId: 1 }),
+    ).toEqual([]);
   });
 
   it("throws BuildToolsServerError when projectId is falsy", async () => {
