@@ -165,6 +165,11 @@ export function errorPage(message: string): string {
 // Admin pages (MOS-328 Phase 7)
 // ---------------------------------------------------------------------------
 
+// Role allowlist sourced from the schema migration via auth/types.ts —
+// single source of truth so the dropdown and the POST handler can't
+// drift.
+import { KNOWN_ROLES } from "../auth/types.js";
+
 function adminHeader(userEmail: string): string {
   return `
     <p class="mb-6 text-sm text-slate-600">
@@ -216,12 +221,12 @@ export interface AdminUserRow {
 
 export interface AdminUsersPageProps extends AdminPageProps {
   currentUserId: string;
+  csrfToken: string;
   users: AdminUserRow[];
 }
 
-const KNOWN_ROLES = ["viewer", "editor", "admin", "harness"];
-
 export function adminUsersPage(props: AdminUsersPageProps): string {
+  const csrfInput = `<input type="hidden" name="_csrf" value="${escape(props.csrfToken)}">`;
   const userRows = props.users
     .map((u) => {
       const isSelf = u.id === props.currentUserId;
@@ -230,6 +235,7 @@ export function adminUsersPage(props: AdminUsersPageProps): string {
         .map(
           (r) =>
             `<form method="POST" action="/admin/users/${escape(u.id)}/role" class="inline">
+               ${csrfInput}
                <input type="hidden" name="role" value="${escape(r.name)}">
                <input type="hidden" name="action" value="remove">
                <button type="submit" class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-xs hover:bg-red-100" title="Remove role">
@@ -243,6 +249,7 @@ export function adminUsersPage(props: AdminUsersPageProps): string {
         .join("");
       const addRoleForm = addRoleOptions
         ? `<form method="POST" action="/admin/users/${escape(u.id)}/role" class="inline">
+             ${csrfInput}
              <input type="hidden" name="action" value="add">
              <select name="role" class="rounded border border-slate-300 px-1 py-0.5 text-xs">
                ${addRoleOptions}
@@ -250,9 +257,16 @@ export function adminUsersPage(props: AdminUsersPageProps): string {
              <button type="submit" class="ml-1 rounded bg-blue-600 px-2 py-0.5 text-xs text-white hover:bg-blue-700">+</button>
            </form>`
         : `<span class="text-xs text-slate-400">(all roles assigned)</span>`;
+      // JSON.stringify on the email keeps quotes safe inside the inline
+      // JS string. The attribute itself is HTML-escaped because the
+      // result still passes through the HTML parser before reaching JS.
+      const confirmMsg = JSON.stringify(
+        `Revoke ${u.email}? This signs them out + invalidates all their tokens.`,
+      );
       const revokeBtn =
         u.status === "active" && !isSelf
-          ? `<form method="POST" action="/admin/users/${escape(u.id)}/revoke" class="inline" onsubmit="return confirm('Revoke ${escape(u.email)}? This signs them out + invalidates all their tokens.')">
+          ? `<form method="POST" action="/admin/users/${escape(u.id)}/revoke" class="inline" onsubmit="return confirm(${escape(confirmMsg)})">
+               ${csrfInput}
                <button type="submit" class="rounded bg-red-600 px-2 py-0.5 text-xs text-white hover:bg-red-700">Revoke</button>
              </form>`
           : `<span class="text-xs text-slate-400">${escape(u.status)}</span>`;
@@ -296,6 +310,7 @@ export function adminUsersPage(props: AdminUsersPageProps): string {
 }
 
 export interface NewServiceAccountProps extends AdminPageProps {
+  csrfToken: string;
   errorMessage?: string;
   prefill?: {
     displayName?: string;
@@ -325,6 +340,7 @@ export function adminNewServiceAccountPage(
     </p>
     ${error}
     <form method="POST" action="/admin/service-accounts/new" class="space-y-4">
+      <input type="hidden" name="_csrf" value="${escape(props.csrfToken)}">
       <div>
         <label class="block text-sm font-medium" for="display_name">Display name</label>
         <input id="display_name" name="display_name" type="text" required
@@ -441,7 +457,7 @@ export function adminAuditPage(props: AdminAuditPageProps): string {
           <td class="py-1 pl-3 pr-3 text-xs text-slate-500 align-top whitespace-nowrap">${escape(ts)}</td>
           <td class="py-1 pr-3 text-xs align-top">${userCell}</td>
           <td class="py-1 pr-3 text-sm align-top">${escape(r.tool)}</td>
-          <td class="py-1 pr-3 text-xs align-top">${r.project_id ?? ""}</td>
+          <td class="py-1 pr-3 text-xs align-top">${escape(r.project_id ?? "")}</td>
           <td class="py-1 pr-3 align-top"><span class="inline-flex items-center rounded-full ${resultBadge} px-2 py-0.5 text-xs">${escape(r.result)}</span></td>
           <td class="py-1 pr-3 align-top text-xs text-slate-600">${escape(r.error_message ?? "")}</td>
         </tr>

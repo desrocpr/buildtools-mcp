@@ -32,9 +32,10 @@ import {
   resolveServiceToken,
   touchServiceTokenLastUsed,
 } from "./service-tokens.js";
+import { touchLastSeenDebounced } from "./last-seen-cache.js";
 import { constantTimeStringEqual, detectTokenKind } from "./tokens.js";
 import type { McpUserWithRoles } from "./types.js";
-import { getUserWithRoles, touchLastSeen } from "./users.js";
+import { getUserWithRoles } from "./users.js";
 
 export type AuthKind = "human" | "service" | "legacy";
 
@@ -95,7 +96,7 @@ export async function resolveBearer(
     // (.catch is critical — the underlying helpers throw on Supabase errors,
     // and an unhandled rejection terminates the Node process from 18+.)
     touchTokenLastUsed(deps.db, access.tokenId).catch(swallowTouchError);
-    touchLastSeen(deps.db, user.id).catch(swallowTouchError);
+    touchLastSeenDebounced(deps.db, user.id);
     return {
       kind: "human",
       user,
@@ -110,7 +111,7 @@ export async function resolveBearer(
     const user = await getUserWithRoles(deps.db, svc.userId);
     if (!user || user.status !== "active") return null;
     touchServiceTokenLastUsed(deps.db, svc.tokenId).catch(swallowTouchError);
-    touchLastSeen(deps.db, user.id).catch(swallowTouchError);
+    touchLastSeenDebounced(deps.db, user.id);
     return {
       kind: "service",
       user,

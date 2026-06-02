@@ -97,6 +97,31 @@ export async function revokeServiceToken(
   if (error) throw new Error(`revokeServiceToken: ${error.message}`);
 }
 
+/**
+ * Revoke every active service token owned by `userId`. Used by the
+ * admin user-revoke path so the row-level `revoked_at` matches the
+ * functional state (user with status=revoked already can't resolve
+ * via the bearer middleware, but leaving service tokens un-revoked
+ * makes the admin UI lie).
+ */
+export async function revokeAllServiceTokensForUser(
+  db: Db,
+  userId: string,
+  revokedBy: string | null = null,
+): Promise<void> {
+  const { error } = await db
+    .from("mcp_service_tokens")
+    .update({
+      revoked_at: new Date().toISOString(),
+      revoked_by: revokedBy,
+    })
+    .eq("user_id", userId)
+    .is("revoked_at", null);
+  if (error) {
+    throw new Error(`revokeAllServiceTokensForUser: ${error.message}`);
+  }
+}
+
 export async function listServiceTokens(
   db: Db,
 ): Promise<
