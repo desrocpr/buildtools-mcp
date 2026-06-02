@@ -18,7 +18,9 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@supabase/supabase-js": "^2.106.2",
     "express": "^5.2.1",
+    "openid-client": "^6.8.4",
     "zod": "^4.3.6",
     "zod-to-json-schema": "^3.25.1"
   },
