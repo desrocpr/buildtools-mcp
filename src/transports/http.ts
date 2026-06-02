@@ -163,21 +163,41 @@ function buildPerSessionServer(opts: {
     ...mutationTools.map((t) => [t.name, t] as const),
   ]);
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
-      {
-        name: "ping",
-        description:
-          "Returns pong. Used to verify the buildtools-mcp server is reachable.",
-        inputSchema: { type: "object", properties: {} },
-      },
-      ...Array.from(toolsByName.values()).map((t) => ({
-        name: t.name,
-        description: t.description,
-        inputSchema: t.inputSchema,
-      })),
-    ],
-  }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    // Filter the advertised tool list by the caller's permissions when
+    // we have an OAuth/service AuthContext on the session. Legacy
+    // bearer sessions (kind=legacy) and the absence of any auth context
+    // both fall through to "show everything" — preserves pre-Phase-6
+    // behavior so existing clients continue to work during cutover.
+    const authCtx = opts.sessionStore.getAuth<{
+      kind: "human" | "service" | "legacy";
+      user: { permissions: string[] } | null;
+    }>(opts.sessionId);
+    const shouldFilter =
+      authCtx !== undefined && authCtx.kind !== "legacy" && authCtx.user !== null;
+    const { hasPermission } = await import("../auth/types.js");
+    const tools = Array.from(toolsByName.values());
+    const filtered = shouldFilter
+      ? tools.filter((t) =>
+          hasPermission(authCtx!.user!.permissions, t.permission),
+        )
+      : tools;
+    return {
+      tools: [
+        {
+          name: "ping",
+          description:
+            "Returns pong. Used to verify the buildtools-mcp server is reachable.",
+          inputSchema: { type: "object", properties: {} },
+        },
+        ...filtered.map((t) => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+        })),
+      ],
+    };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
@@ -195,6 +215,41 @@ function buildPerSessionServer(opts: {
         content: [{ type: "text", text: `**Unknown tool**: ${name}` }],
         isError: true,
       };
+    }
+
+    // Permission enforcement (MOS-328 Phase 6b). Same gating rule as
+    // tools/list — applies only when the session has an OAuth/service
+    // AuthContext; legacy and unauthed sessions are unaffected.
+    const authCtx = opts.sessionStore.getAuth<{
+      kind: "human" | "service" | "legacy";
+      user: { email: string; permissions: string[] } | null;
+    }>(sessionId);
+    if (
+      authCtx !== undefined &&
+      authCtx.kind !== "legacy" &&
+      authCtx.user !== null
+    ) {
+      const { hasPermission } = await import("../auth/types.js");
+      if (!hasPermission(authCtx.user.permissions, tool.permission)) {
+        auditLog({
+          sessionId,
+          username: authCtx.user.email,
+          tool: name,
+          result: "error",
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `**Permission denied**: tool \`${name}\` requires \`${tool.permission}\`. ` +
+                `Your roles grant: ${authCtx.user.permissions.join(", ") || "(none)"}. ` +
+                `Ask an admin to upgrade your role at /admin/users.`,
+            },
+          ],
+          isError: true,
+        };
+      }
     }
 
     // `set_session_credentials` does not need a BuildToolsAPI — it stores

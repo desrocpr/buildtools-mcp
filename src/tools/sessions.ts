@@ -76,6 +76,12 @@ export function createSessionCredentialsTool(opts: {
       "Credentials are held in memory until the SSE connection closes. " +
       "Inputs: `username` (string), `password` (string), and optional `tenant` (string, defaults to the server's BUILDTOOLS_TENANT).",
     inputSchema: zodToJsonSchema(SetSessionCredentialsSchema),
+    // Available to every authenticated caller — this is what the legacy
+    // bearer path uses to attach BuildTools creds, and OAuth users may
+    // still call it during the cutover window (the OAuth path
+    // auto-resolves their stored creds, but this stays usable as a
+    // per-session override for now).
+    permission: "read",
     handler: async (args) => {
       const parsed = SetSessionCredentialsSchema.safeParse(args);
       if (!parsed.success) {

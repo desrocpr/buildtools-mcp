@@ -21,7 +21,7 @@
  * the entry point for the cookie to attach, hence Lax not Strict.
  */
 
-import type { Request, Response, Router } from "express";
+import express, { type Request, type Response, type Router } from "express";
 import type { Configuration } from "openid-client";
 
 import { BuildToolsAPI } from "../client/BuildToolsAPI.js";
@@ -243,7 +243,7 @@ export function mountEnrollRoutes(router: Router, deps: EnrollDeps): void {
 
   // ----- Save BuildTools credentials ------------------------------------------
 
-  router.post("/enroll/save", async (req, res) => {
+  router.post("/enroll/save", express.urlencoded({ extended: false }), async (req, res) => {
     const session = readSession(req, deps.encryptionKey);
     if (!session) {
       res.redirect("/enroll");

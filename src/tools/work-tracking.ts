@@ -187,6 +187,7 @@ export const listCertificatesTool: ToolDefinition = {
   description:
     "List BuildTools certificates (insurance, licensing, etc.) with optional free-text search.",
   inputSchema: zodToJsonSchema(ListCertificatesInputSchema),
+  permission: "read",
   handler: listCertificatesHandler,
 };
 
@@ -249,6 +250,7 @@ export const listDailyLogsTool: ToolDefinition = {
   description:
     "List BuildTools daily logs (per-project per-day status entries).",
   inputSchema: zodToJsonSchema(LimitOnlyInputSchema),
+  permission: "read",
   handler: listDailyLogsHandler,
 };
 
@@ -301,6 +303,7 @@ export const listWeeklyReportsTool: ToolDefinition = {
   description:
     "List BuildTools weekly reports (per-project weekly progress summaries).",
   inputSchema: zodToJsonSchema(LimitOnlyInputSchema),
+  permission: "read",
   handler: listWeeklyReportsHandler,
 };
 
@@ -349,6 +352,7 @@ export const listWorkDaysTool: ToolDefinition = {
   description:
     "List BuildTools work-day entries (per-user per-day hours logged on projects).",
   inputSchema: zodToJsonSchema(LimitOnlyInputSchema),
+  permission: "read",
   handler: listWorkDaysHandler,
 };
 

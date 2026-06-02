@@ -231,6 +231,7 @@ export const listChangeOrdersTool: ToolDefinition = {
   description:
     "List change orders for a BuildTools project. Returns CO number, status, amount, description.",
   inputSchema: zodToJsonSchema(ListChangeOrdersInputSchema),
+  permission: "read",
   handler: listChangeOrdersHandler,
 };
 
@@ -337,6 +338,7 @@ export const getChangeOrderTool: ToolDefinition = {
   description:
     "Get full detail for a single change order by ID, including line items and current billing status.",
   inputSchema: zodToJsonSchema(GetChangeOrderInputSchema),
+  permission: "read",
   handler: getChangeOrderHandler,
 };
 
@@ -413,6 +415,7 @@ export const findUnbilledChangeOrdersTool: ToolDefinition = {
   description:
     "Find active projects (Nexus/Omega/Invicta/Alpha) where the revised contract exceeds total billing — the project-level 'unbilled gap'. Matches the logic in find-unbilled-cos.js.",
   inputSchema: zodToJsonSchema(FindUnbilledChangeOrdersInputSchema),
+  permission: "read",
   handler: findUnbilledChangeOrdersHandler,
 };
 
@@ -561,6 +564,7 @@ export const getFinancialStatementTool: ToolDefinition = {
   description:
     "Get the project-level financial overview: original contract, approved COs, revised contract, total billing, costs, and margin. For individual statement records, use list_financial_statements.",
   inputSchema: zodToJsonSchema(GetFinancialStatementInputSchema),
+  permission: "read",
   handler: getFinancialStatementHandler,
 };
 
@@ -635,6 +639,7 @@ export const listFinancialStatementsTool: ToolDefinition = {
   description:
     "List individual financial statements (draw requests / client bills) for a project. Shows ID, status, name, amount, paid, balance, and date. Optionally filter by status (Draft/Pending/Partial/Sent/Paid).",
   inputSchema: zodToJsonSchema(ListFinancialStatementsInputSchema),
+  permission: "read",
   handler: listFinancialStatementsHandler,
 };
 

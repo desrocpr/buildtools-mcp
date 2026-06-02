@@ -121,6 +121,7 @@ export const listBudgetTool: ToolDefinition = {
   description:
     "List all budget line items for a project (48+ categories — full grid, not just allowances). Set allowances_only=true to filter to allowance categories only. Use list_selection_categories for the catalog of budget category IDs needed when creating new items.",
   inputSchema: zodToJsonSchema(ListBudgetInputSchema),
+  permission: "read",
   handler: listBudgetHandler,
 };
 

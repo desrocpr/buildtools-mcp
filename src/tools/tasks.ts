@@ -231,6 +231,7 @@ export const listTasksTool: ToolDefinition = {
   description:
     "List BuildTools tasks with optional filters (project substring, status). Returns up to 50 tasks by default.",
   inputSchema: zodToJsonSchema(ListTasksInputSchema),
+  permission: "read",
   handler: listTasksHandler,
 };
 
@@ -277,6 +278,7 @@ export const searchTasksTool: ToolDefinition = {
   description:
     "Free-text search across BuildTools tasks (matches name, project, assignee, location).",
   inputSchema: zodToJsonSchema(SearchTasksInputSchema),
+  permission: "read",
   handler: searchTasksHandler,
 };
 

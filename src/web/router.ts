@@ -56,9 +56,11 @@ export async function mountWebRoutes(
   const azureDiscovery = await discoverAzureConfig(azure);
 
   // One router holds enrollment + OAuth so they can be mounted together.
+  // Body parsers are attached PER ROUTE inside the mount fns rather than
+  // here — a router-wide express.urlencoded/json would consume the
+  // request body of every request, including the SSE transport's POST
+  // /messages stream (which the MCP SDK reads raw).
   const router: Router = express.Router();
-  router.use(express.urlencoded({ extended: false }));
-  router.use(express.json());
 
   mountEnrollRoutes(router, {
     db,

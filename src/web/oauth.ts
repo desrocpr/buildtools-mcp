@@ -23,7 +23,7 @@
  * original request without server state.
  */
 
-import type { Request, Response, Router } from "express";
+import express, { type Request, type Response, type Router } from "express";
 import type { Configuration } from "openid-client";
 
 import {
@@ -95,7 +95,7 @@ export function mountOAuthRoutes(router: Router, deps: OAuthDeps): void {
 
   // ----- Dynamic client registration (RFC 7591) -------------------------------
 
-  router.post("/oauth/register", async (req, res) => {
+  router.post("/oauth/register", express.json(), async (req, res) => {
     try {
       const body = req.body ?? {};
       const redirectUris = Array.isArray(body.redirect_uris)
@@ -237,7 +237,7 @@ export function mountOAuthRoutes(router: Router, deps: OAuthDeps): void {
 
   // ----- /oauth/token → code + refresh grants ---------------------------------
 
-  router.post("/oauth/token", async (req, res) => {
+  router.post("/oauth/token", express.urlencoded({ extended: false }), express.json(), async (req, res) => {
     const grantType = typeof req.body?.grant_type === "string" ? req.body.grant_type : "";
     try {
       if (grantType === "authorization_code") {
@@ -257,7 +257,7 @@ export function mountOAuthRoutes(router: Router, deps: OAuthDeps): void {
 
   // ----- /oauth/revoke (RFC 7009) ---------------------------------------------
 
-  router.post("/oauth/revoke", async (req, res) => {
+  router.post("/oauth/revoke", express.urlencoded({ extended: false }), express.json(), async (req, res) => {
     const token = typeof req.body?.token === "string" ? req.body.token : null;
     if (!token) {
       res.status(400).json({ error: "invalid_request" });
