@@ -51,6 +51,13 @@ export interface SessionCredentials {
  */
 export class SessionStore {
   private readonly store = new Map<string, SessionCredentials>();
+  // Phase 6a (MOS-328): per-session resolved auth context.
+  // Kept in a parallel Map so the legacy SessionCredentials shape stays
+  // stable for callers that don't need OAuth identity yet.
+  // The type is `unknown` here to avoid an import cycle with src/auth/;
+  // the HTTP transport casts it back to AuthContext at the dispatch
+  // layer in Phase 6b.
+  private readonly authStore = new Map<string, unknown>();
 
   /** Replace any prior credentials for `sessionId`. */
   set(sessionId: string, creds: SessionCredentials): void {
@@ -62,8 +69,19 @@ export class SessionStore {
     return this.store.get(sessionId);
   }
 
+  /** Attach a resolved auth context to a session. */
+  setAuth(sessionId: string, ctx: unknown): void {
+    this.authStore.set(sessionId, ctx);
+  }
+
+  /** Returns the auth context for `sessionId`, or `undefined`. */
+  getAuth<T>(sessionId: string): T | undefined {
+    return this.authStore.get(sessionId) as T | undefined;
+  }
+
   /** Returns `true` if the entry existed and was removed. */
   delete(sessionId: string): boolean {
+    this.authStore.delete(sessionId);
     return this.store.delete(sessionId);
   }
 
@@ -75,6 +93,7 @@ export class SessionStore {
   /** Wipe everything — used by tests. */
   clear(): void {
     this.store.clear();
+    this.authStore.clear();
   }
 }
 
