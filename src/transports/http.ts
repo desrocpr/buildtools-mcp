@@ -300,13 +300,15 @@ export async function startHttpTransport(
   const oauthEnabled =
     opts.oauthEnabled ??
     /^(1|true|yes)$/i.test(process.env.MCP_OAUTH_ENABLED ?? "");
+  let resolverDb: import("../auth/db.js").Db | undefined;
   if (oauthEnabled) {
     const publicOrigin =
       opts.publicOrigin ??
       process.env.MCP_PUBLIC_ORIGIN ??
       "https://buildtools-mcp.mossbuildinganddesign.com";
     const { mountWebRoutes } = await import("../web/router.js");
-    await mountWebRoutes(app, { publicOrigin });
+    const handles = await mountWebRoutes(app, { publicOrigin });
+    resolverDb = handles.db;
     process.stderr.write(
       `[http-transport] OAuth + enrollment routes mounted (origin=${publicOrigin})\n`,
     );
@@ -318,28 +320,81 @@ export async function startHttpTransport(
   const expectedAuthHeader = Buffer.from(`Bearer ${opts.bearerToken}`);
 
   const { isPublicRoute } = await import("../web/router.js");
+  const { parseBearerHeader } = await import("../auth/tokens.js");
+  const { resolveBearer } = await import("../auth/resolver.js");
 
   // Bearer-token middleware — applied to MCP routes only. /oauth/*,
   // /enroll/*, and /.well-known/* are exempt; they have their own auth.
-  app.use((req: Request, res: Response, next: NextFunction) => {
+  //
+  // When OAuth is enabled we route through the resolver, which:
+  //   - accepts mcpa_ / mcps_ tokens and attaches an AuthContext to req
+  //   - falls back to constant-time legacy bearer compare during the
+  //     2-week deprecation window so existing Claude Desktop sessions
+  //     keep working until users re-enroll
+  //
+  // When OAuth is off the behaviour is exactly the pre-Phase-6 path:
+  // constant-time compare against HTTP_BEARER_TOKEN, no DB lookups.
+  app.use(async (req: Request, res: Response, next: NextFunction) => {
     if (oauthEnabled && isPublicRoute(req.path)) {
       return next();
     }
-    const presented = Buffer.from(req.headers.authorization ?? "");
-    if (
-      presented.length !== expectedAuthHeader.length ||
-      !timingSafeEqual(presented, expectedAuthHeader)
-    ) {
+
+    if (!oauthEnabled) {
+      const presented = Buffer.from(req.headers.authorization ?? "");
+      if (
+        presented.length !== expectedAuthHeader.length ||
+        !timingSafeEqual(presented, expectedAuthHeader)
+      ) {
+        res.status(401).type("text/plain").send("Unauthorized");
+        return;
+      }
+      return next();
+    }
+
+    // OAuth-enabled path.
+    const bearer = parseBearerHeader(req.headers.authorization ?? null);
+    if (!bearer || !resolverDb) {
       res.status(401).type("text/plain").send("Unauthorized");
       return;
     }
-    next();
+    try {
+      const ctx = await resolveBearer(bearer, {
+        db: resolverDb,
+        legacyBearer: opts.bearerToken,
+      });
+      if (!ctx) {
+        res.status(401).type("text/plain").send("Unauthorized");
+        return;
+      }
+      // Attach so the /sse handler can copy it into the session store
+      // and the /messages handler can read it back.
+      (req as Request & { auth?: unknown }).auth = ctx;
+      next();
+    } catch (err) {
+      // Resolver hit a DB error — fail closed but log loud so we
+      // notice infrastructure issues. Token value never reaches stderr;
+      // we only log the error message from the DB lookup.
+      process.stderr.write(
+        `[http-transport] auth resolver error: ${(err as Error)?.message ?? err}\n`,
+      );
+      res.status(401).type("text/plain").send("Unauthorized");
+    }
   });
 
   app.get(SSE_ENDPOINT, async (req: Request, res: Response) => {
     const transport = new SSEServerTransport(MESSAGES_ENDPOINT, res);
     const sessionId = transport.sessionId;
     transports.set(sessionId, transport);
+
+    // Phase 6a (MOS-328): if the bearer middleware resolved an
+    // AuthContext, persist it on the session so subsequent /messages
+    // calls can identify the user without re-resolving. Legacy bearer
+    // requests have ctx.kind === 'legacy' (no user) and continue to
+    // rely on `set_session_credentials`.
+    const ctx = (req as Request & { auth?: unknown }).auth;
+    if (ctx) {
+      sessionStore.setAuth(sessionId, ctx);
+    }
 
     const server = buildPerSessionServer({
       sessionId,
