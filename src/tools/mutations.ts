@@ -537,11 +537,13 @@ export function createMutationTools(
     description: string,
     schema: z.ZodTypeAny,
     confirmed: (args: any, store: ConfirmationStore) => Promise<ToolResult>,
+    permission: string,
   ): ToolDefinition {
     return {
       name,
       description,
       inputSchema: zodToJsonSchema(schema),
+      permission,
       // _api is intentionally unused — mutation tools access the API via
       // closure over getApi() to ensure the lazy singleton is resolved at
       // execution time, not at registration time.
@@ -561,84 +563,98 @@ export function createMutationTools(
       "Create a new BuildTools project. Requires confirmation. Default status: Omega (6).",
       CreateProjectSchema,
       createProjectConfirmed,
+      "write:project",
     ),
     makeTool(
       "create_change_order",
       "Create a change order on a project. Requires confirmation. Default status: Draft (1).",
       CreateChangeOrderSchema,
       createCOConfirmed,
+      "write:financial",
     ),
     makeTool(
       "create_purchase_order",
       "Create a purchase order for a vendor on a project. Requires confirmation.",
       CreatePurchaseOrderSchema,
       createPOConfirmed,
+      "write:financial",
     ),
     makeTool(
       "create_task",
       "Create a task on a project. Requires confirmation. Status: 1=Open, 2=In Progress, 3=Complete.",
       CreateTaskSchema,
       createTaskConfirmed,
+      "write:tasks",
     ),
     makeTool(
       "create_rfi",
       "Create an RFI (Request for Information) on a project. Requires confirmation.",
       CreateRFISchema,
       createRFIConfirmed,
+      "write:tasks",
     ),
     makeTool(
       "create_invoice",
       "Create a vendor invoice. Requires confirmation. Note: 'invoices' in BuildTools are vendor bills, not client billing (that's financial statements).",
       CreateInvoiceSchema,
       createInvoiceConfirmed,
+      "write:financial",
     ),
     makeTool(
       "create_financial_statement",
       "Create a financial statement (client bill / draw request) on a project with a specific dollar amount. Requires confirmation. Use ASCII-only titles.",
       CreateFinancialStatementSchema,
       createFSConfirmed,
+      "write:financial",
     ),
     makeTool(
       "delete_financial_statement",
       "Delete one or more financial statements from a project. Requires confirmation. This is destructive and cannot be undone.",
       DeleteFinancialStatementSchema,
       deleteFSConfirmed,
+      "delete",
     ),
     makeTool(
       "create_service",
       "Create a service request on a project. Requires confirmation.",
       CreateServiceSchema,
       createServiceConfirmed,
+      "write:operations",
     ),
     makeTool(
       "create_selection",
       "Create a material/finish selection on a project. Requires a budget_category_id (use list_selection_categories to find valid IDs). Requires confirmation.",
       CreateSelectionSchema,
       createSelectionConfirmed,
+      "write:selections",
     ),
     makeTool(
       "delete_selection",
       "Delete one or more selections from a project. Requires confirmation. This is destructive.",
       DeleteSelectionSchema,
       deleteSelectionConfirmed,
+      "delete",
     ),
     makeTool(
       "create_budget_item",
       "Add a budget category line item to a project. The amount is set separately via update_budget_item. Requires confirmation.",
       CreateBudgetItemSchema,
       createBudgetItemConfirmed,
+      "write:budget",
     ),
     makeTool(
       "update_budget_item",
       "Update a budget line item's working amount and/or allowance flag. Requires confirmation.",
       UpdateBudgetItemSchema,
       updateBudgetItemConfirmed,
+      "write:budget",
     ),
     makeTool(
       "delete_budget_item",
       "Delete a budget line item from a project. Will fail if the item has related change orders. Requires confirmation.",
       DeleteBudgetItemSchema,
       deleteBudgetItemConfirmed,
+      "delete",
     ),
   ];
 }

@@ -189,6 +189,7 @@ export const listCustomersTool: ToolDefinition = {
   description:
     "List BuildTools customers (people / companies tied to projects). Optionally filter by activity.",
   inputSchema: zodToJsonSchema(ListCustomersInputSchema),
+  permission: "read",
   handler: listCustomersHandler,
 };
 
@@ -353,6 +354,7 @@ export const getCustomerTool: ToolDefinition = {
   description:
     "Get full detail for a single BuildTools customer by ID, including address, primary contact, and associated projects.",
   inputSchema: zodToJsonSchema(GetCustomerInputSchema),
+  permission: "read",
   handler: getCustomerHandler,
 };
 

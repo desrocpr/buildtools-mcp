@@ -130,6 +130,7 @@ export const listSelectionsTool: ToolDefinition = {
   description:
     "List material/finish selections for a project. Shows status, budget category, location, item, and price. Optionally filter by status (Open/Selected/Approved/Rejected/Complete).",
   inputSchema: zodToJsonSchema(ListSelectionsInputSchema),
+  permission: "read",
   handler: listSelectionsHandler,
 };
 
@@ -224,6 +225,7 @@ export const getSelectionTool: ToolDefinition = {
   description:
     "Get full detail for a selection including all options/choices, descriptions, models, vendor info, prices, and attached files (installation specs, PDFs, images). Requires both selection_id and project_id.",
   inputSchema: zodToJsonSchema(GetSelectionInputSchema),
+  permission: "read",
   handler: getSelectionHandler,
 };
 
@@ -314,6 +316,7 @@ export const listAllowancesTool: ToolDefinition = {
   description:
     "List allowance budget categories for a project with reconciliation: budgeted amount, total spent on selections, and remaining balance. Shows each selection item under its allowance category.",
   inputSchema: zodToJsonSchema(ListAllowancesInputSchema),
+  permission: "read",
   handler: listAllowancesHandler,
 };
 
@@ -353,6 +356,7 @@ export const listSelectionCategoriesTool: ToolDefinition = {
   description:
     "List the budget categories available for creating selections on a project. Returns category IDs needed for create_selection.",
   inputSchema: zodToJsonSchema(ListSelectionCategoriesInputSchema),
+  permission: "read",
   handler: listSelectionCategoriesHandler,
 };
 

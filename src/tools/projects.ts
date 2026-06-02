@@ -64,6 +64,20 @@ export interface ToolDefinition {
   description: string;
   inputSchema: ReturnType<typeof zodToJsonSchema>;
   handler: (args: unknown, api: BuildToolsAPI) => Promise<ToolResult>;
+  /**
+   * Permission required to call this tool, evaluated against the
+   * caller's role-resolved permission set (MOS-328 Phase 6b).
+   *
+   * Examples: `"read"`, `"write:financial"`, `"write:budget"`,
+   * `"delete"`. Use `hasPermission()` from `src/auth/types.ts` to
+   * evaluate against a permission list (supports `*` and domain
+   * wildcards like `write:*`).
+   *
+   * Stdio transport does NOT enforce these (single-user). HTTP/SSE
+   * with OAuth enabled filters `tools/list` and rejects
+   * `tools/call` based on this field.
+   */
+  permission: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +300,7 @@ export const listProjectsTool: ToolDefinition = {
   description:
     "List BuildTools projects with optional filters. Returns up to 50 projects by default. Use filters to narrow scope.",
   inputSchema: zodToJsonSchema(ListProjectsInputSchema),
+  permission: "read",
   handler: listProjectsHandler,
 };
 
@@ -379,6 +394,7 @@ export const getProjectTool: ToolDefinition = {
   name: "get_project",
   description: "Get full detail for a single BuildTools project by ID.",
   inputSchema: zodToJsonSchema(GetProjectInputSchema),
+  permission: "read",
   handler: getProjectHandler,
 };
 
@@ -425,6 +441,7 @@ export const searchProjectsTool: ToolDefinition = {
   description:
     "Free-text search across BuildTools projects (matches name, customer, address, project number).",
   inputSchema: zodToJsonSchema(SearchProjectsInputSchema),
+  permission: "read",
   handler: searchProjectsHandler,
 };
 

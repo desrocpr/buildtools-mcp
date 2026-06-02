@@ -213,6 +213,7 @@ export const listRfisTool: ToolDefinition = {
   description:
     "List BuildTools RFIs (requests for information) with optional project-name filter.",
   inputSchema: zodToJsonSchema(ListRfisInputSchema),
+  permission: "read",
   handler: listRfisHandler,
 };
 
@@ -290,6 +291,7 @@ export const listServicesTool: ToolDefinition = {
   description:
     "List BuildTools services (project service-line tasks) with optional project-name filter.",
   inputSchema: zodToJsonSchema(ListServicesInputSchema),
+  permission: "read",
   handler: listServicesHandler,
 };
 
@@ -393,6 +395,7 @@ export const listUsersTool: ToolDefinition = {
   description:
     "List BuildTools users with optional role filter (Core Admin, Employee, Client, Company Rep, All).",
   inputSchema: zodToJsonSchema(ListUsersInputSchema),
+  permission: "read",
   handler: listUsersHandler,
 };
 
@@ -439,6 +442,7 @@ export const searchUsersTool: ToolDefinition = {
   description:
     "Free-text search across BuildTools users (matches name, email, phone, company).",
   inputSchema: zodToJsonSchema(SearchUsersInputSchema),
+  permission: "read",
   handler: searchUsersHandler,
 };
 

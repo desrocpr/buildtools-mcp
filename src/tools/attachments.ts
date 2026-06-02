@@ -272,6 +272,7 @@ export const listProjectAttachmentsTool: ToolDefinition = {
   description:
     "List folders and files on a BuildTools project's Documents tab. Returns a Markdown listing with folders (drillable via folder_id) and files (with name, type, size, upload date, and download URL). Call with no folder_id for the root listing; pass folder_id to drill into a subfolder.",
   inputSchema: zodToJsonSchema(ListProjectAttachmentsInputSchema),
+  permission: "read",
   handler: listProjectAttachmentsHandler,
 };
 
@@ -337,6 +338,7 @@ export const downloadAttachmentTool: ToolDefinition = {
   description:
     "Download a BuildTools-hosted attachment (PDF, image, doc, etc.) using the authenticated session. Returns the file as an embedded resource so it can be read directly by Claude without going through any external proxy. Pass a download URL from list_project_attachments. Max 25 MB.",
   inputSchema: zodToJsonSchema(DownloadAttachmentInputSchema),
+  permission: "read",
   handler: downloadAttachmentHandler,
 };
 

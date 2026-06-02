@@ -221,6 +221,7 @@ export const listPurchaseOrdersTool: ToolDefinition = {
   description:
     "List BuildTools purchase orders. Optionally filter by project name (substring). Returns up to 50 by default.",
   inputSchema: zodToJsonSchema(ListPurchaseOrdersInputSchema),
+  permission: "read",
   handler: listPurchaseOrdersHandler,
 };
 
@@ -272,6 +273,7 @@ export const searchPurchaseOrdersTool: ToolDefinition = {
   description:
     "Free-text search across BuildTools purchase orders (matches PO number, name, company, project, relations).",
   inputSchema: zodToJsonSchema(SearchPurchaseOrdersInputSchema),
+  permission: "read",
   handler: searchPurchaseOrdersHandler,
 };
 
