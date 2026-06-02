@@ -180,9 +180,11 @@ export function mountEnrollRoutes(router: Router, deps: EnrollDeps): void {
     const codeVerifier = randomPKCECodeVerifier();
     const codeChallenge = await calculatePKCECodeChallenge(codeVerifier);
     const nonce = randomNonce();
+    // 90-second TTL on the Azure round-trip closes the replay window.
     const sealedState = sealState<AzureStateForEnroll>(
       { kind: "enroll", codeVerifier, nonce },
       deps.encryptionKey,
+      { ttlSeconds: 90 },
     );
 
     const result = await buildAuthorizationUrl(deps.azureDiscovery, {
@@ -232,12 +234,17 @@ export function mountEnrollRoutes(router: Router, deps: EnrollDeps): void {
       setSession(res, deps.encryptionKey, { userId: user.id, email: user.email });
       res.redirect("/enroll");
     } catch (err) {
+      // Log the full error to stderr for ops, return a generic message
+      // to the user. openid-client error messages can include the raw
+      // JWT body excerpt, tenant URLs, etc. — not safe to render.
+      process.stderr.write(
+        `[enroll] azure callback error: ${(err as Error)?.message ?? err}\n`,
+      );
       const { errorPage } = await import("./pages.js");
-      const msg = err instanceof Error ? err.message : String(err);
       res
         .status(400)
         .type("html")
-        .send(errorPage(`Sign-in failed: ${msg}`));
+        .send(errorPage("Sign-in failed. Please try again."));
     }
   });
 

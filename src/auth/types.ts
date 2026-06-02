@@ -70,17 +70,6 @@ export interface BuildToolsCredentials {
 }
 
 /**
- * Resolved per-request auth context. Populated by the token resolver in
- * the HTTP transport before any tool dispatch.
- */
-export interface AuthContext {
-  user: McpUserWithRoles;
-  tokenKind: "oauth-access" | "service";
-  /** PK of the token row, for audit-log correlation. */
-  tokenId: string;
-}
-
-/**
  * What `hasPermission` checks. Tools declare a required permission like
  * `write:budget`; the resolver checks whether any of the user's
  * permissions match (including the `*` wildcard).

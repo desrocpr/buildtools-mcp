@@ -147,19 +147,15 @@ export interface CheckAndIncrementResult {
 
 /**
  * Atomically check + increment the bucket count for a user. Returns
- * { allowed: false } when the increment would exceed the cap; in
+ * `{ allowed: false }` when the increment would exceed the cap; in
  * that case the count is NOT incremented (caller can retry next
  * hour without affecting state).
  *
- * Implementation: bucket key is the current hour's epoch-ms. We
- * compute the window_start so all calls within the same hour
- * UPSERT the same row. Old rows are left to a sweep job.
- *
- * Race note: Postgres serialises the UPSERT, but two concurrent
- * "select count, decide, upsert" pairs could each see count=N-1
- * and both think they're fine to go to N. For our scale (a few
- * dozen users, soft caps in the hundreds) this is fine. If we
- * ever need exact serialisation, switch to a stored procedure.
+ * Implementation (Phase 6.5): delegates to the Postgres function
+ * `public.increment_rate_bucket`, which does an INSERT-ON-CONFLICT
+ * + row-locked UPDATE in a single transaction — replaces the
+ * previous select-then-write pattern that allowed two concurrent
+ * calls to both pass the limit check.
  */
 export async function checkAndIncrementBucket(
   db: Db,
@@ -167,76 +163,26 @@ export async function checkAndIncrementBucket(
   bucket: PermissionBucket,
   limit: number | null,
 ): Promise<CheckAndIncrementResult> {
-  if (limit === null) {
-    // No cap configured — count anyway for visibility, but always allow.
-    await bumpCount(db, userId, bucket);
-    return { allowed: true, count: -1, limit: null };
-  }
-
   const windowStart = currentWindowStart();
-  const { data: existing, error: readErr } = await db
-    .from("mcp_rate_buckets")
-    .select("count")
-    .eq("user_id", userId)
-    .eq("permission_bucket", bucket)
-    .eq("window_start", windowStart.toISOString())
-    .maybeSingle();
-  if (readErr) {
-    throw new Error(`checkAndIncrementBucket/read: ${readErr.message}`);
+  const { data, error } = await db.rpc("increment_rate_bucket", {
+    p_user_id: userId,
+    p_bucket: bucket,
+    p_window_start: windowStart.toISOString(),
+    p_limit: limit,
+  });
+  if (error) {
+    throw new Error(`checkAndIncrementBucket: ${error.message}`);
   }
-  const current = existing?.count ?? 0;
-  if (current >= limit) {
-    return { allowed: false, count: current, limit };
+  // RPC returns a single-row table; supabase-js gives us an array.
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) {
+    throw new Error("checkAndIncrementBucket: empty RPC response");
   }
-  await bumpCount(db, userId, bucket, windowStart);
-  return { allowed: true, count: current + 1, limit };
-}
-
-async function bumpCount(
-  db: Db,
-  userId: string,
-  bucket: PermissionBucket,
-  windowStart: Date = currentWindowStart(),
-): Promise<void> {
-  // Upsert with on-conflict increment. Supabase JS doesn't expose a
-  // direct atomic increment so we use a two-step: try insert; on
-  // conflict, increment via RPC. To keep this in the same JS file
-  // without a database function, we use a read-then-update pattern.
-  // This races; see the note in checkAndIncrementBucket().
-  const { data: existing, error: readErr } = await db
-    .from("mcp_rate_buckets")
-    .select("count")
-    .eq("user_id", userId)
-    .eq("permission_bucket", bucket)
-    .eq("window_start", windowStart.toISOString())
-    .maybeSingle();
-  if (readErr) {
-    throw new Error(`bumpCount/read: ${readErr.message}`);
-  }
-  if (existing) {
-    const { error } = await db
-      .from("mcp_rate_buckets")
-      .update({ count: existing.count + 1 })
-      .eq("user_id", userId)
-      .eq("permission_bucket", bucket)
-      .eq("window_start", windowStart.toISOString());
-    if (error) throw new Error(`bumpCount/update: ${error.message}`);
-  } else {
-    const { error } = await db.from("mcp_rate_buckets").insert({
-      user_id: userId,
-      permission_bucket: bucket,
-      window_start: windowStart.toISOString(),
-      count: 1,
-    });
-    if (error) {
-      // Race with another inserter — read again and increment.
-      if (/duplicate|conflict/i.test(error.message)) {
-        await bumpCount(db, userId, bucket, windowStart);
-        return;
-      }
-      throw new Error(`bumpCount/insert: ${error.message}`);
-    }
-  }
+  return {
+    allowed: Boolean(row.allowed),
+    count: typeof row.new_count === "number" ? row.new_count : 0,
+    limit,
+  };
 }
 
 function currentWindowStart(now: number = Date.now()): Date {

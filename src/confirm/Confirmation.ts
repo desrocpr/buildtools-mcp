@@ -57,6 +57,15 @@ export interface PendingMutation<T> {
   id: string;
   /** Tool name that created the pending entry — used to bind the token. */
   toolName: string;
+  /**
+   * Owning session ID (Phase 6.5 hardening). For HTTP/SSE transport,
+   * this is the per-SSE-session UUID; consume() must be called with
+   * the matching sessionId or the entry is left untouched so the
+   * legitimate owner can still consume.
+   * `undefined` means "session-agnostic" — used by stdio (single-user)
+   * and by tests that don't care about isolation.
+   */
+  sessionId?: string;
   /** Original tool args captured at create-time, replayed on consume. */
   args: T;
   /** Human-readable summary of the action (rendered back to Claude). */
@@ -130,13 +139,23 @@ export class ConfirmationStore {
   /**
    * Record a pending mutation and return its single-use confirmation ID.
    * Callers re-render that ID into a Markdown prompt for Claude Desktop.
+   *
+   * When `sessionId` is provided (HTTP/SSE multi-user transport), the
+   * entry is bound to that session — only a consume() call with the
+   * same sessionId can read it. stdio callers omit sessionId.
    */
-  create<T>(toolName: string, args: T, description: string): string {
+  create<T>(
+    toolName: string,
+    args: T,
+    description: string,
+    sessionId?: string,
+  ): string {
     const id = randomUUID();
     const createdAt = this.now();
     this.pending.set(id, {
       id,
       toolName,
+      sessionId,
       args,
       description,
       createdAt,
@@ -147,15 +166,22 @@ export class ConfirmationStore {
 
   /**
    * Atomically delete + return the pending entry. Returns `null` if the ID is
-   * unknown OR if the entry has expired (in which case the stale entry is
-   * also dropped from the map).
+   * unknown OR the entry has expired OR the entry's sessionId doesn't match
+   * the requested `sessionId`.
    *
-   * Single-use: a successful `consume(id)` followed by `consume(id)` always
-   * returns `null` the second time.
+   * **Session mismatch does NOT delete the entry** — that would let User B
+   * deny-of-service User A's pending mutations by guessing IDs. The
+   * legitimate owner can still consume.
+   *
+   * Single-use: a successful `consume(id, ...)` followed by another consume
+   * with the same ID returns `null` the second time.
    */
-  consume<T>(id: string): PendingMutation<T> | null {
+  consume<T>(id: string, sessionId?: string): PendingMutation<T> | null {
     const entry = this.pending.get(id) as PendingMutation<T> | undefined;
     if (!entry) return null;
+    // Session check first — do NOT touch the map if the caller can't claim
+    // this entry. Allows the legitimate owner to consume later.
+    if (entry.sessionId !== sessionId) return null;
     // Drop the entry whether it's expired or live — the only way to keep an
     // entry across calls is to NOT call consume() on it.
     this.pending.delete(id);
@@ -208,8 +234,9 @@ export function requiresConfirmation<T extends object>(
 ): (
   args: T & { confirmation_id?: string },
   store: ConfirmationStore,
+  sessionId?: string,
 ) => Promise<ToolResult> {
-  return async (args, store) => {
+  return async (args, store, sessionId) => {
     // Strip the confirmation_id BEFORE describing or storing — the describer
     // shouldn't see it, and the stored `args` should not embed a token that
     // will be replaced on the second call anyway.
@@ -220,7 +247,7 @@ export function requiresConfirmation<T extends object>(
 
     if (!confirmation_id) {
       const description = describer(cleanArgs);
-      const id = store.create(toolName, cleanArgs, description);
+      const id = store.create(toolName, cleanArgs, description, sessionId);
       const ttlMinutes = store.ttlMinutes;
       return {
         content: [
@@ -237,7 +264,7 @@ export function requiresConfirmation<T extends object>(
       };
     }
 
-    const entry = store.consume<T>(confirmation_id);
+    const entry = store.consume<T>(confirmation_id, sessionId);
     if (!entry || entry.toolName !== toolName) {
       return {
         content: [

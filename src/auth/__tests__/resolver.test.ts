@@ -11,15 +11,17 @@ function fakeDb(): import("../db.js").Db {
 
 vi.mock("../oauth-store.js", () => ({
   resolveAccessToken: vi.fn(),
-  touchTokenLastUsed: vi.fn(),
+  // best-effort touches return a resolved promise so .catch() in the
+  // resolver doesn't choke on undefined under test mocks.
+  touchTokenLastUsed: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../service-tokens.js", () => ({
   resolveServiceToken: vi.fn(),
-  touchServiceTokenLastUsed: vi.fn(),
+  touchServiceTokenLastUsed: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock("../users.js", () => ({
   getUserWithRoles: vi.fn(),
-  touchLastSeen: vi.fn(),
+  touchLastSeen: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { resolveAccessToken } from "../oauth-store.js";

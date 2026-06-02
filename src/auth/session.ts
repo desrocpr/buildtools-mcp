@@ -23,6 +23,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 
 import { decrypt, encrypt } from "./encryption.js";
+import { constantTimeStringEqual } from "./tokens.js";
 
 // ---------------------------------------------------------------------------
 // HMAC-signed cookie (no encryption — for non-secret session data)
@@ -61,6 +62,8 @@ export function verifyCookie<T>(token: string, key: Buffer): T | null {
   if (parts.length !== 2) return null;
   const [body, mac] = parts;
   const expectedMac = createHmac("sha256", key).update(body).digest("base64url");
+  // constantTimeStringEqual is imported from ./tokens.js — it wraps
+  // Node's crypto.timingSafeEqual, which is genuinely constant-time.
   if (!constantTimeStringEqual(mac, expectedMac)) return null;
   let envelope: SignedEnvelope<T>;
   try {
@@ -169,15 +172,3 @@ export function parseCookieHeader(header: string | undefined): Record<string, st
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function constantTimeStringEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let result = 0;
-  for (let i = 0; i < a.length; i++) {
-    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return result === 0;
-}

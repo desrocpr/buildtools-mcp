@@ -225,6 +225,76 @@ export interface IssuedTokenPair {
   refreshExpiresAt: Date;
 }
 
+/**
+ * Atomically revoke an old refresh token and issue a fresh
+ * (access, refresh) pair in a single Postgres transaction.
+ *
+ * Delegates to the `public.rotate_refresh_token` RPC so the two
+ * writes can't desync — a process crash between revoke and issue
+ * would lock the user out of their session with no recovery path.
+ *
+ * Returns the resolved (userId, clientId, scope) from the old
+ * token so callers don't need a second lookup, plus the new pair.
+ * Throws `"invalid_grant"` when the old token is missing, revoked,
+ * or expired.
+ */
+export async function rotateRefreshToken(
+  db: Db,
+  oldRefreshToken: string,
+  generateAccess: () => { token: string; hash: string },
+  generateRefresh: () => { token: string; hash: string },
+  options?: {
+    accessTtlSeconds?: number;
+    refreshTtlSeconds?: number;
+  },
+): Promise<
+  IssuedTokenPair & {
+    userId: string;
+    clientId: string | null;
+    scope: string | null;
+  }
+> {
+  const accessTtl = options?.accessTtlSeconds ?? ACCESS_TOKEN_TTL_SECONDS;
+  const refreshTtl = options?.refreshTtlSeconds ?? REFRESH_TOKEN_TTL_SECONDS;
+  const accessExpiresAt = new Date(Date.now() + accessTtl * 1000);
+  const refreshExpiresAt = new Date(Date.now() + refreshTtl * 1000);
+  const access = generateAccess();
+  const refresh = generateRefresh();
+  const accessId = randomUUID();
+  const refreshId = randomUUID();
+
+  const { data, error } = await db.rpc("rotate_refresh_token", {
+    p_old_token_hash: hashToken(oldRefreshToken),
+    p_new_access_id: accessId,
+    p_new_access_hash: access.hash,
+    p_new_access_expires_at: accessExpiresAt.toISOString(),
+    p_new_refresh_id: refreshId,
+    p_new_refresh_hash: refresh.hash,
+    p_new_refresh_expires_at: refreshExpiresAt.toISOString(),
+  });
+  if (error) {
+    // The RPC raises `invalid_grant` (sqlstate P0002) when the old
+    // refresh isn't usable; preserve the error code for callers.
+    if (/invalid_grant/i.test(error.message)) {
+      throw new Error("invalid_grant");
+    }
+    throw new Error(`rotateRefreshToken: ${error.message}`);
+  }
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) throw new Error("invalid_grant");
+  return {
+    accessToken: access.token,
+    refreshToken: refresh.token,
+    accessTokenId: accessId,
+    refreshTokenId: refreshId,
+    accessExpiresAt,
+    refreshExpiresAt,
+    userId: row.user_id,
+    clientId: row.client_id,
+    scope: row.scope,
+  };
+}
+
 export async function issueTokenPair(
   db: Db,
   input: IssueTokenPairInput,

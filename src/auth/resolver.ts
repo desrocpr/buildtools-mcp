@@ -23,8 +23,6 @@
  *     backwards compat (Phase 9 cutover) this branch goes away.
  */
 
-import { timingSafeEqual } from "node:crypto";
-
 import type { Db } from "./db.js";
 import {
   resolveAccessToken,
@@ -34,7 +32,7 @@ import {
   resolveServiceToken,
   touchServiceTokenLastUsed,
 } from "./service-tokens.js";
-import { detectTokenKind } from "./tokens.js";
+import { constantTimeStringEqual, detectTokenKind } from "./tokens.js";
 import type { McpUserWithRoles } from "./types.js";
 import { getUserWithRoles, touchLastSeen } from "./users.js";
 
@@ -56,12 +54,20 @@ export interface ResolverDeps {
   legacyBearer?: string;
 }
 
-const LEGACY_CONTEXT: AuthContext = {
+// Frozen so downstream code can never mutate the shared singleton
+// in a way that leaks across requests.
+const LEGACY_CONTEXT: AuthContext = Object.freeze({
   kind: "legacy",
   user: null,
   tokenId: null,
   tokenKind: null,
-};
+}) as AuthContext;
+
+function swallowTouchError(err: unknown): void {
+  process.stderr.write(
+    `[resolver] best-effort touch failed: ${(err as Error)?.message ?? err}\n`,
+  );
+}
 
 /**
  * Resolve a bearer string into an `AuthContext`. Returns null when:
@@ -86,8 +92,10 @@ export async function resolveBearer(
     const user = await getUserWithRoles(deps.db, access.userId);
     if (!user || user.status !== "active") return null;
     // Best-effort timestamps; failure here mustn't block the request.
-    void touchTokenLastUsed(deps.db, access.tokenId);
-    void touchLastSeen(deps.db, user.id);
+    // (.catch is critical — the underlying helpers throw on Supabase errors,
+    // and an unhandled rejection terminates the Node process from 18+.)
+    touchTokenLastUsed(deps.db, access.tokenId).catch(swallowTouchError);
+    touchLastSeen(deps.db, user.id).catch(swallowTouchError);
     return {
       kind: "human",
       user,
@@ -101,8 +109,8 @@ export async function resolveBearer(
     if (!svc) return null;
     const user = await getUserWithRoles(deps.db, svc.userId);
     if (!user || user.status !== "active") return null;
-    void touchServiceTokenLastUsed(deps.db, svc.tokenId);
-    void touchLastSeen(deps.db, user.id);
+    touchServiceTokenLastUsed(deps.db, svc.tokenId).catch(swallowTouchError);
+    touchLastSeen(deps.db, user.id).catch(swallowTouchError);
     return {
       kind: "service",
       user,
@@ -122,8 +130,3 @@ export async function resolveBearer(
   return null;
 }
 
-function constantTimeStringEqual(a: string, b: string): boolean {
-  if (typeof a !== "string" || typeof b !== "string") return false;
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
