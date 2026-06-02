@@ -48,10 +48,10 @@ import {
 } from "../auth/session.js";
 import { upsertHumanUser, getUserWithRoles } from "../auth/users.js";
 
-const SESSION_COOKIE = "mcp_enroll_session";
-const SESSION_TTL_SECONDS = 30 * 60;
+export const SESSION_COOKIE = "mcp_enroll_session";
+export const SESSION_TTL_SECONDS = 30 * 60;
 
-interface EnrollSession {
+export interface EnrollSession {
   userId: string;
   email: string;
 }
@@ -70,7 +70,7 @@ export interface EnrollDeps {
   publicOrigin: string; // e.g. https://buildtools-mcp.mossbuildinganddesign.com
 }
 
-function readSession(req: Request, key: Buffer): EnrollSession | null {
+export function readSession(req: Request, key: Buffer): EnrollSession | null {
   const cookies = parseCookieHeader(req.headers.cookie);
   const token = cookies[SESSION_COOKIE];
   if (!token) return null;
