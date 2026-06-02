@@ -313,6 +313,51 @@ function formatBytes(n: number): string {
  * Switching to a custom scheme keeps the embedded payload identifiable
  * but unfetchable, which is what the validator allows.
  */
+/**
+ * Stderr-log a structural fingerprint of the download_attachment
+ * response — no base64 body, just the shape. Lets us prove on the
+ * server side exactly what was sent if the client rejects it.
+ */
+function logDownloadShape(branch: "image" | "resource", result: ToolResult): void {
+  const fingerprint = {
+    branch,
+    content: result.content.map((c) => {
+      if (c.type === "text") {
+        return { type: c.type, text_len: (c as { text: string }).text.length };
+      }
+      if (c.type === "image") {
+        const ic = c as { type: "image"; data: string; mimeType: string };
+        return {
+          type: ic.type,
+          mimeType: ic.mimeType,
+          data_len: ic.data.length,
+        };
+      }
+      if (c.type === "resource") {
+        const rc = c as {
+          type: "resource";
+          resource: Record<string, unknown>;
+        };
+        const r = rc.resource;
+        return {
+          type: rc.type,
+          resource: {
+            keys: Object.keys(r),
+            uri: r.uri,
+            mimeType: r.mimeType,
+            blob_len:
+              typeof r.blob === "string" ? r.blob.length : undefined,
+          },
+        };
+      }
+      return { type: (c as { type: string }).type };
+    }),
+  };
+  process.stderr.write(
+    `[download_attachment v4] response shape: ${JSON.stringify(fingerprint)}\n`,
+  );
+}
+
 function makeAttachmentUri(downloadUrl: string, filename: string): string {
   try {
     const u = new URL(downloadUrl);
@@ -343,22 +388,24 @@ async function downloadAttachmentHandler(
 
     // Image MIME → `type: "image"` (well-supported across MCP clients).
     if (mimeType.startsWith("image/")) {
-      return {
+      const result = {
         content: [
-          { type: "text", text: summary },
-          { type: "image", data: base64, mimeType },
+          { type: "text" as const, text: summary },
+          { type: "image" as const, data: base64, mimeType },
         ],
       };
+      logDownloadShape("image", result);
+      return result;
     }
 
     // Everything else → embedded resource with a custom-scheme URI.
     // Strict shape per Claude Desktop's validator: only `uri`, `mimeType`,
     // `blob` — no `_meta`, no extra keys.
-    return {
+    const result = {
       content: [
-        { type: "text", text: summary },
+        { type: "text" as const, text: summary },
         {
-          type: "resource",
+          type: "resource" as const,
           resource: {
             uri: makeAttachmentUri(finalUrl, filename),
             mimeType,
@@ -367,6 +414,8 @@ async function downloadAttachmentHandler(
         },
       ],
     };
+    logDownloadShape("resource", result);
+    return result;
   } catch (err) {
     return formatError(err, "download_attachment");
   }
@@ -375,7 +424,7 @@ async function downloadAttachmentHandler(
 export const downloadAttachmentTool: ToolDefinition = {
   name: "download_attachment",
   description:
-    "Download a BuildTools-hosted attachment (PDF, image, doc, etc.) using the authenticated session. Returns the file as an embedded resource so it can be read directly by Claude without going through any external proxy. Pass a download URL from list_project_attachments. Max 25 MB.",
+    "[v4 2026-06-02] Download a BuildTools-hosted attachment (PDF, image, doc, etc.) using the authenticated session. Returns the file as an embedded resource so it can be read directly by Claude without going through any external proxy. Pass a download URL from list_project_attachments. Max 25 MB.",
   inputSchema: zodToJsonSchema(DownloadAttachmentInputSchema),
   permission: "read",
   handler: downloadAttachmentHandler,
