@@ -147,10 +147,26 @@ function buildPerSessionServer(opts: {
 
   // Build the tool registry. `createMutationTools` takes a `() => API`
   // resolver (matches the stdio path).
+  //
+  // Confirmation subject (third arg) scopes who can consume each
+  // confirmation_id. Originally session-scoped (PR #42 hardening), but
+  // that broke Claude Desktop's two-step retry — Claude Desktop opens
+  // a fresh SSE session per call, so the second call's session can't
+  // consume the first call's token. Switched to user-scoped: same
+  // identity across sessions consumes; cross-user still denied.
+  //   - OAuth/service: AuthContext.user.id (stable across the user's
+  //     sessions)
+  //   - Legacy bearer (no user): undefined → agnostic (matches stdio,
+  //     preserves the pre-Phase-6.5 behaviour for legacy callers)
+  const authCtx = opts.sessionStore.getAuth<{
+    kind: "human" | "service" | "legacy";
+    user: { id: string } | null;
+  }>(opts.sessionId);
+  const confirmationSubject = authCtx?.user?.id;
   const mutationTools = createMutationTools(
     () => resolveApi(),
     opts.confirmationStore,
-    opts.sessionId,
+    confirmationSubject,
   );
   const sessionTool = createSessionCredentialsTool({
     sessionStore: opts.sessionStore,

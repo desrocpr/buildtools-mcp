@@ -359,30 +359,37 @@ async function listUsersHandler(
   if (!parsed.success) return formatZodError(parsed.error, "list_users");
   const { role, limit } = parsed.data;
 
-  const length = limit ?? 100;
+  const targetLimit = limit ?? 100;
   const effectiveRole = role ?? "All";
-  const params: Record<string, string | number> = { length };
+
+  // BuildTools' /users/datatable does NOT honor any server-side role
+  // filter — neither `columns[N][search][value]=Employee` nor `role=`
+  // nor `role=<numeric>` change the response. The UI tabs filter
+  // client-side. Match that behaviour: fetch a big batch, filter
+  // locally, then take `limit`.
+  const fetchLength = effectiveRole === "All" ? targetLimit : 10000;
 
   try {
-    let result: Datatable | null;
-    if (effectiveRole === "Employee") {
-      // Routes through the dedicated employees endpoint which pre-applies
-      // the columns[4][search][value]=Employee filter.
-      result = await api.getEmployees<Datatable>(params);
-    } else {
-      if (effectiveRole !== "All") {
-        params["columns[4][search][value]"] = effectiveRole;
-      }
-      result = await api.getUsers<Datatable>(params);
-    }
+    const result = await api.getUsers<Datatable>({ length: fetchLength });
+    const allRows = result?.data ?? [];
+    const filtered =
+      effectiveRole === "All"
+        ? allRows
+        : allRows.filter(
+            (u) => String((u as { role?: unknown }).role ?? "") === effectiveRole,
+          );
+    const rows = filtered.slice(0, targetLimit);
 
-    const rows = result?.data ?? [];
     if (rows.length === 0) {
       return markdown(`No users matched the filter (role: ${effectiveRole}).`);
     }
     const header =
       `**${rows.length} user${rows.length === 1 ? "" : "s"}** ` +
-      `(role: ${effectiveRole}):`;
+      `(role: ${effectiveRole}` +
+      (effectiveRole !== "All" && filtered.length > targetLimit
+        ? `, showing first ${targetLimit} of ${filtered.length}`
+        : "") +
+      `):`;
     const body = rows.map(formatUserRow).join("\n");
     return markdown(`${header}\n\n${body}`);
   } catch (err) {

@@ -43,6 +43,7 @@ import { BuildToolsError } from "../client/errors.js";
  */
 export type ToolResultContent =
   | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
   | {
       type: "resource";
       resource: {
@@ -50,6 +51,7 @@ export type ToolResultContent =
         mimeType?: string;
         text?: string;
         blob?: string;
+        _meta?: Record<string, unknown>;
       };
     };
 

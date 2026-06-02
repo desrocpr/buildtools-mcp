@@ -172,9 +172,11 @@ export function createMutationTools(
   getApi: () => BuildToolsAPI,
   store: ConfirmationStore,
   /**
-   * Phase 6.5 hardening: when present, this scopes the confirmation
-   * store to the calling session — User A's pending confirmation_id
-   * can no longer be consumed by User B's session. Omit for stdio.
+   * Subject scoping the confirmation store. For HTTP/OAuth this is
+   * `user.id` so the same person can complete a two-step mutation
+   * across separate SSE sessions (Claude Desktop opens a fresh session
+   * per tool call). Omit for stdio + legacy-bearer sessions.
+   * Field name `sessionId` is a historical leftover.
    */
   sessionId?: string,
 ): ToolDefinition[] {

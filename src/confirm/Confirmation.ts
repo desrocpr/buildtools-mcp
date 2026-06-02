@@ -58,12 +58,13 @@ export interface PendingMutation<T> {
   /** Tool name that created the pending entry — used to bind the token. */
   toolName: string;
   /**
-   * Owning session ID (Phase 6.5 hardening). For HTTP/SSE transport,
-   * this is the per-SSE-session UUID; consume() must be called with
-   * the matching sessionId or the entry is left untouched so the
-   * legitimate owner can still consume.
-   * `undefined` means "session-agnostic" — used by stdio (single-user)
-   * and by tests that don't care about isolation.
+   * Owning subject — `user.id` for OAuth/service sessions so the same
+   * user can complete a two-step mutation across multiple SSE sessions
+   * (Claude Desktop opens a fresh session per call). `undefined` for
+   * stdio + legacy-bearer sessions (no per-user isolation needed).
+   *
+   * Field name kept as `sessionId` for backwards compat — the semantic
+   * is "subject scoping the entry", not literally a session ID.
    */
   sessionId?: string;
   /** Original tool args captured at create-time, replayed on consume. */
@@ -83,6 +84,7 @@ export interface PendingMutation<T> {
  */
 export type ToolResultContent =
   | { type: "text"; text: string }
+  | { type: "image"; data: string; mimeType: string }
   | {
       type: "resource";
       resource: {
@@ -90,6 +92,7 @@ export type ToolResultContent =
         mimeType?: string;
         text?: string;
         blob?: string;
+        _meta?: Record<string, unknown>;
       };
     };
 

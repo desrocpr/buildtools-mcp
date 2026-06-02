@@ -315,6 +315,22 @@ async function downloadAttachmentHandler(
     const { buffer, mimeType, filename, finalUrl } = await api.downloadAttachment(url);
     const base64 = buffer.toString("base64");
     const summary = `Downloaded **${filename}** (${mimeType}, ${formatBytes(buffer.byteLength)}).`;
+
+    // Pick the content block by MIME type. Claude Desktop's MCP client
+    // accepts `type: "image"` natively for images and renders them; for
+    // non-image binary we emit an `EmbeddedResource` (which Anthropic's
+    // newer MCP runtime accepts). The historical fallback was a single
+    // `type: "resource"` for everything — that failed validation on
+    // Claude Desktop for non-image binaries.
+    if (mimeType.startsWith("image/")) {
+      return {
+        content: [
+          { type: "text", text: summary },
+          { type: "image", data: base64, mimeType },
+        ],
+      };
+    }
+
     return {
       content: [
         { type: "text", text: summary },
@@ -324,6 +340,10 @@ async function downloadAttachmentHandler(
             uri: finalUrl,
             mimeType,
             blob: base64,
+            // Empty _meta hint placates stricter schema validators that
+            // require the field to be present (some older MCP runtimes
+            // pin a more conservative shape).
+            _meta: {},
           },
         },
       ],
