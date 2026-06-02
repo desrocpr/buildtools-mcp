@@ -335,35 +335,39 @@ describe("list_users", () => {
     expect(getUsers).toHaveBeenCalledTimes(1);
   });
 
-  it("routes through getEmployees when role=Employee (does NOT call getUsers)", async () => {
-    const getUsers = vi.fn();
-    const getEmployees = vi.fn().mockResolvedValue({
-      data: [{ ...sampleUserRow, role: "Employee" }],
-    });
+  it("filters client-side when role=Employee (BuildTools server ignores role filters)", async () => {
+    const employee = { ...sampleUserRow, role: "Employee" };
+    const client1 = { ...sampleUserRow, id: 9001, role: "Client" };
+    const client2 = { ...sampleUserRow, id: 9002, role: "Client" };
+    const getUsers = vi
+      .fn()
+      .mockResolvedValue({ data: [client1, employee, client2] });
     const api = fakeApi({
       getUsers: getUsers as BuildToolsAPI["getUsers"],
-      getEmployees: getEmployees as BuildToolsAPI["getEmployees"],
     });
 
     const result = await listUsersTool.handler({ role: "Employee" }, api);
 
     expect(result.isError).toBeFalsy();
-    expect(getEmployees).toHaveBeenCalledTimes(1);
-    expect(getUsers).not.toHaveBeenCalled();
+    expect(getUsers).toHaveBeenCalledTimes(1);
+    // Big batch — we filter locally
+    expect(getUsers.mock.calls[0][0]).toMatchObject({ length: 10000 });
+    // The Markdown only renders the Employee row
     expect(textOf(result)).toContain("(role: Employee)");
+    expect(textOf(result)).not.toContain("9001");
+    expect(textOf(result)).not.toContain("9002");
   });
 
-  it("calls getUsers with columns[4][search][value] when role=Client", async () => {
-    const getUsers = vi.fn().mockResolvedValue({ data: [sampleUserRow] });
+  it("filters client-side when role=Client (no server-side column filter sent)", async () => {
+    const c = { ...sampleUserRow, role: "Client" };
+    const getUsers = vi.fn().mockResolvedValue({ data: [c, c, c] });
     const api = fakeApi({ getUsers: getUsers as BuildToolsAPI["getUsers"] });
 
     await listUsersTool.handler({ role: "Client", limit: 250 }, api);
 
     const callArgs = getUsers.mock.calls[0][0];
-    expect(callArgs).toMatchObject({
-      length: 250,
-      "columns[4][search][value]": "Client",
-    });
+    expect(callArgs.length).toBe(10000);
+    expect(callArgs).not.toHaveProperty("columns[4][search][value]");
   });
 
   it("does NOT pass a column filter when role=All", async () => {
@@ -374,6 +378,8 @@ describe("list_users", () => {
 
     const callArgs = getUsers.mock.calls[0][0];
     expect(callArgs).not.toHaveProperty("columns[4][search][value]");
+    // For "All" we keep the request small (no need to over-fetch).
+    expect(callArgs.length).toBe(100);
   });
 
   it("returns a Markdown 'no users' message when result is empty (no isError)", async () => {
