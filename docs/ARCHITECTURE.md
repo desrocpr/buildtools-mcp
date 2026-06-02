@@ -105,6 +105,9 @@ Key invariants:
 | Transport selection (`stdio` vs `http`), tool dispatch, audit log, the special-cased `ping` tool, HTTP bearer-token middleware, per-SSE-session credential store. | `src/transports/` |
 | Confirmation framework: `ConfirmationStore`, `requiresConfirmation()` wrapper, TTL sweep timer wired from `src/index.ts`. Every mutation tool composes through this module. | `src/confirm/` |
 | Process bootstrap — picks a transport from `MCP_TRANSPORT`, validates `HTTP_BEARER_TOKEN` when `http`, wires the confirmation sweep, then hands off. | `src/index.ts` |
+| Multi-user auth: encryption, OAuth/service tokens, bearer resolver, Supabase store, Microsoft Entra OIDC, RBAC + rate limits, audit log. See [AUTH.md](./AUTH.md). | `src/auth/` |
+| Browser surfaces (when `MCP_OAUTH_ENABLED=true`): `/enroll/*`, `/oauth/*`, `/admin/*`, `/.well-known/oauth-authorization-server`. See [ENROLL.md](./ENROLL.md) for user flow. | `src/web/` |
+| Supabase schema for the multi-user store: users, roles, encrypted credentials, OAuth clients/codes/tokens, service tokens, audit log, rate buckets, plus atomic RPCs + sweep. | `supabase/migrations/` |
 | Unit + fixture tests for the client and tool registries; smoke test for the stdio transport. | `src/**/__tests__/`, `tests/` |
 
 ## Design choices worth knowing
@@ -120,6 +123,26 @@ Key invariants:
   deliberately ignores `BUILDTOOLS_USERNAME` / `BUILDTOOLS_PASSWORD` so a
   single hosted server can serve many users with their own BuildTools logins,
   scoped to their SSE session.
-- **No persistence.** Both the confirmation store and the HTTP session store
-  are in-memory. Restarting the process clears everything; that is the
-  intended safety property.
+- **No persistence (for transport state).** The confirmation store and the
+  HTTP session store are in-memory. Restarting the process clears
+  everything; that is the intended safety property. Persistent state
+  (users, encrypted credentials, OAuth tokens, audit log) lives in
+  Supabase via the `mcp_*` tables — see [AUTH.md](./AUTH.md).
+
+## Multi-user auth (MOS-328)
+
+Behind `MCP_OAUTH_ENABLED=true`, the server also exposes:
+
+- `/enroll/*` — Microsoft Entra sign-in + encrypted BuildTools credential store.
+- `/oauth/*` + `/.well-known/oauth-authorization-server` — MCP 2025-03-26
+  OAuth 2.1 surface (PKCE/S256, dynamic client registration, opaque
+  access + refresh tokens with rotation).
+- `/admin/*` — role-gated user management, service-account provisioning,
+  audit log viewer.
+
+The legacy bearer + `set_session_credentials` flow remains valid during
+cutover (`kind: "legacy"` AuthContext, no RBAC enforced) so existing
+Claude Desktop sessions don't break mid-flight.
+
+Full details — token kinds, RBAC matrix, threat model, operator runbook —
+in [AUTH.md](./AUTH.md). End-user onboarding is [ENROLL.md](./ENROLL.md).
