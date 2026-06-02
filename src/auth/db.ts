@@ -12,6 +12,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import WebSocket from "ws";
 
 export type Db = SupabaseClient;
 
@@ -41,6 +42,14 @@ export function createDb(opts: CreateDbOptions = {}): Db {
     },
     db: {
       schema: "public",
+    },
+    // Supabase's realtime client eagerly instantiates in the constructor
+    // and requires a global WebSocket. Node 20 (what's on Lightsail)
+    // doesn't ship one natively, so we hand it the `ws` polyfill.
+    // We don't use realtime anywhere, but supabase-js fails-loud if no
+    // transport is wired.
+    realtime: {
+      transport: WebSocket as unknown as never,
     },
   });
 }
