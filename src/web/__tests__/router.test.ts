@@ -27,17 +27,25 @@ describe("isPublicRoute", () => {
     expect(isPublicRoute("/.well-known/oauth-authorization-server")).toBe(true);
   });
 
+  it("matches /admin and all /admin/* subpaths (admin has its own session auth)", () => {
+    expect(isPublicRoute("/admin")).toBe(true);
+    expect(isPublicRoute("/admin/users")).toBe(true);
+    expect(isPublicRoute("/admin/audit")).toBe(true);
+    expect(isPublicRoute("/admin/service-accounts/new")).toBe(true);
+  });
+
   it("rejects MCP transport endpoints", () => {
     expect(isPublicRoute("/sse")).toBe(false);
     expect(isPublicRoute("/messages")).toBe(false);
   });
 
-  it("rejects /enrollment (similar prefix without trailing /)", () => {
+  it("rejects similar-looking but unrelated prefixes", () => {
     expect(isPublicRoute("/enrollment")).toBe(false);
+    expect(isPublicRoute("/administrator")).toBe(false);
   });
 
   it("rejects unrelated paths", () => {
     expect(isPublicRoute("/")).toBe(false);
-    expect(isPublicRoute("/admin/users")).toBe(false);
+    expect(isPublicRoute("/api/health")).toBe(false);
   });
 });

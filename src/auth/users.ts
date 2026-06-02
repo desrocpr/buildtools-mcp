@@ -129,9 +129,11 @@ export async function getRoleByName(
 }
 
 export async function listUsers(db: Db): Promise<McpUserWithRoles[]> {
+  // mcp_user_roles has two FKs back to mcp_users (user_id + assigned_by);
+  // disambiguate the embed with the explicit FK column name.
   const { data, error } = await db
     .from("mcp_users")
-    .select("*, mcp_user_roles(role:mcp_roles(*))")
+    .select("*, mcp_user_roles!user_id(role:mcp_roles(*))")
     .order("created_at", { ascending: false });
   if (error) throw new Error(`listUsers: ${error.message}`);
   const rows = data as unknown as Array<

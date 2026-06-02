@@ -22,6 +22,7 @@ import {
 } from "../auth/azure.js";
 import { createDb, type Db } from "../auth/db.js";
 import { loadEncryptionKey } from "../auth/encryption.js";
+import { mountAdminRoutes } from "./admin.js";
 import { mountEnrollRoutes } from "./enroll.js";
 import { mountOAuthRoutes } from "./oauth.js";
 
@@ -76,6 +77,10 @@ export async function mountWebRoutes(
     azureDiscovery,
     publicOrigin: opts.publicOrigin,
   });
+  mountAdminRoutes(router, {
+    db,
+    encryptionKey,
+  });
 
   app.use(router);
   return { db, encryptionKey, azure };
@@ -94,9 +99,10 @@ export const PUBLIC_ROUTE_PREFIXES = [
   "/oauth/",
   "/.well-known/",
   "/enroll/",
+  "/admin/",
 ];
 
-const PUBLIC_ROUTE_EXACT = new Set(["/enroll"]);
+const PUBLIC_ROUTE_EXACT = new Set(["/enroll", "/admin"]);
 
 export function isPublicRoute(path: string): boolean {
   if (PUBLIC_ROUTE_EXACT.has(path)) return true;
