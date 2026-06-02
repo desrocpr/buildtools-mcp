@@ -85,17 +85,20 @@ export async function mountWebRoutes(
  * Path prefixes that should be EXCLUDED from the transport's bearer
  * middleware. Used by `transports/http.ts` to decide whether to
  * delegate auth to the OAuth/enrollment routes.
+ *
+ * Trailing slashes are intentional: the matcher does a prefix check,
+ * so `/enroll/` covers `/enroll/start`, `/enroll/azure-callback`, etc.
+ * The exact `/enroll` landing page is special-cased separately.
  */
 export const PUBLIC_ROUTE_PREFIXES = [
   "/oauth/",
   "/.well-known/",
-  "/enroll",
+  "/enroll/",
 ];
 
+const PUBLIC_ROUTE_EXACT = new Set(["/enroll"]);
+
 export function isPublicRoute(path: string): boolean {
-  // Equality match for /enroll, prefix match for the rest.
-  if (path === "/enroll") return true;
-  return PUBLIC_ROUTE_PREFIXES.some((p) =>
-    p.endsWith("/") ? path.startsWith(p) : path === p,
-  );
+  if (PUBLIC_ROUTE_EXACT.has(path)) return true;
+  return PUBLIC_ROUTE_PREFIXES.some((p) => path.startsWith(p));
 }

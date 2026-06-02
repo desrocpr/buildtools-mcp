@@ -20,7 +20,7 @@
  * cryptographically improbable.
  */
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 export const SERVICE_TOKEN_PREFIX = "mcps_";
 export const ACCESS_TOKEN_PREFIX = "mcpa_";
@@ -86,4 +86,20 @@ export function parseBearerHeader(value: string | null | undefined): string | nu
   const trimmed = value.trim();
   const match = trimmed.match(/^Bearer\s+(\S+)$/i);
   return match ? match[1] : null;
+}
+
+/**
+ * Length-safe constant-time equality for two strings, backed by Node's
+ * `crypto.timingSafeEqual` (which IS constant-time, unlike a JS
+ * character XOR loop that V8 may JIT with branches).
+ *
+ * Returns false on length mismatch — the timing of a length-difference
+ * path is itself fine to leak (the safer alternative would be to compare
+ * a fixed-width buffer, but the use-sites here all compare values that
+ * already have a known length range).
+ */
+export function constantTimeStringEqual(a: string, b: string): boolean {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }

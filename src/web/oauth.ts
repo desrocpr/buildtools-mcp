@@ -40,8 +40,8 @@ import {
   issueTokenPair,
   registerClient,
   resolveAccessToken,
-  resolveRefreshToken,
   revokeToken,
+  rotateRefreshToken,
   verifyPkce,
 } from "../auth/oauth-store.js";
 import { openState, sealState } from "../auth/session.js";
@@ -161,6 +161,9 @@ export function mountOAuthRoutes(router: Router, deps: OAuthDeps): void {
     const oidc = await import("openid-client");
     const azureCodeVerifier = oidc.randomPKCECodeVerifier();
     const azureNonce = oidc.randomNonce();
+    // 90-second TTL closes the replay window without affecting real
+    // flows — Microsoft sign-in normally completes in 5–30s.
+    // (Per multi-reviewer feedback on the initial 10-minute default.)
     const sealedState = sealState<AzureStateForOAuth>(
       {
         kind: "oauth",
@@ -174,7 +177,7 @@ export function mountOAuthRoutes(router: Router, deps: OAuthDeps): void {
         azureNonce,
       },
       deps.encryptionKey,
-      { ttlSeconds: 10 * 60 },
+      { ttlSeconds: 90 },
     );
 
     const result = await buildAuthorizationUrl(deps.azureDiscovery, {
@@ -230,8 +233,11 @@ export function mountOAuthRoutes(router: Router, deps: OAuthDeps): void {
       if (state.clientState) redirectUrl.searchParams.set("state", state.clientState);
       res.redirect(redirectUrl.toString());
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      res.status(400).send(`sign-in failed: ${msg}`);
+      // Log full error to stderr; user-facing message is generic.
+      process.stderr.write(
+        `[oauth] azure callback error: ${(err as Error)?.message ?? err}\n`,
+      );
+      res.status(400).send("sign-in failed");
     }
   });
 
@@ -330,31 +336,30 @@ async function handleRefreshGrant(
     res.status(400).json({ error: "invalid_request" });
     return;
   }
-  const resolved = await resolveRefreshToken(deps.db, refreshToken);
-  if (!resolved) {
-    res.status(400).json({ error: "invalid_grant" });
-    return;
+  try {
+    const pair = await rotateRefreshToken(
+      deps.db,
+      refreshToken,
+      generateAccessToken,
+      generateRefreshToken,
+    );
+    res.json({
+      access_token: pair.accessToken,
+      token_type: "Bearer",
+      expires_in: Math.floor(
+        (pair.accessExpiresAt.getTime() - Date.now()) / 1000,
+      ),
+      refresh_token: pair.refreshToken,
+      scope: pair.scope,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === "invalid_grant") {
+      res.status(400).json({ error: "invalid_grant" });
+      return;
+    }
+    throw err;
   }
-  // Rotation: revoke the old refresh, mint a new pair.
-  await revokeToken(deps.db, refreshToken);
-  const pair = await issueTokenPair(
-    deps.db,
-    {
-      userId: resolved.userId,
-      clientId: resolved.clientId ?? "",
-      scope: resolved.scope,
-      parentTokenId: resolved.tokenId,
-    },
-    generateAccessToken,
-    generateRefreshToken,
-  );
-  res.json({
-    access_token: pair.accessToken,
-    token_type: "Bearer",
-    expires_in: Math.floor((pair.accessExpiresAt.getTime() - Date.now()) / 1000),
-    refresh_token: pair.refreshToken,
-    scope: resolved.scope,
-  });
 }
 
 function stringQuery(req: Request, name: string): string | null {

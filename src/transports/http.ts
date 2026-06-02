@@ -147,7 +147,11 @@ function buildPerSessionServer(opts: {
 
   // Build the tool registry. `createMutationTools` takes a `() => API`
   // resolver (matches the stdio path).
-  const mutationTools = createMutationTools(() => resolveApi(), opts.confirmationStore);
+  const mutationTools = createMutationTools(
+    () => resolveApi(),
+    opts.confirmationStore,
+    opts.sessionId,
+  );
   const sessionTool = createSessionCredentialsTool({
     sessionStore: opts.sessionStore,
     sessionId: opts.sessionId,

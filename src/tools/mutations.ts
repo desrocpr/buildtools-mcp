@@ -171,6 +171,12 @@ type CreateServiceArgs = z.infer<typeof CreateServiceSchema>;
 export function createMutationTools(
   getApi: () => BuildToolsAPI,
   store: ConfirmationStore,
+  /**
+   * Phase 6.5 hardening: when present, this scopes the confirmation
+   * store to the calling session — User A's pending confirmation_id
+   * can no longer be consumed by User B's session. Omit for stdio.
+   */
+  sessionId?: string,
 ): ToolDefinition[] {
   // -- create_project -------------------------------------------------------
   const createProjectConfirmed = requiresConfirmation<CreateProjectArgs>(
@@ -536,7 +542,11 @@ export function createMutationTools(
     name: string,
     description: string,
     schema: z.ZodTypeAny,
-    confirmed: (args: any, store: ConfirmationStore) => Promise<ToolResult>,
+    confirmed: (
+      args: any,
+      store: ConfirmationStore,
+      sessionId?: string,
+    ) => Promise<ToolResult>,
     permission: string,
   ): ToolDefinition {
     return {
@@ -552,7 +562,7 @@ export function createMutationTools(
         // framework stores and replays these args on the second call.
         const parsed = schema.safeParse(rawArgs ?? {});
         if (!parsed.success) return formatZodError(parsed.error, name);
-        return confirmed(parsed.data, store);
+        return confirmed(parsed.data, store, sessionId);
       },
     };
   }
