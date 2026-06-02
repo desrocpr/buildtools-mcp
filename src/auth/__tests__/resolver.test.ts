@@ -23,6 +23,9 @@ vi.mock("../users.js", () => ({
   getUserWithRoles: vi.fn(),
   touchLastSeen: vi.fn().mockResolvedValue(undefined),
 }));
+vi.mock("../last-seen-cache.js", () => ({
+  touchLastSeenDebounced: vi.fn(),
+}));
 
 import { resolveAccessToken } from "../oauth-store.js";
 import { resolveServiceToken } from "../service-tokens.js";

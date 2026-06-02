@@ -9,6 +9,18 @@ export type UserKind = "human" | "service";
 export type UserStatus = "active" | "revoked";
 
 /**
+ * Role names seeded by the schema migration. Centralised here so the
+ * admin UI's "assign role" allowlist and the dispatcher's role-name
+ * checks share one source of truth.
+ */
+export const KNOWN_ROLES = ["viewer", "editor", "admin", "harness"] as const;
+export type KnownRole = (typeof KNOWN_ROLES)[number];
+
+export function isKnownRole(name: string): name is KnownRole {
+  return (KNOWN_ROLES as readonly string[]).includes(name);
+}
+
+/**
  * Permission strings tagged on each MCP tool at registration time.
  *
  *   `read`               — list/get/search/find/download tools.

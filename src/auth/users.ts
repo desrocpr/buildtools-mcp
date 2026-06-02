@@ -98,9 +98,12 @@ export async function getRolesForUser(
   db: Db,
   userId: string,
 ): Promise<McpRole[]> {
+  // Disambiguate the FK to mcp_roles — same hint pattern as listUsers
+  // uses for the inverse direction. Without it, newer PostgREST
+  // versions return "more than one relationship was found".
   const { data, error } = await db
     .from("mcp_user_roles")
-    .select("role:mcp_roles(*)")
+    .select("role:mcp_roles!role_id(*)")
     .eq("user_id", userId);
   if (error) throw new Error(`getRolesForUser: ${error.message}`);
   // The PostgREST embed gives us [{role: {...} | null}, ...]; the
@@ -299,4 +302,37 @@ export async function touchLastSeen(db: Db, userId: string): Promise<void> {
     .update({ last_seen_at: new Date().toISOString() })
     .eq("id", userId);
   if (error) throw new Error(`touchLastSeen: ${error.message}`);
+}
+
+/**
+ * Count active humans holding the `admin` role, optionally excluding
+ * a given user. Used by the revoke handler to refuse the operation
+ * if it would leave the system with zero admins (recoverable only via
+ * direct DB access otherwise).
+ */
+export async function countActiveAdmins(
+  db: Db,
+  excludeUserId: string | null = null,
+): Promise<number> {
+  const adminRole = await getRoleByName(db, "admin");
+  if (!adminRole) return 0;
+  let q = db
+    .from("mcp_user_roles")
+    .select(
+      "user_id, mcp_users!user_id(status, kind)",
+      { count: "exact", head: false },
+    )
+    .eq("role_id", adminRole.id);
+  if (excludeUserId) {
+    q = q.neq("user_id", excludeUserId);
+  }
+  const { data, error } = await q;
+  if (error) throw new Error(`countActiveAdmins: ${error.message}`);
+  const rows = (data ?? []) as unknown as Array<{
+    mcp_users: { status: UserStatus; kind: UserKind } | null;
+  }>;
+  return rows.filter(
+    (r) =>
+      r.mcp_users && r.mcp_users.status === "active" && r.mcp_users.kind === "human",
+  ).length;
 }
