@@ -113,6 +113,12 @@ function buildPerSessionServer(opts: {
   sessionStore: SessionStore;
   confirmationStore: ConfirmationStore;
   defaultTenant?: string;
+  /**
+   * Phase 6c (MOS-328): when present, audit log writes go to
+   * `mcp_audit_log` and rate-limit checks consult `mcp_rate_buckets`.
+   * Always undefined for stdio + when MCP_OAUTH_ENABLED is off.
+   */
+  authDb?: import("../auth/db.js").Db;
 }): Server {
   const server = new Server(
     { name: "buildtools-mcp", version: "0.0.1" },
@@ -203,26 +209,63 @@ function buildPerSessionServer(opts: {
     const { name, arguments: args } = request.params;
     const sessionId = opts.sessionId;
 
+    // Local helper: write an audit entry to whichever sink applies
+    // (Supabase mcp_audit_log when OAuth session is active, otherwise
+    // the legacy stderr formatter).
+    const writeAudit = async (
+      tool: string,
+      result: "ok" | "error" | "denied" | "rate_limited",
+      errorMessage?: string,
+    ): Promise<void> => {
+      const ctx = opts.sessionStore.getAuth<{
+        kind: "human" | "service" | "legacy";
+        user: { id: string; email: string; permissions: string[] } | null;
+        tokenId: string | null;
+        tokenKind: "oauth-access" | "service" | null;
+      }>(sessionId);
+      if (opts.authDb && ctx && ctx.kind !== "legacy" && ctx.user) {
+        const { logAuditEvent } = await import("../auth/audit.js");
+        await logAuditEvent(opts.authDb, {
+          userId: ctx.user.id,
+          tool,
+          result,
+          errorMessage: errorMessage ?? null,
+          tokenId: ctx.tokenId,
+          tokenKind: ctx.tokenKind,
+        });
+      } else {
+        auditLog({
+          sessionId,
+          username:
+            ctx?.user?.email ?? opts.sessionStore.get(sessionId)?.username,
+          tool,
+          result: result === "ok" ? "ok" : "error",
+        });
+      }
+    };
+
     if (name === "ping") {
-      auditLog({ sessionId, username: undefined, tool: "ping", result: "ok" });
+      await writeAudit("ping", "ok");
       return { content: [{ type: "text", text: "pong" }] };
     }
 
     const tool = toolsByName.get(name);
     if (!tool) {
-      auditLog({ sessionId, username: undefined, tool: name, result: "error" });
+      await writeAudit(name, "error", "unknown tool");
       return {
         content: [{ type: "text", text: `**Unknown tool**: ${name}` }],
         isError: true,
       };
     }
 
-    // Permission enforcement (MOS-328 Phase 6b). Same gating rule as
-    // tools/list — applies only when the session has an OAuth/service
+    // Permission + rate-limit enforcement (MOS-328 Phase 6b/6c). Both
+    // gating rules apply only when the session has an OAuth/service
     // AuthContext; legacy and unauthed sessions are unaffected.
     const authCtx = opts.sessionStore.getAuth<{
       kind: "human" | "service" | "legacy";
-      user: { email: string; permissions: string[] } | null;
+      user: { id: string; email: string; permissions: string[]; roles: Array<{ name: string }> } | null;
+      tokenId: string | null;
+      tokenKind: "oauth-access" | "service" | null;
     }>(sessionId);
     if (
       authCtx !== undefined &&
@@ -231,12 +274,11 @@ function buildPerSessionServer(opts: {
     ) {
       const { hasPermission } = await import("../auth/types.js");
       if (!hasPermission(authCtx.user.permissions, tool.permission)) {
-        auditLog({
-          sessionId,
-          username: authCtx.user.email,
-          tool: name,
-          result: "error",
-        });
+        await writeAudit(
+          name,
+          "denied",
+          `requires ${tool.permission}; has ${authCtx.user.permissions.join(",")}`,
+        );
         return {
           content: [
             {
@@ -249,6 +291,41 @@ function buildPerSessionServer(opts: {
           ],
           isError: true,
         };
+      }
+
+      // Rate limit (sliding 1h window). Skip when there's no DB wire.
+      if (opts.authDb) {
+        const { bucketFor, maxLimitFor, checkAndIncrementBucket } =
+          await import("../auth/audit.js");
+        const bucket = bucketFor(tool.permission);
+        if (bucket) {
+          const roleNames = authCtx.user.roles.map((r) => r.name);
+          const limit = maxLimitFor(roleNames, bucket);
+          const check = await checkAndIncrementBucket(
+            opts.authDb,
+            authCtx.user.id,
+            bucket,
+            limit,
+          );
+          if (!check.allowed) {
+            await writeAudit(
+              name,
+              "rate_limited",
+              `bucket=${bucket} count=${check.count}/${check.limit}`,
+            );
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `**Rate limit exceeded**: you've used ${check.count} of your ${check.limit} per-hour \`${bucket}\` quota. ` +
+                    `Try again next hour or ask an admin to raise the cap.`,
+                },
+              ],
+              isError: true,
+            };
+          }
+        }
       }
     }
 
@@ -268,28 +345,18 @@ function buildPerSessionServer(opts: {
       if (!result.isError) {
         apiInstance = null;
       }
-      // After-the-fact: pull the username back out of the store for the
-      // audit line (only present on success).
-      const stored = opts.sessionStore.get(sessionId);
-      auditLog({
-        sessionId,
-        username: result.isError ? undefined : stored?.username,
-        tool: name,
-        result: result.isError ? "error" : "ok",
-      });
+      await writeAudit(name, result.isError ? "error" : "ok");
       return result as { content: typeof result.content; isError?: boolean };
     }
 
     // All other tools need an API; surface "no creds yet" as a tool error
     // rather than a transport-level failure so the client can recover.
     let api: BuildToolsAPI;
-    let username: string | undefined;
     try {
       api = resolveApi();
-      username = opts.sessionStore.get(sessionId)?.username;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      auditLog({ sessionId, username: undefined, tool: name, result: "error" });
+      await writeAudit(name, "error", "not authenticated");
       return {
         content: [
           {
@@ -304,12 +371,7 @@ function buildPerSessionServer(opts: {
     }
 
     const result = await tool.handler(args, api);
-    auditLog({
-      sessionId,
-      username,
-      tool: name,
-      result: result.isError ? "error" : "ok",
-    });
+    await writeAudit(name, result.isError ? "error" : "ok");
     return result as { content: typeof result.content; isError?: boolean };
   });
 
@@ -356,6 +418,7 @@ export async function startHttpTransport(
     opts.oauthEnabled ??
     /^(1|true|yes)$/i.test(process.env.MCP_OAUTH_ENABLED ?? "");
   let resolverDb: import("../auth/db.js").Db | undefined;
+  let oauthEncryptionKey: Buffer | undefined;
   if (oauthEnabled) {
     const publicOrigin =
       opts.publicOrigin ??
@@ -364,6 +427,7 @@ export async function startHttpTransport(
     const { mountWebRoutes } = await import("../web/router.js");
     const handles = await mountWebRoutes(app, { publicOrigin });
     resolverDb = handles.db;
+    oauthEncryptionKey = handles.encryptionKey;
     process.stderr.write(
       `[http-transport] OAuth + enrollment routes mounted (origin=${publicOrigin})\n`,
     );
@@ -446,9 +510,45 @@ export async function startHttpTransport(
     // calls can identify the user without re-resolving. Legacy bearer
     // requests have ctx.kind === 'legacy' (no user) and continue to
     // rely on `set_session_credentials`.
-    const ctx = (req as Request & { auth?: unknown }).auth;
+    const ctx = (req as Request & { auth?: unknown }).auth as
+      | { kind: "human" | "service" | "legacy"; user?: { id: string; email: string } | null }
+      | undefined;
     if (ctx) {
       sessionStore.setAuth(sessionId, ctx);
+
+      // Phase 6c: when the session is OAuth-authenticated, transparently
+      // pre-load the user's BuildTools credentials from Supabase so
+      // tools work without a separate set_session_credentials handshake.
+      // We do it best-effort here; a missing/decrypt-failed credential
+      // surfaces as the same "not enrolled" error on the first tool call
+      // it would have otherwise produced via resolveApi().
+      if (
+        ctx.kind !== "legacy" &&
+        ctx.user &&
+        resolverDb &&
+        oauthEncryptionKey
+      ) {
+        try {
+          const { getServiceCredentials } = await import("../auth/credentials.js");
+          const creds = await getServiceCredentials(
+            resolverDb,
+            ctx.user.id,
+            "buildtools",
+            oauthEncryptionKey,
+          );
+          if (creds) {
+            sessionStore.set(sessionId, {
+              tenant: opts.defaultTenant ?? process.env.BUILDTOOLS_TENANT ?? "moss",
+              username: creds.email,
+              password: creds.password,
+            });
+          }
+        } catch (err) {
+          process.stderr.write(
+            `[http-transport] credential preload failed for ${ctx.user.email}: ${(err as Error)?.message ?? err}\n`,
+          );
+        }
+      }
     }
 
     const server = buildPerSessionServer({
@@ -456,6 +556,7 @@ export async function startHttpTransport(
       sessionStore,
       confirmationStore,
       defaultTenant: opts.defaultTenant,
+      authDb: resolverDb,
     });
 
     // Clean up the session store + transport map on disconnect. Both events
