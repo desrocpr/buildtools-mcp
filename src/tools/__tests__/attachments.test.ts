@@ -379,7 +379,11 @@ describe("download_attachment", () => {
     expect(resource.resource.blob).toBe(
       Buffer.from("%PDF-1.4 fake pdf bytes").toString("base64"),
     );
-    expect(resource.resource.uri).toContain("s3.amazonaws.com");
+    // The resource URI is a custom scheme so Claude Desktop's MCP
+    // validator accepts it; the source download URL never appears in
+    // the response body.
+    expect(resource.resource.uri).toMatch(/^buildtools:\/\/attachment\//);
+    expect(resource.resource.uri).not.toContain("s3.amazonaws.com");
     expect(downloadAttachment).toHaveBeenCalledWith(
       "https://file.buildtools.app/o/0ye79w/file/hash/abc",
     );

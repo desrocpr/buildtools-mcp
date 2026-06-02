@@ -301,6 +301,31 @@ function formatBytes(n: number): string {
   return `${v.toFixed(1)} ${units[i]}`;
 }
 
+/**
+ * Build a custom-scheme URI for the embedded resource. Claude Desktop's
+ * MCP validator rejects external `https://` URLs on resource content
+ * (PR #47 attempted to fix the shape but kept the external URL; that
+ * still failed). Per the user-reproduced error message:
+ *
+ *   embedded resource: requires
+ *     { type: "resource", resource: { text } | { blob } }
+ *
+ * Switching to a custom scheme keeps the embedded payload identifiable
+ * but unfetchable, which is what the validator allows.
+ */
+function makeAttachmentUri(downloadUrl: string, filename: string): string {
+  try {
+    const u = new URL(downloadUrl);
+    const m = u.pathname.match(/\/hash\/([^/?#]+)/);
+    if (m) return `buildtools://attachment/${m[1]}`;
+    const last = u.pathname.split("/").filter(Boolean).pop();
+    if (last) return `buildtools://attachment/${encodeURIComponent(last)}`;
+  } catch {
+    // fall through to filename fallback
+  }
+  return `buildtools://attachment/${encodeURIComponent(filename)}`;
+}
+
 async function downloadAttachmentHandler(
   args: unknown,
   api: BuildToolsAPI,
@@ -316,12 +341,7 @@ async function downloadAttachmentHandler(
     const base64 = buffer.toString("base64");
     const summary = `Downloaded **${filename}** (${mimeType}, ${formatBytes(buffer.byteLength)}).`;
 
-    // Pick the content block by MIME type. Claude Desktop's MCP client
-    // accepts `type: "image"` natively for images and renders them; for
-    // non-image binary we emit an `EmbeddedResource` (which Anthropic's
-    // newer MCP runtime accepts). The historical fallback was a single
-    // `type: "resource"` for everything — that failed validation on
-    // Claude Desktop for non-image binaries.
+    // Image MIME → `type: "image"` (well-supported across MCP clients).
     if (mimeType.startsWith("image/")) {
       return {
         content: [
@@ -331,19 +351,18 @@ async function downloadAttachmentHandler(
       };
     }
 
+    // Everything else → embedded resource with a custom-scheme URI.
+    // Strict shape per Claude Desktop's validator: only `uri`, `mimeType`,
+    // `blob` — no `_meta`, no extra keys.
     return {
       content: [
         { type: "text", text: summary },
         {
           type: "resource",
           resource: {
-            uri: finalUrl,
+            uri: makeAttachmentUri(finalUrl, filename),
             mimeType,
             blob: base64,
-            // Empty _meta hint placates stricter schema validators that
-            // require the field to be present (some older MCP runtimes
-            // pin a more conservative shape).
-            _meta: {},
           },
         },
       ],
