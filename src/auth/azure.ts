@@ -62,6 +62,8 @@ export interface BuildAuthorizationUrlInput {
   state: string;
   /** PKCE verifier (we generate it and return for the caller to store). */
   codeVerifier?: string;
+  /** Nonce passed to Azure + expected back on the ID token. Generated if absent. */
+  nonce?: string;
   /** Space-separated scopes. Default 'openid email profile'. */
   scope?: string;
   /** Login hint to pre-fill the Microsoft sign-in form. Optional. */
@@ -82,7 +84,7 @@ export async function buildAuthorizationUrl(
 ): Promise<BuildAuthorizationUrlResult> {
   const codeVerifier = input.codeVerifier ?? oidc.randomPKCECodeVerifier();
   const codeChallenge = await oidc.calculatePKCECodeChallenge(codeVerifier);
-  const nonce = oidc.randomNonce();
+  const nonce = input.nonce ?? oidc.randomNonce();
   const scope = input.scope ?? "openid email profile";
 
   const params: Record<string, string> = {

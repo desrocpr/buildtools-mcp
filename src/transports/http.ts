@@ -78,6 +78,18 @@ export interface HttpTransportOptions {
    * `set_session_credentials`. Typically `process.env.BUILDTOOLS_TENANT`.
    */
   defaultTenant?: string;
+  /**
+   * When true, mount the OAuth 2.1 + enrollment routes alongside the
+   * MCP transport. The bearer middleware excludes those paths so
+   * they can have their own auth. Defaults to the truthiness of
+   * `MCP_OAUTH_ENABLED`.
+   */
+  oauthEnabled?: boolean;
+  /**
+   * Public origin Claude Desktop will hit (for absolute redirect URLs
+   * inside the OAuth flow). Defaults to `MCP_PUBLIC_ORIGIN` env.
+   */
+  publicOrigin?: string;
 }
 
 /** Handle returned from `startHttpTransport` — exposes the underlying HTTP
@@ -282,23 +294,42 @@ export async function startHttpTransport(
 
   const app = express();
 
+  // Decide whether to mount the OAuth + enrollment routes. We do it
+  // before installing the bearer middleware so the middleware can skip
+  // the public paths cleanly.
+  const oauthEnabled =
+    opts.oauthEnabled ??
+    /^(1|true|yes)$/i.test(process.env.MCP_OAUTH_ENABLED ?? "");
+  if (oauthEnabled) {
+    const publicOrigin =
+      opts.publicOrigin ??
+      process.env.MCP_PUBLIC_ORIGIN ??
+      "https://buildtools-mcp.mossbuildinganddesign.com";
+    const { mountWebRoutes } = await import("../web/router.js");
+    await mountWebRoutes(app, { publicOrigin });
+    process.stderr.write(
+      `[http-transport] OAuth + enrollment routes mounted (origin=${publicOrigin})\n`,
+    );
+  }
+
   // Pre-compute the expected `Authorization` header value once, then use
   // `timingSafeEqual` on every request so the comparison does not leak bytes
   // of the bearer via response timing. (MEDIUM-1, MOS-220 review.)
   const expectedAuthHeader = Buffer.from(`Bearer ${opts.bearerToken}`);
 
-  // Bearer-token middleware — applied to ALL routes.
+  const { isPublicRoute } = await import("../web/router.js");
+
+  // Bearer-token middleware — applied to MCP routes only. /oauth/*,
+  // /enroll/*, and /.well-known/* are exempt; they have their own auth.
   app.use((req: Request, res: Response, next: NextFunction) => {
+    if (oauthEnabled && isPublicRoute(req.path)) {
+      return next();
+    }
     const presented = Buffer.from(req.headers.authorization ?? "");
-    // `timingSafeEqual` throws on length mismatch, so length-check first.
-    // Both branches return the same 401 body so a length-difference path
-    // is not itself a meaningful oracle.
     if (
       presented.length !== expectedAuthHeader.length ||
       !timingSafeEqual(presented, expectedAuthHeader)
     ) {
-      // NOTE: do NOT log either the presented header or the configured
-      // bearer. Acceptance criterion 11.
       res.status(401).type("text/plain").send("Unauthorized");
       return;
     }
