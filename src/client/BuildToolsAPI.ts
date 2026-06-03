@@ -1042,6 +1042,15 @@ export class BuildToolsAPI {
       dueDate: string;
       selection: string;
       notes: string;
+      /** Date the selection row was first created (ISO YYYY-MM-DD). */
+      createdAt: string | null;
+      /** Last modification — useful for cycle-time approximations when
+       *  approvedDate is null. */
+      updatedAt: string | null;
+      /** Set when status transitioned to Approved/Purchased. */
+      approvedDate: string | null;
+      /** Set when status transitioned to Rejected. */
+      rejectedDate: string | null;
     }>;
   }> {
     await this.ensureAuthenticated();
@@ -1081,6 +1090,10 @@ export class BuildToolsAPI {
       dueDate: string;
       selection: string;
       notes: string;
+      createdAt: string | null;
+      updatedAt: string | null;
+      approvedDate: string | null;
+      rejectedDate: string | null;
     }> = [];
 
     const STATUS_MAP: Record<number, string> = {
@@ -1135,7 +1148,32 @@ export class BuildToolsAPI {
           dueDate: nonEmpty.find((c) => /^\d{2}\/\d{2}\/\d{4}$/.test(c)) ?? "",
           selection: nonEmpty.find((c) => c.includes("SELECT OPTION") || c.length > 20) ?? "",
           notes: "",
+          // Lifecycle dates aren't in the dashboard HTML — they come
+          // from the MySQL replica merge below.
+          createdAt: null,
+          updatedAt: null,
+          approvedDate: null,
+          rejectedDate: null,
         });
+      }
+    }
+
+    // Merge lifecycle dates from the read replica. Best-effort: if
+    // the replica isn't configured/available, every selection just
+    // keeps its null dates and the renderer omits them.
+    if (selections.length > 0) {
+      const { getSelectionDates } = await import("./MysqlReadReplica.js");
+      const dateMap = await getSelectionDates(projectId);
+      for (const s of selections) {
+        const d = dateMap.get(s.id);
+        if (d) {
+          s.createdAt = d.createdAt;
+          s.updatedAt = d.updatedAt;
+          s.approvedDate = d.approvedDate;
+          s.rejectedDate = d.rejectedDate;
+          // Prefer the structured DB due_date over the HTML cell when both exist.
+          if (d.dueDate && !s.dueDate) s.dueDate = d.dueDate;
+        }
       }
     }
 

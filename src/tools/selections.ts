@@ -109,13 +109,13 @@ async function listSelectionsHandler(
     const header = `**${selections.length} selection${selections.length === 1 ? "" : "s"}** for project #${project_id}${status && status !== "All" ? ` (${status})` : ""}:`;
 
     const tableHeader = [
-      "| ID | Status | Category | Location | Item | Price |",
-      "|---|---|---|---|---|---|",
+      "| ID | Status | Category | Location | Item | Price | Opened | Approved | Rejected | Due |",
+      "|---|---|---|---|---|---|---|---|---|---|",
     ].join("\n");
 
     const tableBody = selections
       .map((s) =>
-        `| ${s.id} | ${s.status} | ${escapeMarkdownCell(orDash(s.category))} | ${escapeMarkdownCell(orDash(s.location))} | ${escapeMarkdownCell(orDash(s.item))} | ${orDash(s.price)} |`,
+        `| ${s.id} | ${s.status} | ${escapeMarkdownCell(orDash(s.category))} | ${escapeMarkdownCell(orDash(s.location))} | ${escapeMarkdownCell(orDash(s.item))} | ${orDash(s.price)} | ${orDash(s.createdAt)} | ${orDash(s.approvedDate)} | ${orDash(s.rejectedDate)} | ${orDash(s.dueDate)} |`,
       )
       .join("\n");
 
@@ -128,7 +128,7 @@ async function listSelectionsHandler(
 export const listSelectionsTool: ToolDefinition = {
   name: "list_selections",
   description:
-    "List material/finish selections for a project. Shows status, budget category, location, item, and price. Optionally filter by status (Open/Selected/Approved/Rejected/Complete).",
+    "[v2 2026-06-03] List material/finish selections for a project. Shows status, budget category, location, item, price, AND lifecycle dates (opened/approved/rejected/due) — useful for aging and cycle-time analysis. Optionally filter by status (Open/Selected/Approved/Rejected/Complete).",
   inputSchema: zodToJsonSchema(ListSelectionsInputSchema),
   permission: "read",
   handler: listSelectionsHandler,
@@ -297,7 +297,15 @@ async function listAllowancesHandler(
       if (catSelections.length > 0) {
         lines.push(`- **Selections** (${catSelections.length}):`);
         for (const sel of catSelections) {
-          lines.push(`  - [${sel.status}] ${orDash(sel.item)} — ${orDash(sel.price)}`);
+          // Date suffix: opened (always when known), then approved or
+          // rejected when set. Omitted entirely when the replica
+          // didn't return anything (so older logs / tests aren't broken).
+          const dateParts: string[] = [];
+          if (sel.createdAt) dateParts.push(`opened ${sel.createdAt}`);
+          if (sel.approvedDate) dateParts.push(`approved ${sel.approvedDate}`);
+          else if (sel.rejectedDate) dateParts.push(`rejected ${sel.rejectedDate}`);
+          const dateSuffix = dateParts.length > 0 ? ` — ${dateParts.join(", ")}` : "";
+          lines.push(`  - [${sel.status}] ${orDash(sel.item)} — ${orDash(sel.price)}${dateSuffix}`);
         }
       } else {
         lines.push(`- *No selections yet*`);
@@ -314,7 +322,7 @@ async function listAllowancesHandler(
 export const listAllowancesTool: ToolDefinition = {
   name: "list_allowances",
   description:
-    "List allowance budget categories for a project with reconciliation: budgeted amount, total spent on selections, and remaining balance. Shows each selection item under its allowance category.",
+    "[v2 2026-06-03] List allowance budget categories for a project with reconciliation: budgeted amount, total spent on selections, and remaining balance. Shows each selection item under its allowance category, with opened/approved dates appended when available.",
   inputSchema: zodToJsonSchema(ListAllowancesInputSchema),
   permission: "read",
   handler: listAllowancesHandler,
