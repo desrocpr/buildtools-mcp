@@ -50,7 +50,9 @@ import { auditLog } from "./session-store.js";
 export async function startStdioTransport(): Promise<Server> {
   const server = new Server(
     { name: "buildtools-mcp", version: "0.0.1" },
-    { capabilities: { tools: {} } },
+    // listChanged: true lets the client trust `notifications/tools/list_changed`
+    // when emitted by the `refresh_tools` tool below.
+    { capabilities: { tools: { listChanged: true } } },
   );
 
   // -------------------------------------------------------------------------
@@ -104,6 +106,12 @@ export async function startStdioTransport(): Promise<Server> {
           "Returns pong. Used to verify the buildtools-mcp server is reachable.",
         inputSchema: { type: "object", properties: {} },
       },
+      {
+        name: "refresh_tools",
+        description:
+          "[v1 2026-06-03] Force the MCP client to refresh its tool-list cache. Sends notifications/tools/list_changed; compliant clients re-fetch tools/list immediately.",
+        inputSchema: { type: "object", properties: {} },
+      },
       ...Array.from(toolsByName.values()).map((t) => ({
         name: t.name,
         description: t.description,
@@ -118,6 +126,26 @@ export async function startStdioTransport(): Promise<Server> {
     if (name === "ping") {
       auditLog({ sessionId: "stdio", username: undefined, tool: "ping", result: "ok" });
       return { content: [{ type: "text", text: "pong" }] };
+    }
+
+    if (name === "refresh_tools") {
+      try {
+        await server.sendToolListChanged();
+      } catch (err) {
+        process.stderr.write(
+          `[stdio-transport] sendToolListChanged failed: ${(err as Error)?.message ?? err}\n`,
+        );
+      }
+      auditLog({ sessionId: "stdio", username: undefined, tool: "refresh_tools", result: "ok" });
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              "Sent notifications/tools/list_changed. Compliant clients will re-fetch tools/list immediately.",
+          },
+        ],
+      };
     }
 
     const tool = toolsByName.get(name);

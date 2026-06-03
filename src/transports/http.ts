@@ -122,7 +122,12 @@ function buildPerSessionServer(opts: {
 }): Server {
   const server = new Server(
     { name: "buildtools-mcp", version: "0.0.1" },
-    { capabilities: { tools: {} } },
+    // listChanged: true tells compliant MCP clients (incl. Claude Desktop)
+    // that we may emit `notifications/tools/list_changed` — and that they
+    // should re-call tools/list when they see it. Wired up to the
+    // `refresh_tools` tool below so users can force a schema refresh
+    // from inside a conversation.
+    { capabilities: { tools: { listChanged: true } } },
   );
 
   // Lazy per-session BuildToolsAPI; constructed once credentials are set.
@@ -216,6 +221,12 @@ function buildPerSessionServer(opts: {
             "Returns pong. Used to verify the buildtools-mcp server is reachable.",
           inputSchema: { type: "object", properties: {} },
         },
+        {
+          name: "refresh_tools",
+          description:
+            "[v1 2026-06-03] Force the MCP client to refresh its tool-list cache. Calls notifications/tools/list_changed on the active session; compliant clients (incl. Claude Desktop) re-fetch tools/list immediately. Use after a schema change when the client appears to have stale tool descriptions or input schemas.",
+          inputSchema: { type: "object", properties: {} },
+        },
         ...filtered.map((t) => ({
           name: t.name,
           description: t.description,
@@ -267,6 +278,32 @@ function buildPerSessionServer(opts: {
     if (name === "ping") {
       await writeAudit("ping", "ok");
       return { content: [{ type: "text", text: "pong" }] };
+    }
+
+    if (name === "refresh_tools") {
+      // Fire the standard MCP notification on this session. Compliant
+      // clients re-fetch tools/list when they see it. We fire it
+      // before responding so the client's protocol state machine
+      // sees the notification first.
+      try {
+        await server.sendToolListChanged();
+      } catch (err) {
+        process.stderr.write(
+          `[http-transport] sendToolListChanged failed: ${(err as Error)?.message ?? err}\n`,
+        );
+      }
+      await writeAudit("refresh_tools", "ok");
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              "Sent `notifications/tools/list_changed` to this session. " +
+              "Your client should refresh its tool-list cache automatically. " +
+              "If you still see stale tool descriptions, fully quit and relaunch the client.",
+          },
+        ],
+      };
     }
 
     const tool = toolsByName.get(name);
