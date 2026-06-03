@@ -369,6 +369,173 @@ export const listSelectionCategoriesTool: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// export_selections — bulk CSV across many projects (MOS-329)
+// ---------------------------------------------------------------------------
+
+/**
+ * Status filter inputs accept both the canonical name and the
+ * "synonym/variant" form the user-facing dashboard uses
+ * (e.g. "Selected/Pending" is what the UI shows for status code 2).
+ * Normalised to the canonical name for filtering against
+ * `selection.status`.
+ */
+const STATUS_FILTER_ALIASES: Record<string, string> = {
+  "Open": "Open",
+  "Open/Incomplete": "Open",
+  "Selected": "Selected",
+  "Selected/Pending": "Selected",
+  "Approved": "Approved",
+  "Rejected": "Rejected",
+  "Complete": "Complete",
+};
+
+const ExportSelectionsInputSchema = z.object({
+  project_ids: z
+    .array(z.union([z.string(), z.number()]))
+    .min(1)
+    .describe(
+      "List of BuildTools project IDs to export. Iterated server-side; one fetch per project, combined into a single CSV.",
+    ),
+  status_filter: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Optional list of statuses to include. Accepts canonical (Open|Selected|Approved|Rejected|Complete) or dashboard variants (Open/Incomplete|Selected/Pending). Default: all statuses.",
+    ),
+});
+
+/** RFC-4180 quote a CSV cell when needed. */
+function csvCell(value: string | number | null | undefined): string {
+  if (value === null || value === undefined) return "";
+  const s = String(value);
+  if (s === "") return "";
+  if (/[",\r\n]/.test(s)) {
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+  return s;
+}
+
+/** "$ 218.90" / "$218" / "" → "218.90" / "218" / "" (numeric form, no $/commas). */
+function priceToNumeric(raw: string): string {
+  if (!raw) return "";
+  const m = raw.replace(/[,$\s]/g, "");
+  if (!/^-?\d+(\.\d+)?$/.test(m)) return "";
+  // Strip trailing ".00" — keep as-is; downstream consumers can format.
+  return m;
+}
+
+async function exportSelectionsHandler(
+  args: unknown,
+  api: BuildToolsAPI,
+): Promise<ToolResult> {
+  const parsed = ExportSelectionsInputSchema.safeParse(args ?? {});
+  if (!parsed.success) return formatZodError(parsed.error, "export_selections");
+  const { project_ids, status_filter } = parsed.data;
+
+  // Normalise status filter: dashboard variants → canonical names.
+  let canonicalStatuses: Set<string> | null = null;
+  if (status_filter && status_filter.length > 0) {
+    canonicalStatuses = new Set();
+    for (const raw of status_filter) {
+      const canonical = STATUS_FILTER_ALIASES[raw];
+      if (!canonical) {
+        return errorMarkdown(
+          `**Invalid status_filter value**: \`${raw}\`. Accepted: ${Object.keys(STATUS_FILTER_ALIASES).join(", ")}.`,
+        );
+      }
+      canonicalStatuses.add(canonical);
+    }
+  }
+
+  try {
+    // ONE bulk fetch for project names; then per-project selections in parallel.
+    const projectsResp = await api.getProjects<{
+      data?: Array<{ id: number | string; name?: string }>;
+    }>({ length: 5000 });
+    const nameById = new Map<string, string>();
+    for (const row of projectsResp?.data ?? []) {
+      nameById.set(String(row.id), String(row.name ?? ""));
+    }
+
+    const lines: string[] = [];
+    lines.push(
+      [
+        "project_id",
+        "project",
+        "category",
+        "location",
+        "item",
+        "status",
+        "opened",
+        "approved",
+        "price",
+      ].join(","),
+    );
+
+    let totalRows = 0;
+    const errors: string[] = [];
+
+    await Promise.all(
+      project_ids.map(async (pid) => {
+        const id = String(pid);
+        const projectName = nameById.get(id) ?? "";
+        try {
+          const result = await api.getSelections(id);
+          for (const sel of result.selections) {
+            if (canonicalStatuses && !canonicalStatuses.has(sel.status)) continue;
+            lines.push(
+              [
+                csvCell(id),
+                csvCell(projectName),
+                csvCell(sel.category),
+                csvCell(sel.location),
+                csvCell(sel.item),
+                csvCell(sel.status),
+                csvCell(sel.createdAt ?? ""),
+                csvCell(sel.approvedDate ?? ""),
+                csvCell(priceToNumeric(sel.price)),
+              ].join(","),
+            );
+            totalRows++;
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          errors.push(`project ${id}: ${msg}`);
+        }
+      }),
+    );
+
+    if (errors.length > 0) {
+      // Append per-project errors as comment lines so the output stays a
+      // single CSV blob; consumers that pipe to a parser can ignore lines
+      // beginning with `#`.
+      lines.push("");
+      for (const e of errors) lines.push(`# ERROR ${e}`);
+    }
+
+    const summary =
+      `# ${totalRows} selection row${totalRows === 1 ? "" : "s"} across ${project_ids.length} project${project_ids.length === 1 ? "" : "s"}` +
+      (canonicalStatuses ? ` (filter: ${[...canonicalStatuses].join("|")})` : "");
+    return markdown([summary, lines.join("\n")].join("\n"));
+  } catch (err) {
+    return formatError(err, "export_selections");
+  }
+}
+
+export const exportSelectionsTool: ToolDefinition = {
+  name: "export_selections",
+  description:
+    "[v1 2026-06-03] Bulk export selections across multiple projects as a single CSV. " +
+    "Returns one row PER SELECTION LINE (flat — not nested under allowance categories) with columns " +
+    "project_id, project, category, location, item, status, opened, approved, price. " +
+    "Reuses the same parser as list_selections + list_allowances (incl. created_at / approved_date from the replica). " +
+    "Optional status_filter accepts dashboard variants (e.g. 'Selected/Pending', 'Open/Incomplete').",
+  inputSchema: zodToJsonSchema(ExportSelectionsInputSchema),
+  permission: "read",
+  handler: exportSelectionsHandler,
+};
+
+// ---------------------------------------------------------------------------
 // Exported registry
 // ---------------------------------------------------------------------------
 
@@ -377,4 +544,5 @@ export const selectionTools: ToolDefinition[] = [
   getSelectionTool,
   listAllowancesTool,
   listSelectionCategoriesTool,
+  exportSelectionsTool,
 ];
