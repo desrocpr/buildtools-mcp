@@ -128,7 +128,7 @@ async function listSelectionsHandler(
 export const listSelectionsTool: ToolDefinition = {
   name: "list_selections",
   description:
-    "[v2 2026-06-03] List material/finish selections for a project. Shows status, budget category, location, item, price, AND lifecycle dates (opened/approved/rejected/due) — useful for aging and cycle-time analysis. Optionally filter by status (Open/Selected/Approved/Rejected/Complete).",
+    "[v3 2026-06-12] List material/finish selections for a project. Shows status, budget category, location, item, price, AND lifecycle dates (opened/approved/rejected/due) — useful for aging and cycle-time analysis. Item column now carries the actual selection name (was previously bleeding Location/status badge text). Optionally filter by status (Open/Selected/Approved/Rejected/Complete).",
   inputSchema: zodToJsonSchema(ListSelectionsInputSchema),
   permission: "read",
   handler: listSelectionsHandler,
@@ -152,7 +152,14 @@ async function getSelectionHandler(
   const { selection_id, project_id } = parsed.data;
 
   try {
-    const detail = await api.getSelectionDetail(selection_id, project_id);
+    // Fetch detail and the parent selection name in parallel; the
+    // `/selections/form/{id}?itemsData=1` JSON only carries the items,
+    // not the parent. `getSelectionName` is best-effort — degrades to
+    // null without blocking the rest of the render.
+    const [detail, parentName] = await Promise.all([
+      api.getSelectionDetail(selection_id, project_id),
+      api.getSelectionName(selection_id, project_id),
+    ]);
     if (!detail || detail.items.length === 0) {
       return markdown(`No detail found for selection #${selection_id} on project #${project_id}.`);
     }
@@ -168,14 +175,39 @@ async function getSelectionHandler(
       return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     };
 
+    // Best-effort label for the chosen option: title is often blank when
+    // the option was created by entering only a description/vendor (e.g.
+    // an "Actual Quote" line on a cabinet selection). Fall back to the
+    // description, then vendor, then a generic placeholder.
+    const optionLabel = (item: {
+      title: string;
+      description: string;
+      companyName: string;
+    }): string => {
+      const t = item.title.trim();
+      if (t) return t;
+      const d = item.description.trim();
+      if (d) return d;
+      const c = item.companyName.trim();
+      if (c) return c;
+      return "(unnamed option)";
+    };
+
     const lines: string[] = [];
-    lines.push(`## Selection #${selection_id} (project #${project_id})\n`);
+    // Include the parent selection name in the H2 when available — that's
+    // the field the user types into BuildTools' "name" input (e.g.
+    // "Kitchen Cabinets", "Cabinet Hardware"). Omit the em-dash entirely
+    // when the form didn't return a name so the heading stays clean.
+    const header = parentName
+      ? `## Selection #${selection_id} — ${parentName} (project #${project_id})\n`
+      : `## Selection #${selection_id} (project #${project_id})\n`;
+    lines.push(header);
 
     const selected = detail.items.find((i) => i.selected);
     const others = detail.items.filter((i) => !i.selected);
 
     if (selected) {
-      lines.push(`### Selected: ${selected.title}`);
+      lines.push(`### Selected: ${optionLabel(selected)}`);
       lines.push("");
       if (selected.description) lines.push(`- **Description**: ${selected.description}`);
       if (selected.model) lines.push(`- **Model**: ${selected.model}`);
@@ -207,8 +239,9 @@ async function getSelectionHandler(
       for (const item of others) {
         const pricePart = item.price !== null ? ` — ${formatUsd(item.price)}` : "";
         const filesPart = item.files.length > 0 ? ` (${item.files.length} file${item.files.length > 1 ? "s" : ""})` : "";
-        lines.push(`- **${item.title}**${pricePart}${filesPart}`);
-        if (item.description && item.description !== item.title) {
+        const label = optionLabel(item);
+        lines.push(`- **${label}**${pricePart}${filesPart}`);
+        if (item.description && item.description !== item.title && item.description !== label) {
           lines.push(`  ${item.description}`);
         }
       }
@@ -223,7 +256,7 @@ async function getSelectionHandler(
 export const getSelectionTool: ToolDefinition = {
   name: "get_selection",
   description:
-    "Get full detail for a selection including all options/choices, descriptions, models, vendor info, prices, and attached files (installation specs, PDFs, images). Requires both selection_id and project_id.",
+    "[v2 2026-06-12] Get full detail for a selection including all options/choices, descriptions, models, vendor info, prices, and attached files (installation specs, PDFs, images). Header now includes the parent selection name (e.g. 'Kitchen Cabinets') and option labels fall back to description/vendor when the option title is blank. Requires both selection_id and project_id.",
   inputSchema: zodToJsonSchema(GetSelectionInputSchema),
   permission: "read",
   handler: getSelectionHandler,
@@ -322,7 +355,7 @@ async function listAllowancesHandler(
 export const listAllowancesTool: ToolDefinition = {
   name: "list_allowances",
   description:
-    "[v2 2026-06-03] List allowance budget categories for a project with reconciliation: budgeted amount, total spent on selections, and remaining balance. Shows each selection item under its allowance category, with opened/approved dates appended when available.",
+    "[v3 2026-06-12] List allowance budget categories for a project with reconciliation: budgeted amount, total spent on selections, and remaining balance. Each selection now shows its real name (previously rendered as 'Incomplete' / 'Pending' / location), price, and opened/approved dates when available.",
   inputSchema: zodToJsonSchema(ListAllowancesInputSchema),
   permission: "read",
   handler: listAllowancesHandler,
@@ -525,9 +558,10 @@ async function exportSelectionsHandler(
 export const exportSelectionsTool: ToolDefinition = {
   name: "export_selections",
   description:
-    "[v1 2026-06-03] Bulk export selections across multiple projects as a single CSV. " +
+    "[v2 2026-06-12] Bulk export selections across multiple projects as a single CSV. " +
     "Returns one row PER SELECTION LINE (flat — not nested under allowance categories) with columns " +
     "project_id, project, category, location, item, status, opened, approved, price. " +
+    "Item column now carries the real selection name across all statuses (previously bled Location/status badge for Approved/Open/Selected rows). " +
     "Reuses the same parser as list_selections + list_allowances (incl. created_at / approved_date from the replica). " +
     "Optional status_filter accepts dashboard variants (e.g. 'Selected/Pending', 'Open/Incomplete').",
   inputSchema: zodToJsonSchema(ExportSelectionsInputSchema),
