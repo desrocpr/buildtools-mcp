@@ -50,6 +50,29 @@ function formatZodError(err: z.ZodError, toolName: string): ToolResult {
   return errorMarkdown(`**Invalid input for \`${toolName}\`:**\n${issues}`);
 }
 
+/**
+ * Escape Markdown control characters in user-controlled prose so values
+ * stored on BuildTools (company names, PO names, descriptions) can't
+ * inject formatting into the LLM context when they echo back in error
+ * messages or confirmation prompts. See `companies.ts` for matching impl.
+ */
+function escapeMarkdownInline(s: unknown): string {
+  if (s === undefined || s === null) return "";
+  return String(s).replace(/[\\`*_[\]<>]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Strip common trailing legal suffixes (`, LLC`, `, Inc`, `, Corp`, etc.)
+ * so the BuildTools datatable tokenizer matches on the core name.
+ * Verbatim queries like "Smith, LLC" return zero hits because BT splits
+ * on whitespace and the comma kills the match.
+ */
+function stripLegalSuffix(name: string): string {
+  return name
+    .replace(/,?\s+(LLC|L\.?L\.?C\.?|Inc\.?|Corp\.?|Ltd\.?|Co\.?)\b.*$/i, "")
+    .trim();
+}
+
 // ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
@@ -89,18 +112,34 @@ const CreateChangeOrderSchema = z.object({
 });
 type CreateChangeOrderArgs = z.infer<typeof CreateChangeOrderSchema>;
 
-const CreatePurchaseOrderSchema = z.object({
-  name: z.string().describe("Purchase order name."),
-  project_id: z.number().describe("BuildTools project ID."),
-  company_id: z.number().describe("Vendor/subcontractor company ID."),
-  total: z.number().optional().describe("Total dollar amount (used if items not provided)."),
-  prefix: z.string().optional().describe("PO number prefix. Default: 'PO'."),
-  notes: z.string().optional(),
-  items: z
-    .array(z.object({ name: z.string(), total: z.number() }))
-    .optional(),
-  confirmation_id: z.string().optional(),
-});
+const CreatePurchaseOrderSchema = z
+  .object({
+    name: z.string().describe("Purchase order name."),
+    project_id: z.number().describe("BuildTools project ID."),
+    company_id: z
+      .number()
+      .optional()
+      .describe(
+        "Vendor/subcontractor company ID. Provide either `company_id` or `company_name` — if both are present, `company_id` wins.",
+      ),
+    company_name: z
+      .string()
+      .optional()
+      .describe(
+        "Vendor/subcontractor name. Resolved server-side via fuzzy match against the companies directory. If zero or multiple matches, returns an error with the candidate list. Provide either `company_id` or `company_name`.",
+      ),
+    total: z.number().optional().describe("Total dollar amount (used if items not provided)."),
+    prefix: z.string().optional().describe("PO number prefix. Default: 'PO'."),
+    notes: z.string().optional(),
+    items: z
+      .array(z.object({ name: z.string(), total: z.number() }))
+      .optional(),
+    confirmation_id: z.string().optional(),
+  })
+  .refine((d) => d.company_id !== undefined || d.company_name !== undefined, {
+    message: "Provide either `company_id` or `company_name`.",
+    path: ["company_id"],
+  });
 type CreatePurchaseOrderArgs = z.infer<typeof CreatePurchaseOrderSchema>;
 
 const CreateTaskSchema = z.object({
@@ -226,9 +265,36 @@ export function createMutationTools(
   );
 
   // -- create_purchase_order ------------------------------------------------
-  const createPOConfirmed = requiresConfirmation<CreatePurchaseOrderArgs>(
+  // The executor expects a resolved `company_id`. When the caller passed
+  // `company_name` instead, we resolve it up-front (see resolveCompanyId
+  // below) and overwrite the field before reaching the confirmation
+  // framework — so the prompt shows the actual vendor and the args stored
+  // for replay already carry the numeric id.
+  //
+  // `_resolved_from` carries the caller's ORIGINAL `company_name` input
+  // when (and only when) we did the fuzzy resolution. The confirmation
+  // prompt surfaces this explicitly so the user can see the substitution
+  // ("Resolved 'Kai Mutn' → #977 (Kai Muten, LLC)") rather than the
+  // server quietly accepting their misspelling.
+  type CreatePOExecutorArgs = CreatePurchaseOrderArgs & {
+    company_id: number;
+    _resolved_from?: string;
+  };
+  const createPOConfirmed = requiresConfirmation<CreatePOExecutorArgs>(
     "create_purchase_order",
-    (a) => `Create purchase order **"${a.name}"** on project #${a.project_id} for company #${a.company_id}.`,
+    (a) => {
+      const safeName = escapeMarkdownInline(a.name);
+      const safeCompanyName = escapeMarkdownInline(a.company_name ?? "");
+      const safeFrom = escapeMarkdownInline(a._resolved_from ?? "");
+      const base = `Create purchase order **"${safeName}"** on project #${a.project_id}`;
+      if (a._resolved_from && a._resolved_from !== a.company_name) {
+        return `${base}. Resolved \`company_name: "${safeFrom}"\` → #${a.company_id} (${safeCompanyName}).`;
+      }
+      if (a.company_name) {
+        return `${base} for company #${a.company_id} (${safeCompanyName}).`;
+      }
+      return `${base} for company #${a.company_id}.`;
+    },
     async (a) => {
       try {
         const result = await getApi().createPurchaseOrder({
@@ -245,6 +311,91 @@ export function createMutationTools(
       } catch (err) { return formatError(err, "create_purchase_order"); }
     },
   );
+
+  /**
+   * Resolve `company_name` to a numeric `company_id` via the same
+   * companies datatable that backs `search_companies`. Returns either
+   * the resolved id, or an errorMarkdown describing the failure:
+   *   - 0 matches  → "No company matches …"
+   *   - >1 matches → list candidates so the caller can pick
+   */
+  async function resolveCompanyId(
+    name: string,
+  ): Promise<{ id: number; resolvedName: string } | ToolResult> {
+    type CompaniesResp = {
+      data?: Array<Record<string, unknown>>;
+      recordsFiltered?: number;
+    };
+
+    const formatCandidates = (rows: Array<Record<string, unknown>>): string =>
+      rows
+        .slice(0, 10)
+        .map((r) => {
+          const dt = typeof r.DT_RowId === "string" ? r.DT_RowId.replace(/^row_/, "") : "?";
+          const nm = escapeMarkdownInline(
+            String(r.name ?? "").replace(/<[^>]*>/g, "").trim(),
+          );
+          const role = escapeMarkdownInline(String(r.type_name ?? "—"));
+          return `  - #${dt} **${nm}** (${role})`;
+        })
+        .join("\n");
+
+    // Initial query.
+    const resp =
+      (await getApi().searchCompanies<CompaniesResp>(name, { limit: 10 })) ??
+      ({ data: [] } as CompaniesResp);
+    const rows = resp.data ?? [];
+    const safeName = escapeMarkdownInline(name);
+
+    // Zero matches: best-effort retry with legal suffixes stripped (so
+    // "Kai Muten, LLC" → "Kai Muten"). If the retry surfaces near-matches,
+    // return them as candidates so the caller can pick rather than getting
+    // a dead-end "no match" message.
+    if (rows.length === 0) {
+      const stripped = stripLegalSuffix(name);
+      if (stripped !== name && stripped.length >= 2) {
+        const retry =
+          (await getApi().searchCompanies<CompaniesResp>(stripped, {
+            limit: 10,
+          })) ?? ({ data: [] } as CompaniesResp);
+        const retryRows = retry.data ?? [];
+        if (retryRows.length > 0) {
+          return errorMarkdown(
+            `**Error calling \`create_purchase_order\`**: no exact match for "${safeName}", but ${retryRows.length} near-match${retryRows.length === 1 ? "" : "es"} via "${escapeMarkdownInline(stripped)}". Pass an explicit \`company_id\`:\n${formatCandidates(retryRows)}`,
+          );
+        }
+      }
+      return errorMarkdown(
+        `**Error calling \`create_purchase_order\`**: no company matches "${safeName}". Try \`search_companies\` to find the right vendor.`,
+      );
+    }
+
+    // Ambiguity check: trust `recordsFiltered`, not the visible page. A
+    // search for "Smith" with limit=10 might return 1 visible row but
+    // actually match dozens — auto-resolving the top hit would create a
+    // PO against the wrong vendor. Require BOTH the visible count AND
+    // the filtered total to equal exactly 1 before resolving.
+    const totalMatches = resp.recordsFiltered ?? rows.length;
+    if (rows.length > 1 || totalMatches > 1) {
+      return errorMarkdown(
+        `**Error calling \`create_purchase_order\`**: "${safeName}" matched ${totalMatches} compan${totalMatches === 1 ? "y" : "ies"} (showing first ${Math.min(rows.length, 10)}). Pass an explicit \`company_id\`:\n${formatCandidates(rows)}`,
+      );
+    }
+
+    const only = rows[0];
+    const id = Number(
+      typeof only.DT_RowId === "string" ? only.DT_RowId.replace(/^row_/, "") : NaN,
+    );
+    if (!Number.isFinite(id)) {
+      return errorMarkdown(
+        `**Error calling \`create_purchase_order\`**: matched company has no usable id (DT_RowId=${escapeMarkdownInline(only.DT_RowId)}).`,
+      );
+    }
+    return {
+      id,
+      resolvedName: String(only.name ?? "").replace(/<[^>]*>/g, "").trim(),
+    };
+  }
 
   // -- create_task ----------------------------------------------------------
   const createTaskConfirmed = requiresConfirmation<CreateTaskArgs>(
@@ -584,13 +735,60 @@ export function createMutationTools(
       createCOConfirmed,
       "write:financial",
     ),
-    makeTool(
-      "create_purchase_order",
-      "Create a purchase order for a vendor on a project. Requires confirmation.",
-      CreatePurchaseOrderSchema,
-      createPOConfirmed,
-      "write:financial",
-    ),
+    // create_purchase_order — custom wrapper (not makeTool) so we can
+    // resolve `company_name` → `company_id` *before* the confirmation
+    // prompt fires. The framework otherwise replays the stored args
+    // verbatim on the second (confirm) call, so resolution has to happen
+    // up-front to avoid a double-lookup and to ensure the prompt names
+    // the actual vendor.
+    {
+      name: "create_purchase_order",
+      description:
+        "Create a purchase order for a vendor on a project. Requires confirmation. " +
+        "Provide either `company_id` (preferred — exact) OR `company_name` (resolved server-side via fuzzy match; errors if 0 or >1 matches).",
+      inputSchema: zodToJsonSchema(CreatePurchaseOrderSchema),
+      permission: "write:financial",
+      handler: async (rawArgs: unknown, _api: BuildToolsAPI) => {
+        const parsed = CreatePurchaseOrderSchema.safeParse(rawArgs ?? {});
+        if (!parsed.success) return formatZodError(parsed.error, "create_purchase_order");
+        const data = parsed.data;
+
+        let companyId = data.company_id;
+        // Only carry a `company_name` into the confirmation prompt when we
+        // resolved it ourselves — a user-supplied `company_name` accompanying
+        // an explicit `company_id` is ignored (id wins) and shouldn't be
+        // shown back to them as if it were authoritative.
+        let resolvedName: string | undefined;
+        // The caller's ORIGINAL `company_name` input (only set when we
+        // resolved). Threaded into the confirmation prompt so the user
+        // sees "Resolved 'Kai Mutn' → #977 (Kai Muten, LLC)" instead of
+        // a silent substitution.
+        let resolvedFrom: string | undefined;
+        if (companyId === undefined) {
+          if (!data.company_name) {
+            return errorMarkdown(
+              "**Error calling `create_purchase_order`**: provide either `company_id` or `company_name`.",
+            );
+          }
+          const result = await resolveCompanyId(data.company_name);
+          if ("content" in result) return result; // errorMarkdown branch
+          companyId = result.id;
+          resolvedName = result.resolvedName;
+          resolvedFrom = data.company_name;
+        }
+
+        return createPOConfirmed(
+          {
+            ...data,
+            company_id: companyId,
+            company_name: resolvedName,
+            _resolved_from: resolvedFrom,
+          },
+          store,
+          sessionId,
+        );
+      },
+    },
     makeTool(
       "create_task",
       "Create a task on a project. Requires confirmation. Status: 1=Open, 2=In Progress, 3=Complete.",

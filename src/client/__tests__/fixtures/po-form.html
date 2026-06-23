@@ -1,0 +1,22 @@
+<div class="form">
+    <!-- Hidden scalars -->
+    <input name="PurchaseOrder[project_id]" type="hidden" value="185966">
+    <input name="PurchaseOrder[prefix]" type="hidden" value="PO">
+    <input name="PurchaseOrder[number]" type="text" value="333123306">
+    <input name="PurchaseOrder[name]" type="text" value="MCP-smoke 1 &mdash; Kai Muten Plumbing Sub">
+
+    <!-- Hidden items JSON (HTML-entity escaped, as BuildTools renders it) -->
+    <input id="bcItems" name="items" type="hidden" value="[{&quot;id&quot;:45824,&quot;budget_category_id&quot;:1609,&quot;name&quot;:&quot;Roofing Sub&quot;,&quot;code&quot;:&quot;3510&quot;,&quot;amounts&quot;:[{&quot;a&quot;:&quot;300&quot;,&quot;q&quot;:&quot;1&quot;,&quot;d&quot;:&quot;Roof repair&quot;,&quot;u&quot;:&quot;1&quot;}],&quot;total&quot;:&quot;300.00&quot;,&quot;notes&quot;:&quot;&quot;,&quot;internal_notes&quot;:&quot;&quot;,&quot;company_id&quot;:977,&quot;company_name&quot;:&quot;Kai Muten, LLC&quot;,&quot;invoice_related&quot;:&quot;0.00&quot;}]">
+
+    <!-- Editable variant (new POs): full vendor dropdown with the chosen
+         option carrying `selected` attribute. Note: `selected` precedes
+         `value=` — the historical parser missed this ordering. The
+         disabled placeholder must NOT be picked up. -->
+    <select name="PurchaseOrder[company_id]" id="select_company_id" class="selectpicker">
+        <option disabled selected value="">Select or add a Company</option>
+        <option value="1068" data-name="84 Lumber">84 Lumber</option>
+        <option value="62" data-name="Charles Home">Charles Home</option>
+        <option selected value="977" data-name="Kai Muten, LLC">Kai Muten, LLC</option>
+        <option value="1106" data-name="Homestead Building Supply">Homestead Building Supply</option>
+    </select>
+</div>

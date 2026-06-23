@@ -1,0 +1,21 @@
+<div class="form">
+    <!-- Hidden scalars. NOTE: in this variant `value=` precedes `name=`
+         on the project_id input — captures the attribute-order edge case
+         the inputValue lookahead must handle. -->
+    <input value="185936" type="hidden" name="PurchaseOrder[project_id]">
+    <input type="hidden" value="PO" name="PurchaseOrder[prefix]">
+    <input value="333123304" type="text" name="PurchaseOrder[number]">
+    <input value="Roof repair for remote blower" type="text" name="PurchaseOrder[name]">
+
+    <!-- Items JSON for an old PO with a populated line item. -->
+    <input id="bcItems" name="items" type="hidden" value="[{&quot;id&quot;:45824,&quot;budget_category_id&quot;:1609,&quot;name&quot;:&quot;Roofing Sub&quot;,&quot;code&quot;:&quot;3510&quot;,&quot;amounts&quot;:[{&quot;a&quot;:&quot;300&quot;,&quot;q&quot;:&quot;1&quot;,&quot;d&quot;:&quot;Roof repair&quot;,&quot;u&quot;:&quot;1&quot;}],&quot;total&quot;:&quot;300.00&quot;,&quot;notes&quot;:&quot;&quot;,&quot;internal_notes&quot;:&quot;&quot;,&quot;company_id&quot;:62,&quot;company_name&quot;:&quot;Charles Home&quot;,&quot;invoice_related&quot;:&quot;0.00&quot;}]">
+
+    <!-- Read-only variant (older / locked POs): a `disabled` select with
+         only the chosen option inside, NO `selected` attribute. The
+         parser must fall back to the first numeric-value option. The
+         pre-fix regex required the `selected` attribute and would have
+         returned companyId=null here. -->
+    <select name="" id="select_company_id" class="selectpicker show-tick form-control" disabled="disabled" data-dropdown-align-right="true">
+        <option value="62">Charles Home</option>
+    </select>
+</div>

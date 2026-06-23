@@ -76,6 +76,20 @@ function orDash(value: unknown): string {
   return s;
 }
 
+/**
+ * Escape Markdown emphasis / link / code-fence control characters so that
+ * user-supplied strings (PO names, vendor names, item descriptions) can't
+ * inject formatting into the LLM context.
+ *
+ * Scope: prose contexts (headings, list items, bold spans). For table
+ * cells use `escapeMarkdownCell` — only `|`/`\n` break table layout, and
+ * over-escaping inside cells produces noisy output.
+ */
+function escapeMarkdownInline(s: unknown): string {
+  if (s === undefined || s === null) return "";
+  return String(s).replace(/[\\`*_[\]<>]/g, (c) => `\\${c}`);
+}
+
 /** Markdown response shorthand. */
 function markdown(text: string): ToolResult {
   return { content: [{ type: "text", text }] };
@@ -278,10 +292,142 @@ export const searchPurchaseOrdersTool: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// get_purchase_order — single PO detail incl. company_id + line items
+// ---------------------------------------------------------------------------
+
+const GetPurchaseOrderInputSchema = z.object({
+  purchase_order_id: z
+    .number()
+    .describe(
+      "BuildTools purchase order ID (the `#` shown by list_purchase_orders / search_purchase_orders).",
+    ),
+});
+
+type GetPurchaseOrderInput = z.infer<typeof GetPurchaseOrderInputSchema>;
+
+/** USD formatter for line item totals. */
+const usd = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+});
+
+async function getPurchaseOrderHandler(
+  args: unknown,
+  api: BuildToolsAPI,
+): Promise<ToolResult> {
+  const parsed = GetPurchaseOrderInputSchema.safeParse(args ?? {});
+  if (!parsed.success) return formatZodError(parsed.error, "get_purchase_order");
+  const { purchase_order_id }: GetPurchaseOrderInput = parsed.data;
+
+  try {
+    const detail = await api.getPurchaseOrder(purchase_order_id);
+    if (!detail) {
+      return markdown(`No detail found for purchase order #${purchase_order_id}.`);
+    }
+
+    const lines: string[] = [];
+    const poLabel =
+      detail.prefix && detail.number
+        ? `${detail.prefix} ${detail.number}`
+        : detail.number || detail.prefix || "—";
+
+    const header =
+      `## Purchase Order #${detail.id}` +
+      (detail.name ? ` — ${escapeMarkdownInline(detail.name)}` : "") +
+      (detail.projectId !== null ? ` (project #${detail.projectId})` : "");
+    lines.push(header);
+    lines.push("");
+    lines.push(`- **PO number**: ${poLabel}`);
+    // Always emit a vendor line, even when both id and name are missing —
+    // a silent omission would hide an HTML parse failure from the caller,
+    // and downstream `create_purchase_order` would propagate a null
+    // company_id without any indication something was wrong upstream.
+    if (detail.companyId !== null) {
+      lines.push(
+        `- **Vendor**: ${escapeMarkdownInline(detail.companyName) || "—"} (company #${detail.companyId})`,
+      );
+    } else if (detail.companyName) {
+      lines.push(`- **Vendor**: ${escapeMarkdownInline(detail.companyName)} _(no company_id parsed — extract before use)_`);
+    } else {
+      lines.push(`- **Vendor**: _(unknown — form parse failed)_`);
+    }
+    lines.push(`- **Line items**: ${detail.items.length}`);
+    if (detail.totalNumeric > 0) {
+      lines.push(`- **Total** (sum of items): ${usd.format(detail.totalNumeric)}`);
+    }
+
+    // Invoiced / unpaid summary — derived from `invoice_related` on each
+    // line. BuildTools renders this as the dollar amount already linked
+    // to an invoice; the remainder is unpaid. Best-effort numeric parse.
+    const invoiced = detail.items.reduce(
+      (acc, it) => acc + (Number(it.invoiceRelated) || 0),
+      0,
+    );
+    if (invoiced > 0 || detail.totalNumeric > 0) {
+      const unpaid = Math.max(0, detail.totalNumeric - invoiced);
+      lines.push(
+        `- **Invoiced**: ${usd.format(invoiced)} — **unpaid**: ${usd.format(unpaid)}`,
+      );
+    }
+
+    if (detail.items.length > 0) {
+      lines.push("");
+      lines.push("### Line items");
+      lines.push("");
+      lines.push(
+        "| # | Budget Code | Category | Qty | Unit | Total | Notes |",
+      );
+      lines.push("|---|---|---|---|---|---|---|");
+      // Apply both inline-markdown and table-pipe escaping to user-supplied
+      // strings (budget category name, notes). Inline escaping prevents an
+      // adversarial note like "**SHIP IMMEDIATELY**" from bolding inside the
+      // table cell and biasing the LLM downstream; pipe escaping keeps the
+      // table layout intact.
+      const cell = (s: string): string =>
+        escapeMarkdownInline(s).replace(/\|/g, "\\|").replace(/\n/g, " ");
+      detail.items.forEach((it, i) => {
+        const code = orDash(it.budgetCategoryCode);
+        const cat = cell(it.budgetCategoryName || "—");
+        // `amounts[]` typically has a single row `{a, q, d, u}`. Multiple
+        // rows = breakdown of the same line. Summarise qty + unit price.
+        const a0 = it.amounts[0] ?? {};
+        const qty = orDash((a0 as { q?: unknown }).q);
+        const unit = orDash((a0 as { a?: unknown }).a);
+        const totalNum = Number(it.total);
+        const totalStr = Number.isFinite(totalNum)
+          ? usd.format(totalNum)
+          : orDash(it.total);
+        const notes = cell(
+          [it.notes, it.internalNotes].filter(Boolean).join(" / ") || "—",
+        );
+        lines.push(
+          `| ${i + 1} | ${code} | ${cat} | ${qty} | ${unit} | ${totalStr} | ${notes} |`,
+        );
+      });
+    }
+
+    return markdown(lines.join("\n"));
+  } catch (err) {
+    return formatError(err, "get_purchase_order");
+  }
+}
+
+export const getPurchaseOrderTool: ToolDefinition = {
+  name: "get_purchase_order",
+  description:
+    "[v1 2026-06-23] Get full detail for a single BuildTools purchase order: vendor (with company_id), project, PO number, line items (with budget category code + names, qty, unit, total, notes), and invoiced/unpaid summary. " +
+    "Use this when you have a PO ID from list_purchase_orders / search_purchase_orders and need the structured company_id for downstream create_purchase_order or invoice flows. Read-only — no confirmation required.",
+  inputSchema: zodToJsonSchema(GetPurchaseOrderInputSchema),
+  permission: "read",
+  handler: getPurchaseOrderHandler,
+};
+
+// ---------------------------------------------------------------------------
 // Exported registry — ORDER MATTERS (criterion 2).
 // ---------------------------------------------------------------------------
 
 export const purchaseOrderTools: ToolDefinition[] = [
   listPurchaseOrdersTool,
   searchPurchaseOrdersTool,
+  getPurchaseOrderTool,
 ];

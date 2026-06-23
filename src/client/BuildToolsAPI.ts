@@ -83,6 +83,38 @@ type PostFieldValue =
 
 export type PostData = Record<string, PostFieldValue>;
 
+/**
+ * Shape returned by `getPurchaseOrder()`. Scalar fields come from the
+ * `<input name="PurchaseOrder[...]">` hidden inputs on the edit form;
+ * `companyId` comes from `<select id="select_company_id">`; `items[]` is
+ * decoded from the hidden `<input name="items">` (JSON, HTML-entity
+ * escaped).
+ */
+export interface PurchaseOrderDetail {
+  id: number;
+  projectId: number | null;
+  name: string;
+  number: string;
+  prefix: string;
+  companyId: number | null;
+  companyName: string;
+  items: Array<{
+    id: number | null;
+    budgetCategoryId: number | null;
+    budgetCategoryCode: string;
+    budgetCategoryName: string;
+    total: string;
+    notes: string;
+    internalNotes: string;
+    invoiceRelated: string;
+    amounts: Array<Record<string, unknown>>;
+    companyId: number | null;
+    companyName: string;
+  }>;
+  /** Sum of line item totals (best-effort; numeric parsed from item.total). */
+  totalNumeric: number;
+}
+
 // ---------------------------------------------------------------------------
 // Budget cell helpers
 // ---------------------------------------------------------------------------
@@ -800,21 +832,56 @@ export class BuildToolsAPI {
   }
 
   /**
-   * Fetches a single customer/company by ID. BuildTools does not expose a JSON
-   * detail endpoint — `/companies/:id/form` returns 404. Instead we pull from
-   * the companies datatable and match by `DT_RowId` client-side (companies use
-   * `row_${id}` format; the raw `id` field is not in the datatable row).
+   * Free-text search across the companies/vendors directory (the same
+   * endpoint that powers the "Add Vendor to PO" picker). Optionally
+   * filtered by role via the DataTables column-search on `type_name`
+   * (column 3 in the live grid). Verified against moss.buildtools.app on
+   * 2026-06-23.
    *
-   * Limitation: requests up to 5000 rows. Moss tenant has ~1100 companies.
+   * Returns the standard datatable envelope `{ recordsTotal,
+   * recordsFiltered, data: Row[] }`. Each row carries the row id in
+   * `DT_RowId` as `row_<id>` (BuildTools companies do not expose a top-
+   * level `id` field on this endpoint — strip the `row_` prefix to get
+   * the numeric id).
    */
-  async getCustomer<T = unknown>(
-    customerId: string | number,
+  async searchCompanies<T = unknown>(
+    query: string,
+    options: {
+      role?: "Vendor" | "Subcontractor" | "Customer";
+      limit?: number;
+    } = {},
   ): Promise<T | null> {
-    const numericId = Number(customerId);
+    const params: Record<string, string | number> = {
+      "search[value]": query,
+      length: options.limit ?? 25,
+    };
+    if (options.role) {
+      // Column 3 in the live grid is `type_name`. Passing
+      // `columns[3][search][value]` exercises the same path BuildTools
+      // uses internally when a user picks a role from the filter dropdown.
+      params["columns[3][search][value]"] = options.role;
+    }
+    return this.datatable<T>("companies", params);
+  }
+
+  /**
+   * Fetches a single row from the `companies` table by ID. BuildTools
+   * doesn't expose `/companies/:id/form` (returns 404), so we pull from
+   * the companies datatable and match by `DT_RowId === "row_<id>"`.
+   * Up to 5000 rows scanned; Moss tenant has ~1100.
+   *
+   * Note: BuildTools stores customers, vendors, and subcontractors in
+   * one `companies` table differentiated by `type_name`. This is the
+   * canonical lookup; `getCustomer` is a legacy alias that delegates
+   * here for the existing `get_customer` tool.
+   */
+  async getCompany<T = unknown>(
+    companyId: string | number,
+  ): Promise<T | null> {
+    const numericId = Number(companyId);
     const result = await this.datatable<{
       data?: Array<Record<string, unknown>>;
     }>("companies", { length: 5000 });
-
     const rows = result?.data ?? [];
     const rowIdKey = `row_${numericId}`;
     const match = rows.find(
@@ -824,6 +891,19 @@ export class BuildToolsAPI {
         r.id === String(numericId),
     );
     return (match as T) ?? null;
+  }
+
+  /**
+   * Legacy alias for `getCompany` — kept so the existing `get_customer`
+   * MCP tool continues to work. BuildTools stores customers, vendors,
+   * and subcontractors in one `companies` table; this method just
+   * forwards to the canonical lookup. New callers should use
+   * `getCompany` directly.
+   */
+  async getCustomer<T = unknown>(
+    customerId: string | number,
+  ): Promise<T | null> {
+    return this.getCompany<T>(customerId);
   }
 
   /**
@@ -2456,6 +2536,147 @@ export class BuildToolsAPI {
       "search[value]": query,
       length: limit,
     });
+  }
+
+  /**
+   * Fetches full detail for a single purchase order by scraping the form
+   * HTML (BuildTools does not expose a JSON detail endpoint). Returns the
+   * scalar fields off the hidden inputs, the company_id off the
+   * `select#select_company_id` widget, and the line items off the hidden
+   * `name="items"` input (JSON-encoded, HTML-entity escaped).
+   *
+   * Returns null on 404 / unparseable response. Items may be empty.
+   */
+  async getPurchaseOrder(
+    purchaseOrderId: string | number,
+  ): Promise<null | PurchaseOrderDetail> {
+    await this.ensureAuthenticated();
+
+    const numId = Number(purchaseOrderId);
+    if (!Number.isFinite(numId)) return null;
+
+    const response = await this.requestWithReauthRetry(
+      `${this.baseUrl}/purchase-orders/form/${numId}`,
+      {
+        headers: { "X-Requested-With": "XMLHttpRequest" },
+      },
+      false,
+    );
+
+    if (response.status !== 200) return null;
+
+    const body = response.body;
+
+    const stripValue = (s: string): string =>
+      s
+        .replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"')
+        .replace(/&#039;/g, "'")
+        .replace(/&apos;/g, "'")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&mdash;/g, "—")
+        .replace(/&ndash;/g, "–")
+        .replace(/&hellip;/g, "…")
+        // Numeric character references (decimal + hex) as a safety net.
+        .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+        .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+
+    const inputValue = (fieldName: string): string => {
+      // Use a lookahead for `name="PurchaseOrder[<field>]"` so we accept
+      // ANY ordering of attributes — Yii/Laravel scaffold sometimes emits
+      // `value=` before `name=` (especially for `type="text"` inputs), and
+      // a literal-order regex silently returns empty without surfacing the
+      // miss. Same defensive shape as the `<option selected>` lookahead
+      // used for the company `<select>` below.
+      const re = new RegExp(
+        `<input(?=[^>]*name="PurchaseOrder\\[${fieldName}\\]")[^>]*value="([^"]*)"`,
+      );
+      const m = body.match(re);
+      return m ? stripValue(m[1]) : "";
+    };
+
+    // Company is rendered as a hidden read-only `<select id="select_company_id">`
+    // alongside an interactive picker (`#companyQuickAdd`). The read-only
+    // select carries the chosen option on the edit form. We extract the
+    // FULL select block first (lazy `</select>` boundary), then read the
+    // option inside it — a single regex with `[\s\S]*?` across the document
+    // would walk into the next `<select>` and pull a `selected` option from
+    // there.
+    const selectBlock = body.match(
+      /<select[^>]*id="select_company_id"[^>]*>([\s\S]*?)<\/select>/,
+    );
+    let companyId: number | null = null;
+    let companyName = "";
+    if (selectBlock) {
+      const inner = selectBlock[1];
+      // BuildTools renders the chosen vendor on the edit form one of two
+      // ways: (a) a disabled read-only `<select>` with only the chosen
+      // option in it (older POs) or (b) the full ~1100-vendor dropdown
+      // with the chosen option carrying a `selected` attribute (newly
+      // created POs). The `selected` attribute can appear before OR after
+      // `value="…"` — use a lookahead so we accept any order, and require
+      // a numeric value to skip the disabled `value=""` placeholder
+      // ("Select or add a Company").
+      const optSelected = inner.match(
+        /<option(?=[^>]*\bselected\b)[^>]*\bvalue="(\d+)"[^>]*>([^<]+)<\/option>/,
+      );
+      const optFirst = inner.match(/<option[^>]*value="(\d+)"[^>]*>([^<]+)<\/option>/);
+      const opt = optSelected ?? optFirst;
+      if (opt) {
+        companyId = Number(opt[1]);
+        companyName = stripValue(opt[2]).trim();
+      }
+    }
+
+    // Hidden items input — JSON array of line items, HTML-entity escaped.
+    const itemsMatch = body.match(/<input[^>]*name="items"[^>]*value="([^"]+)"/);
+    let items: PurchaseOrderDetail["items"] = [];
+    if (itemsMatch) {
+      try {
+        const decoded = stripValue(itemsMatch[1]);
+        const arr = JSON.parse(decoded) as Array<Record<string, unknown>>;
+        items = arr.map((it) => ({
+          id: it.id != null ? Number(it.id) : null,
+          budgetCategoryId:
+            it.budget_category_id != null ? Number(it.budget_category_id) : null,
+          budgetCategoryCode: String(it.code ?? ""),
+          budgetCategoryName: String(it.name ?? ""),
+          total: String(it.total ?? ""),
+          notes: String(it.notes ?? ""),
+          internalNotes: String(it.internal_notes ?? ""),
+          invoiceRelated: String(it.invoice_related ?? ""),
+          amounts: Array.isArray(it.amounts)
+            ? (it.amounts as Array<Record<string, unknown>>)
+            : [],
+          companyId: it.company_id != null ? Number(it.company_id) : null,
+          companyName: String(it.company_name ?? ""),
+        }));
+      } catch {
+        items = [];
+      }
+    }
+
+    const projectIdStr = inputValue("project_id");
+    const projectId = projectIdStr ? Number(projectIdStr) : null;
+
+    const totalNumeric = items.reduce(
+      (acc, it) => acc + (Number(it.total) || 0),
+      0,
+    );
+
+    return {
+      id: numId,
+      projectId: Number.isFinite(projectId as number) ? projectId : null,
+      name: inputValue("name"),
+      number: inputValue("number"),
+      prefix: inputValue("prefix"),
+      companyId,
+      companyName,
+      items,
+      totalNumeric,
+    };
   }
 
   /** Source L484–521. */

@@ -26,6 +26,7 @@ import {
 } from "../../client/errors.js";
 
 import {
+  getPurchaseOrderTool,
   listPurchaseOrdersTool,
   purchaseOrderTools,
   searchPurchaseOrdersTool,
@@ -44,6 +45,7 @@ import { type ToolResult } from "../projects.js";
 function fakeApi(overrides: {
   getPurchaseOrders?: BuildToolsAPI["getPurchaseOrders"];
   searchPurchaseOrders?: BuildToolsAPI["searchPurchaseOrders"];
+  getPurchaseOrder?: BuildToolsAPI["getPurchaseOrder"];
 }): BuildToolsAPI {
   return overrides as unknown as BuildToolsAPI;
 }
@@ -106,9 +108,13 @@ const sampleDraftPurchaseOrderRow = {
 // ---------------------------------------------------------------------------
 
 describe("purchaseOrderTools registry", () => {
-  it("exports exactly two tools with the contract-mandated names in order", () => {
+  it("exports the contract-mandated tools in order", () => {
     const names = purchaseOrderTools.map((t) => t.name);
-    expect(names).toEqual(["list_purchase_orders", "search_purchase_orders"]);
+    expect(names).toEqual([
+      "list_purchase_orders",
+      "search_purchase_orders",
+      "get_purchase_order",
+    ]);
   });
 
   it("each tool exposes a JSON Schema for its input", () => {
@@ -365,5 +371,78 @@ describe("search_purchase_orders", () => {
     const result = await searchPurchaseOrdersTool.handler({}, fakeApi({}));
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("query");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// get_purchase_order
+// ---------------------------------------------------------------------------
+
+describe("get_purchase_order", () => {
+  it("renders vendor (with id) + line items + invoiced/unpaid summary", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue({
+      id: 39741,
+      projectId: 185936,
+      name: "Roof repair for remote blower",
+      number: "333123304",
+      prefix: "PO",
+      companyId: 62,
+      companyName: "Charles Home",
+      items: [
+        {
+          id: 45824,
+          budgetCategoryId: 1609,
+          budgetCategoryCode: "3510",
+          budgetCategoryName: "Roofing Sub",
+          total: "300.00",
+          notes: "",
+          internalNotes: "",
+          invoiceRelated: "0.00",
+          amounts: [{ a: "300", q: "1", d: "Roof repair", u: "1" }],
+          companyId: 62,
+          companyName: "Charles Home",
+        },
+      ],
+      totalNumeric: 300,
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as BuildToolsAPI["getPurchaseOrder"],
+    });
+
+    const result = await getPurchaseOrderTool.handler(
+      { purchase_order_id: 39741 },
+      api,
+    );
+    expect(result.isError).toBeFalsy();
+    const text = textOf(result);
+    expect(text).toContain("## Purchase Order #39741 — Roof repair for remote blower (project #185936)");
+    expect(text).toContain("**PO number**: PO 333123304");
+    expect(text).toContain("**Vendor**: Charles Home (company #62)");
+    expect(text).toContain("**Total** (sum of items): $300.00");
+    expect(text).toContain("**Invoiced**: $0.00 — **unpaid**: $300.00");
+    expect(text).toContain("| 1 | 3510 | Roofing Sub | 1 | 300 | $300.00 |");
+  });
+
+  it("handles 'PO not found' cleanly", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue(null);
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as BuildToolsAPI["getPurchaseOrder"],
+    });
+    const result = await getPurchaseOrderTool.handler(
+      { purchase_order_id: 99999 },
+      api,
+    );
+    expect(textOf(result)).toContain(
+      "No detail found for purchase order #99999",
+    );
+  });
+
+  it("rejects non-number input via Zod", async () => {
+    const result = await getPurchaseOrderTool.handler(
+      { purchase_order_id: "not-a-number" } as unknown as Record<string, unknown>,
+      fakeApi({}),
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Invalid input for `get_purchase_order`");
   });
 });
