@@ -47,8 +47,15 @@ export {
 export {
   listPurchaseOrdersTool,
   searchPurchaseOrdersTool,
+  getPurchaseOrderTool,
   purchaseOrderTools,
 } from "./purchase-orders.js";
+
+export {
+  searchCompaniesTool,
+  getCompanyTool,
+  companyTools,
+} from "./companies.js";
 
 export {
   listCertificatesTool,

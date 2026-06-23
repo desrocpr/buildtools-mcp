@@ -50,6 +50,7 @@ import { ConfirmationStore } from "../confirm/index.js";
 import {
   attachmentTools,
   budgetTools,
+  companyTools,
   createMutationTools,
   createSessionCredentialsTool,
   customerTools,
@@ -187,6 +188,7 @@ function buildPerSessionServer(opts: {
     ...attachmentTools.map((t) => [t.name, t] as const),
     ...taskTools.map((t) => [t.name, t] as const),
     ...purchaseOrderTools.map((t) => [t.name, t] as const),
+    ...companyTools.map((t) => [t.name, t] as const),
     ...workTrackingTools.map((t) => [t.name, t] as const),
     ...operationTools.map((t) => [t.name, t] as const),
     ...selectionTools.map((t) => [t.name, t] as const),
