@@ -2744,6 +2744,258 @@ export class BuildToolsAPI {
     }
   }
 
+  /**
+   * Updates an existing purchase order.
+   *
+   * POST /purchase-orders/save/<purchaseOrderId>
+   *
+   * Required payload shape (verified live 2026-06-23 on moss tenant):
+   *   - `_token` — CSRF harvested from the edit form
+   *   - `PurchaseOrder[project_id]`, `PurchaseOrder[company_id]`,
+   *     `PurchaseOrder[prefix]`, `PurchaseOrder[status]`,
+   *     `PurchaseOrder[name]` — all need to be re-submitted; BuildTools
+   *     doesn't merge partial payloads, so we fetch current values from
+   *     the form first and overlay updates on top
+   *   - `items` (bare, NOT `PurchaseOrderItems[items]`) — JSON-encoded
+   *     ARRAY (not `{items:[...]}` wrapper). Each item needs the full
+   *     shape: `{ id, budget_category_id, name, code, amounts[], total,
+   *     notes, internal_notes, company_id, company_name, invoice_related }`.
+   *     Missing fields silently drop the line item.
+   *
+   * The caller passes a minimal shape and this method enriches:
+   *   - budget category `name`/`code` looked up via `getBudget(projectId)`
+   *   - line-level `company_id`/`company_name` default to the parent PO's
+   *
+   * `items` semantics:
+   *   - `undefined` → leave the existing items untouched
+   *   - `[]` → clear ALL items (replace with empty)
+   *   - `[…]` → REPLACE all items with the provided list (no partial diff)
+   *
+   * Returns `{ success, purchaseOrderId, message }` on 200/success,
+   * `{ success: false, errors }` otherwise. Does NOT throw on a 500;
+   * BuildTools' save endpoint occasionally returns 500 even when the
+   * scalar fields persisted (only items failed) — the caller should
+   * re-fetch via `getPurchaseOrder` to verify.
+   */
+  async updatePurchaseOrder(poData: {
+    purchaseOrderId: string | number;
+    name?: string;
+    prefix?: string;
+    status?: string | number;
+    notes?: string;
+    description?: string;
+    companyId?: string | number;
+    items?: Array<{
+      budgetCategoryId: string | number;
+      description: string;
+      total: number | string;
+      quantity?: number | string;
+      unit?: string;
+      notes?: string;
+      internalNotes?: string;
+      companyId?: string | number;
+    }>;
+  }): Promise<{
+    success: boolean;
+    purchaseOrderId?: string | number;
+    message?: unknown;
+    errors?: unknown;
+  }> {
+    await this.ensureAuthenticated();
+
+    const poId = Number(poData.purchaseOrderId);
+    if (!Number.isFinite(poId)) {
+      return { success: false, errors: "purchase_order_id is not a number" };
+    }
+
+    // Step 1 — fetch the form HTML to: (a) harvest CSRF, (b) snapshot
+    // current scalar values for fields the caller isn't updating, and
+    // (c) get the parent project_id (so we know which budget to look up
+    // categories from).
+    const formResp = await this.requestWithReauthRetry(
+      `${this.baseUrl}/purchase-orders/form/${poId}`,
+      { headers: { "X-Requested-With": "XMLHttpRequest" } },
+      false,
+    );
+    if (formResp.status !== 200) {
+      return {
+        success: false,
+        errors: `Could not fetch PO form (status ${formResp.status})`,
+      };
+    }
+
+    const formBody = formResp.body;
+    const csrf = formBody.match(/name="_token"[^>]*value="([^"]+)"/)?.[1];
+    if (!csrf) {
+      return { success: false, errors: "Could not harvest CSRF _token from PO form" };
+    }
+
+    const readInput = (field: string): string => {
+      const re = new RegExp(
+        `<input(?=[^>]*name="PurchaseOrder\\[${field}\\]")[^>]*value="([^"]*)"`,
+      );
+      return formBody.match(re)?.[1] ?? "";
+    };
+    const decodeHtmlEntities = (s: string): string =>
+      s
+        .replace(/&amp;/g, "&")
+        .replace(/&quot;/g, '"')
+        .replace(/&#039;/g, "'")
+        .replace(/&apos;/g, "'")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&mdash;/g, "—")
+        .replace(/&ndash;/g, "–")
+        .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+        .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+
+    // Snapshot current scalar state — re-submitted unless overridden.
+    const currentProjectId = readInput("project_id");
+    const currentPrefix = readInput("prefix") || "PO";
+    const currentNumber = readInput("number");
+    const currentName = decodeHtmlEntities(readInput("name"));
+    // Company: read from the same `<select id="select_company_id">` block
+    // the parser uses (selected attribute may precede or follow value=).
+    const selectBlock = formBody.match(
+      /<select[^>]*id="select_company_id"[^>]*>([\s\S]*?)<\/select>/,
+    );
+    let currentCompanyId = "";
+    if (selectBlock) {
+      const inner = selectBlock[1];
+      const opt =
+        inner.match(
+          /<option(?=[^>]*\bselected\b)[^>]*\bvalue="(\d+)"[^>]*>([^<]+)<\/option>/,
+        ) ?? inner.match(/<option[^>]*value="(\d+)"[^>]*>([^<]+)<\/option>/);
+      if (opt) currentCompanyId = opt[1];
+    }
+    // Items: snapshot the existing items JSON so we can pass through
+    // unchanged when caller omits `items`.
+    const itemsInput = formBody.match(
+      /<input[^>]*name="items"[^>]*value="([^"]+)"/,
+    );
+    const currentItemsJson = itemsInput ? decodeHtmlEntities(itemsInput[1]) : "[]";
+
+    // Step 2 — enrich the caller's items with budget category metadata.
+    // Only triggered when items[] was actually passed (vs left undefined).
+    let itemsJson = currentItemsJson;
+    if (poData.items !== undefined) {
+      const projectIdForBudget =
+        Number(currentProjectId) ||
+        (poData.companyId !== undefined ? null : null);
+      const budgetItems = projectIdForBudget
+        ? (await this.getBudget(projectIdForBudget)).items
+        : [];
+      // Map budget_category_id → { code, name } parsed from the budget
+      // grid's combined "3510 - Roofing Sub" display name.
+      const categoryLookup = new Map<string, { code: string; name: string }>();
+      for (const bi of budgetItems) {
+        const display = bi.name;
+        const dash = display.indexOf(" - ");
+        if (dash > 0) {
+          categoryLookup.set(bi.categoryId, {
+            code: display.slice(0, dash).trim(),
+            name: display.slice(dash + 3).trim(),
+          });
+        } else {
+          categoryLookup.set(bi.categoryId, { code: "", name: display });
+        }
+      }
+
+      const fallbackCompanyId =
+        poData.companyId !== undefined
+          ? String(poData.companyId)
+          : currentCompanyId;
+
+      const enriched = poData.items.map((it) => {
+        const catId = String(it.budgetCategoryId);
+        const cat = categoryLookup.get(catId);
+        const qty = Number(it.quantity ?? 1) || 1;
+        const totalNum = Number(it.total) || 0;
+        const unitPrice = qty > 0 ? (totalNum / qty).toFixed(2) : String(totalNum);
+        return {
+          id: null,
+          budget_category_id: Number(it.budgetCategoryId),
+          name: cat?.name ?? "Unknown",
+          code: cat?.code ?? "",
+          amounts: [
+            {
+              a: unitPrice,
+              q: String(qty),
+              d: it.description,
+              u: it.unit ?? "1",
+            },
+          ],
+          total: totalNum.toFixed(2),
+          notes: it.notes ?? "",
+          internal_notes: it.internalNotes ?? "",
+          company_id: Number(it.companyId ?? fallbackCompanyId) || 0,
+          company_name: "",
+          invoice_related: "0.00",
+        };
+      });
+      itemsJson = JSON.stringify(enriched);
+    }
+
+    // Step 3 — build the save payload. Re-submit current values for every
+    // scalar; overlay updates from poData.
+    const form = new URLSearchParams();
+    form.append("_token", csrf);
+    form.append("PurchaseOrder[project_id]", currentProjectId);
+    form.append(
+      "PurchaseOrder[company_id]",
+      String(poData.companyId ?? currentCompanyId),
+    );
+    form.append("PurchaseOrder[prefix]", String(poData.prefix ?? currentPrefix));
+    form.append("PurchaseOrder[number]", currentNumber);
+    form.append("PurchaseOrder[name]", poData.name ?? currentName);
+    form.append("PurchaseOrder[status]", String(poData.status ?? "1"));
+    if (poData.notes !== undefined) {
+      form.append("PurchaseOrder[notes]", poData.notes);
+    }
+    if (poData.description !== undefined) {
+      form.append("PurchaseOrder[description]", poData.description);
+    }
+    form.append("items", itemsJson);
+
+    // Step 4 — POST and parse.
+    const response = await this.request(
+      `${this.baseUrl}/purchase-orders/save/${poId}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-Requested-With": "XMLHttpRequest",
+          Accept: "application/json",
+          ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+        },
+        body: form.toString(),
+      },
+      false,
+    );
+
+    try {
+      const result = JSON.parse(response.body) as {
+        result?: string;
+        id?: string | number;
+        message?: unknown;
+      };
+      if (result?.result === "success") {
+        return {
+          success: true,
+          purchaseOrderId: result.id ?? poId,
+          message: result.message,
+        };
+      }
+      return { success: false, errors: result?.message ?? response.body.slice(0, 200) };
+    } catch {
+      return {
+        success: false,
+        errors: `Server error (HTTP ${response.status})`,
+      };
+    }
+  }
+
   // ========================================================================
   // TASK METHODS
   // ========================================================================

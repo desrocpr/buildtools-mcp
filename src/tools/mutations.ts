@@ -142,6 +142,53 @@ const CreatePurchaseOrderSchema = z
   });
 type CreatePurchaseOrderArgs = z.infer<typeof CreatePurchaseOrderSchema>;
 
+const UpdatePurchaseOrderItemSchema = z.object({
+  budget_category_id: z
+    .number()
+    .describe(
+      "Budget category ID (from `list_budget` on the parent project). Required per line; BuildTools rejects items without one.",
+    ),
+  description: z
+    .string()
+    .describe("Line description shown to the vendor (e.g. 'Plumbing rough-in')."),
+  total: z.number().describe("Line total in dollars."),
+  quantity: z.number().optional().describe("Default 1."),
+  unit: z.string().optional().describe("Default '1' (BuildTools' unit code; rarely changed)."),
+  notes: z.string().optional(),
+  company_id: z
+    .number()
+    .optional()
+    .describe(
+      "Per-line vendor override. Defaults to the parent PO's company_id; most callers omit.",
+    ),
+});
+
+const UpdatePurchaseOrderSchema = z.object({
+  purchase_order_id: z.number().describe("BuildTools purchase order ID."),
+  name: z.string().optional().describe("New PO name."),
+  prefix: z.string().optional().describe("PO number prefix. Usually 'PO'."),
+  notes: z.string().optional(),
+  description: z.string().optional(),
+  company_id: z
+    .number()
+    .optional()
+    .describe("Change the PO's vendor (use search_companies / get_company to look up IDs)."),
+  status: z
+    .number()
+    .optional()
+    .describe(
+      "Status code. 1=Draft (default if omitted on first save), 2=Pending, 3=Approved, 4=Rejected.",
+    ),
+  items: z
+    .array(UpdatePurchaseOrderItemSchema)
+    .optional()
+    .describe(
+      "Full replacement for the line items. OMIT to preserve existing items. Pass `[]` to clear all items. Each item must include `budget_category_id` (from `list_budget`).",
+    ),
+  confirmation_id: z.string().optional(),
+});
+type UpdatePurchaseOrderArgs = z.infer<typeof UpdatePurchaseOrderSchema>;
+
 const CreateTaskSchema = z.object({
   name: z.string().describe("Task name."),
   project_id: z.number().describe("BuildTools project ID."),
@@ -309,6 +356,58 @@ export function createMutationTools(
         if (result.success) return markdown(`Purchase order **#${result.purchaseOrderId}** created. ${result.message ?? ""}`);
         return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
       } catch (err) { return formatError(err, "create_purchase_order"); }
+    },
+  );
+
+  // -- update_purchase_order ------------------------------------------------
+  const updatePOConfirmed = requiresConfirmation<UpdatePurchaseOrderArgs>(
+    "update_purchase_order",
+    (a) => {
+      const safeName = escapeMarkdownInline(a.name ?? "");
+      const parts: string[] = [];
+      if (a.name !== undefined) parts.push(`rename to **"${safeName}"**`);
+      if (a.company_id !== undefined) parts.push(`change vendor → #${a.company_id}`);
+      if (a.status !== undefined) parts.push(`status → ${a.status}`);
+      if (a.notes !== undefined) parts.push("update notes");
+      if (a.description !== undefined) parts.push("update description");
+      if (a.prefix !== undefined) parts.push(`prefix → "${escapeMarkdownInline(a.prefix)}"`);
+      if (a.items !== undefined) {
+        parts.push(
+          a.items.length === 0
+            ? "**clear all line items**"
+            : `replace items (${a.items.length} line${a.items.length === 1 ? "" : "s"}, $${a.items.reduce((s, i) => s + i.total, 0).toFixed(2)} total)`,
+        );
+      }
+      const summary = parts.length > 0 ? parts.join("; ") : "_(no changes specified)_";
+      return `Update purchase order #${a.purchase_order_id}: ${summary}.`;
+    },
+    async (a) => {
+      try {
+        const result = await getApi().updatePurchaseOrder({
+          purchaseOrderId: a.purchase_order_id,
+          name: a.name,
+          prefix: a.prefix,
+          notes: a.notes,
+          description: a.description,
+          companyId: a.company_id,
+          status: a.status,
+          items: a.items?.map((i) => ({
+            budgetCategoryId: i.budget_category_id,
+            description: i.description,
+            total: i.total,
+            quantity: i.quantity,
+            unit: i.unit,
+            notes: i.notes,
+            companyId: i.company_id,
+          })),
+        });
+        if (result.success) {
+          return markdown(
+            `Purchase order **#${result.purchaseOrderId}** updated. ${result.message ?? ""}`,
+          );
+        }
+        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+      } catch (err) { return formatError(err, "update_purchase_order"); }
     },
   );
 
@@ -789,6 +888,16 @@ export function createMutationTools(
         );
       },
     },
+    makeTool(
+      "update_purchase_order",
+      "[v1 2026-06-23] Update an existing purchase order — rename, change vendor, status, notes, description, or REPLACE line items. " +
+        "Items[] omitted preserves existing; `[]` clears all; otherwise fully replaces (no partial diff). " +
+        "Each item requires `budget_category_id` (use `list_budget` to find IDs on the parent project). " +
+        "Requires confirmation.",
+      UpdatePurchaseOrderSchema,
+      updatePOConfirmed,
+      "write:financial",
+    ),
     makeTool(
       "create_task",
       "Create a task on a project. Requires confirmation. Status: 1=Open, 2=In Progress, 3=Complete.",
