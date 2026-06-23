@@ -31,6 +31,7 @@ interface FakeApiOverrides {
   searchCompanies?: BuildToolsAPI["searchCompanies"];
   createPurchaseOrder?: BuildToolsAPI["createPurchaseOrder"];
   updatePurchaseOrder?: BuildToolsAPI["updatePurchaseOrder"];
+  getCompany?: BuildToolsAPI["getCompany"];
 }
 
 function fakeApi(overrides: FakeApiOverrides = {}): BuildToolsAPI {
@@ -333,15 +334,77 @@ describe("update_purchase_order", () => {
   });
 
   it("name-only update produces a focused prompt (no items mention)", async () => {
-    const tool = findUpdatePoTool(fakeApi(), mkStore());
+    const api = fakeApi();
+    const tool = findUpdatePoTool(api, mkStore());
     const result = await tool.handler(
       { purchase_order_id: 39752, name: "just rename" },
-      tool as unknown as BuildToolsAPI, // not used; tool reads via closure
+      api,
     );
     const text = textOf(result);
     expect(text).toContain('rename to **"just rename"**');
     expect(text).not.toContain("items");
     expect(text).not.toContain("vendor");
+  });
+
+  it("changing company_id resolves the vendor name for the confirmation prompt", async () => {
+    const getCompany = vi.fn().mockResolvedValue({
+      DT_RowId: "row_977",
+      name: "Kai Muten, LLC",
+    });
+    const updatePurchaseOrder = vi.fn();
+    const api = fakeApi({
+      getCompany: getCompany as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+
+    const result = await tool.handler(
+      { purchase_order_id: 39752, company_id: 977 },
+      api,
+    );
+    const text = textOf(result);
+    // The prompt shows both the numeric id AND the resolved name so the
+    // user can verify the right vendor before confirming.
+    expect(text).toContain("change vendor → #977 (Kai Muten, LLC)");
+    // Lookup hit exactly once (only on the FIRST call — second call
+    // replays the stored args with the name already cached).
+    expect(getCompany).toHaveBeenCalledTimes(1);
+    expect(getCompany).toHaveBeenCalledWith(977);
+  });
+
+  it("vendor name lookup failure degrades gracefully to id-only", async () => {
+    const getCompany = vi.fn().mockRejectedValue(new Error("BT down"));
+    const api = fakeApi({ getCompany: getCompany as any });
+    const tool = findUpdatePoTool(api, mkStore());
+
+    const result = await tool.handler(
+      { purchase_order_id: 39752, company_id: 4271 },
+      api,
+    );
+    const text = textOf(result);
+    expect(text).toContain("change vendor → #4271");
+    expect(text).not.toContain("(");  // no "(Vendor Name)" suffix when lookup failed
+  });
+
+  it("vendor lookup is skipped on the confirmation (second) call", async () => {
+    const getCompany = vi.fn().mockResolvedValue({ name: "Vendor X" });
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const api = fakeApi({
+      getCompany: getCompany as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+
+    const args = { purchase_order_id: 39752, company_id: 1234 };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+
+    // Second call MUST NOT do another vendor lookup — the resolved name
+    // is already in the stored args from the first call.
+    await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+    expect(getCompany).toHaveBeenCalledTimes(1);
   });
 
   it("second call (with confirmation_id) invokes updatePurchaseOrder and renders success", async () => {

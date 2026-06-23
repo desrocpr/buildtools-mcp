@@ -167,8 +167,12 @@ const UpdatePurchaseOrderSchema = z.object({
   purchase_order_id: z.number().describe("BuildTools purchase order ID."),
   name: z.string().optional().describe("New PO name."),
   prefix: z.string().optional().describe("PO number prefix. Usually 'PO'."),
-  notes: z.string().optional(),
-  description: z.string().optional(),
+  description: z
+    .string()
+    .optional()
+    .describe(
+      "PO description body (the main rich-text block shown on the printed PO). Note: BuildTools' PO model has no `notes` field — use `description` for PO-level prose. Line-level notes go on each item.",
+    ),
   company_id: z
     .number()
     .optional()
@@ -177,7 +181,7 @@ const UpdatePurchaseOrderSchema = z.object({
     .number()
     .optional()
     .describe(
-      "Status code. 1=Draft (default if omitted on first save), 2=Pending, 3=Approved, 4=Rejected.",
+      "Status code. 1=Draft, 2=Sent, 3=Confirmed, 4=Rejected. Omit to preserve the current status — BuildTools doesn't merge partial payloads so omitting + not echoing back would reset it.",
     ),
   items: z
     .array(UpdatePurchaseOrderItemSchema)
@@ -360,15 +364,28 @@ export function createMutationTools(
   );
 
   // -- update_purchase_order ------------------------------------------------
-  const updatePOConfirmed = requiresConfirmation<UpdatePurchaseOrderArgs>(
+  // Internal args shape: extends the public schema with an optional
+  // resolved vendor name. When the caller changes `company_id`, we look
+  // up the vendor name once before the confirmation prompt fires so the
+  // user can see WHICH vendor they're switching to (rather than just a
+  // raw numeric id). The lookup happens in the outer handler, not the
+  // confirmed executor.
+  type UpdatePOInternalArgs = UpdatePurchaseOrderArgs & {
+    _resolved_company_name?: string;
+  };
+  const updatePOConfirmed = requiresConfirmation<UpdatePOInternalArgs>(
     "update_purchase_order",
     (a) => {
       const safeName = escapeMarkdownInline(a.name ?? "");
       const parts: string[] = [];
       if (a.name !== undefined) parts.push(`rename to **"${safeName}"**`);
-      if (a.company_id !== undefined) parts.push(`change vendor → #${a.company_id}`);
+      if (a.company_id !== undefined) {
+        const vendorLabel = a._resolved_company_name
+          ? `#${a.company_id} (${escapeMarkdownInline(a._resolved_company_name)})`
+          : `#${a.company_id}`;
+        parts.push(`change vendor → ${vendorLabel}`);
+      }
       if (a.status !== undefined) parts.push(`status → ${a.status}`);
-      if (a.notes !== undefined) parts.push("update notes");
       if (a.description !== undefined) parts.push("update description");
       if (a.prefix !== undefined) parts.push(`prefix → "${escapeMarkdownInline(a.prefix)}"`);
       if (a.items !== undefined) {
@@ -387,7 +404,6 @@ export function createMutationTools(
           purchaseOrderId: a.purchase_order_id,
           name: a.name,
           prefix: a.prefix,
-          notes: a.notes,
           description: a.description,
           companyId: a.company_id,
           status: a.status,
@@ -410,6 +426,21 @@ export function createMutationTools(
       } catch (err) { return formatError(err, "update_purchase_order"); }
     },
   );
+
+  /**
+   * Best-effort vendor-name lookup for the confirmation prompt. Returns
+   * the company's name on success, or undefined if the lookup fails —
+   * the prompt then falls back to showing just the numeric id. We never
+   * fail the call over this; it's a UX polish, not a correctness gate.
+   */
+  async function lookupCompanyName(id: number): Promise<string | undefined> {
+    try {
+      const row = (await getApi().getCompany<{ name?: string }>(id)) ?? undefined;
+      return row?.name?.replace(/<[^>]*>/g, "").trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  }
 
   /**
    * Resolve `company_name` to a numeric `company_id` via the same
@@ -888,16 +919,46 @@ export function createMutationTools(
         );
       },
     },
-    makeTool(
-      "update_purchase_order",
-      "[v1 2026-06-23] Update an existing purchase order — rename, change vendor, status, notes, description, or REPLACE line items. " +
+    // update_purchase_order — custom wrapper (not makeTool) so the
+    // confirmation prompt can show the resolved vendor name when
+    // company_id is being changed. Without this lookup the user sees
+    // only a raw numeric id ("change vendor → #4271") with no way to
+    // verify they picked the right vendor.
+    {
+      name: "update_purchase_order",
+      description:
+        "[v1 2026-06-23] Update an existing purchase order — rename, change vendor, status, description, or REPLACE line items. " +
         "Items[] omitted preserves existing; `[]` clears all; otherwise fully replaces (no partial diff). " +
         "Each item requires `budget_category_id` (use `list_budget` to find IDs on the parent project). " +
+        "Status omitted preserves current — BuildTools doesn't merge partial payloads so omitting + not echoing back would reset it. " +
         "Requires confirmation.",
-      UpdatePurchaseOrderSchema,
-      updatePOConfirmed,
-      "write:financial",
-    ),
+      inputSchema: zodToJsonSchema(UpdatePurchaseOrderSchema),
+      permission: "write:financial",
+      handler: async (rawArgs: unknown, _api: BuildToolsAPI) => {
+        const parsed = UpdatePurchaseOrderSchema.safeParse(rawArgs ?? {});
+        if (!parsed.success) return formatZodError(parsed.error, "update_purchase_order");
+        const data = parsed.data;
+
+        // If the caller is changing the vendor AND hasn't already gone
+        // through the confirmation handshake (i.e. first call), resolve
+        // the company name so the prompt shows it. Skip the lookup on
+        // the second call — the args replayed by the framework already
+        // carry the resolved name.
+        let resolvedCompanyName: string | undefined;
+        if (data.company_id !== undefined && !data.confirmation_id) {
+          resolvedCompanyName = await lookupCompanyName(data.company_id);
+        }
+
+        return updatePOConfirmed(
+          {
+            ...data,
+            _resolved_company_name: resolvedCompanyName,
+          },
+          store,
+          sessionId,
+        );
+      },
+    },
     makeTool(
       "create_task",
       "Create a task on a project. Requires confirmation. Status: 1=Open, 2=In Progress, 3=Complete.",

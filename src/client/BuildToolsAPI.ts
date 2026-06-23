@@ -84,6 +84,28 @@ type PostFieldValue =
 export type PostData = Record<string, PostFieldValue>;
 
 /**
+ * Decode the common HTML entities BuildTools emits on form inputs.
+ * Shared by every form-HTML parser (selection name, PO name, etc.) —
+ * keep the entity list in one place so a gap (`&hellip;`!) caught for
+ * one parser benefits them all.
+ */
+function decodeFormEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&mdash;/g, "—")
+    .replace(/&ndash;/g, "–")
+    .replace(/&hellip;/g, "…")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+}
+
+/**
  * Shape returned by `getPurchaseOrder()`. Scalar fields come from the
  * `<input name="PurchaseOrder[...]">` hidden inputs on the edit form;
  * `companyId` comes from `<select id="select_company_id">`; `items[]` is
@@ -2567,21 +2589,7 @@ export class BuildToolsAPI {
 
     const body = response.body;
 
-    const stripValue = (s: string): string =>
-      s
-        .replace(/&amp;/g, "&")
-        .replace(/&quot;/g, '"')
-        .replace(/&#039;/g, "'")
-        .replace(/&apos;/g, "'")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&nbsp;/g, " ")
-        .replace(/&mdash;/g, "—")
-        .replace(/&ndash;/g, "–")
-        .replace(/&hellip;/g, "…")
-        // Numeric character references (decimal + hex) as a safety net.
-        .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-        .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+    const stripValue = decodeFormEntities;
 
     const inputValue = (fieldName: string): string => {
       // Use a lookahead for `name="PurchaseOrder[<field>]"` so we accept
@@ -2782,7 +2790,6 @@ export class BuildToolsAPI {
     name?: string;
     prefix?: string;
     status?: string | number;
-    notes?: string;
     description?: string;
     companyId?: string | number;
     items?: Array<{
@@ -2836,27 +2843,46 @@ export class BuildToolsAPI {
       );
       return formBody.match(re)?.[1] ?? "";
     };
-    const decodeHtmlEntities = (s: string): string =>
-      s
-        .replace(/&amp;/g, "&")
-        .replace(/&quot;/g, '"')
-        .replace(/&#039;/g, "'")
-        .replace(/&apos;/g, "'")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&nbsp;/g, " ")
-        .replace(/&mdash;/g, "—")
-        .replace(/&ndash;/g, "–")
-        .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
-        .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+
+    /** Read the selected `<option value="N">` from `<select name="PurchaseOrder[<field>]">`. */
+    const readSelectedOption = (field: string): string => {
+      const block = formBody.match(
+        new RegExp(
+          `<select[^>]*name="PurchaseOrder\\[${field}\\]"[^>]*>([\\s\\S]*?)<\\/select>`,
+        ),
+      );
+      if (!block) return "";
+      const opt =
+        block[1].match(
+          /<option(?=[^>]*\bselected\b)[^>]*\bvalue="([^"]+)"/,
+        ) ?? block[1].match(/<option[^>]*\bvalue="([^"]+)"[^>]*\bselected\b/);
+      return opt?.[1] ?? "";
+    };
+
+    /** Read the inner text of `<textarea name="PurchaseOrder[<field>]">`. */
+    const readTextarea = (field: string): string => {
+      const m = formBody.match(
+        new RegExp(
+          `<textarea[^>]*name="PurchaseOrder\\[${field}\\]"[^>]*>([\\s\\S]*?)<\\/textarea>`,
+        ),
+      );
+      return m ? decodeFormEntities(m[1]) : "";
+    };
 
     // Snapshot current scalar state — re-submitted unless overridden.
+    // BuildTools does NOT merge partial payloads: every field omitted from
+    // the POST is interpreted as cleared/reset. Status especially: a missing
+    // status silently downgrades the PO to whatever default Yii picks
+    // (often "1" / Draft) — so we must echo the current value back when
+    // the caller didn't specify one.
     const currentProjectId = readInput("project_id");
     const currentPrefix = readInput("prefix") || "PO";
     const currentNumber = readInput("number");
-    const currentName = decodeHtmlEntities(readInput("name"));
-    // Company: read from the same `<select id="select_company_id">` block
-    // the parser uses (selected attribute may precede or follow value=).
+    const currentName = decodeFormEntities(readInput("name"));
+    const currentStatus = readSelectedOption("status") || "1";
+    const currentDescription = readTextarea("description");
+    // Company: same `<select id="select_company_id">` block the parser
+    // uses (selected attribute may precede or follow `value=`).
     const selectBlock = formBody.match(
       /<select[^>]*id="select_company_id"[^>]*>([\s\S]*?)<\/select>/,
     );
@@ -2874,18 +2900,25 @@ export class BuildToolsAPI {
     const itemsInput = formBody.match(
       /<input[^>]*name="items"[^>]*value="([^"]+)"/,
     );
-    const currentItemsJson = itemsInput ? decodeHtmlEntities(itemsInput[1]) : "[]";
+    const currentItemsJson = itemsInput ? decodeFormEntities(itemsInput[1]) : "[]";
 
     // Step 2 — enrich the caller's items with budget category metadata.
     // Only triggered when items[] was actually passed (vs left undefined).
     let itemsJson = currentItemsJson;
-    if (poData.items !== undefined) {
-      const projectIdForBudget =
-        Number(currentProjectId) ||
-        (poData.companyId !== undefined ? null : null);
-      const budgetItems = projectIdForBudget
-        ? (await this.getBudget(projectIdForBudget)).items
-        : [];
+    if (poData.items !== undefined && poData.items.length > 0) {
+      const projectIdForBudget = Number(currentProjectId);
+      if (!Number.isFinite(projectIdForBudget) || projectIdForBudget === 0) {
+        // Without a project_id we can't look up budget categories, and
+        // items posted with name="Unknown"/code="" silently corrupt the
+        // line. Fail loudly so the caller knows the form parse drifted.
+        return {
+          success: false,
+          errors:
+            "Could not extract project_id from PO form HTML — cannot enrich items with budget category names. " +
+            "This usually means the BuildTools form template changed; re-run get_purchase_order to verify the PO exists.",
+        };
+      }
+      const budgetItems = (await this.getBudget(projectIdForBudget)).items;
       // Map budget_category_id → { code, name } parsed from the budget
       // grid's combined "3510 - Roofing Sub" display name.
       const categoryLookup = new Map<string, { code: string; name: string }>();
@@ -2907,12 +2940,26 @@ export class BuildToolsAPI {
           ? String(poData.companyId)
           : currentCompanyId;
 
+      // Reject items whose budget_category_id isn't on the project — these
+      // would post with `name: "Unknown"` and silently corrupt the line.
+      const missingCats: string[] = [];
       const enriched = poData.items.map((it) => {
         const catId = String(it.budgetCategoryId);
         const cat = categoryLookup.get(catId);
-        const qty = Number(it.quantity ?? 1) || 1;
+        if (!cat) missingCats.push(catId);
+        // The single-amount path: qty defaults to 1, so unit price === total
+        // for the common case. We use total directly when qty===1 to avoid
+        // floating-point drift (`400 / 3 === 133.333…` rounds to 133.33 and
+        // amounts[0].a * q ≠ total). For qty>1 the rounded unit price IS
+        // what BuildTools' UI does, so we match.
+        const qty = Number(it.quantity ?? 1);
         const totalNum = Number(it.total) || 0;
-        const unitPrice = qty > 0 ? (totalNum / qty).toFixed(2) : String(totalNum);
+        const unitPrice =
+          qty === 1
+            ? totalNum.toFixed(2)
+            : qty > 1
+              ? (totalNum / qty).toFixed(2)
+              : totalNum.toFixed(2);
         return {
           id: null,
           budget_category_id: Number(it.budgetCategoryId),
@@ -2921,7 +2968,7 @@ export class BuildToolsAPI {
           amounts: [
             {
               a: unitPrice,
-              q: String(qty),
+              q: String(qty || 1),
               d: it.description,
               u: it.unit ?? "1",
             },
@@ -2934,7 +2981,19 @@ export class BuildToolsAPI {
           invoice_related: "0.00",
         };
       });
+      if (missingCats.length > 0) {
+        return {
+          success: false,
+          errors:
+            `Budget category ID${missingCats.length === 1 ? "" : "s"} ` +
+            `[${[...new Set(missingCats)].join(", ")}] not found on project #${projectIdForBudget}. ` +
+            `Use \`list_budget\` to find valid IDs, or add the category first via \`create_budget_item\`.`,
+        };
+      }
       itemsJson = JSON.stringify(enriched);
+    } else if (poData.items !== undefined && poData.items.length === 0) {
+      // Explicit clear.
+      itemsJson = "[]";
     }
 
     // Step 3 — build the save payload. Re-submit current values for every
@@ -2949,13 +3008,11 @@ export class BuildToolsAPI {
     form.append("PurchaseOrder[prefix]", String(poData.prefix ?? currentPrefix));
     form.append("PurchaseOrder[number]", currentNumber);
     form.append("PurchaseOrder[name]", poData.name ?? currentName);
-    form.append("PurchaseOrder[status]", String(poData.status ?? "1"));
-    if (poData.notes !== undefined) {
-      form.append("PurchaseOrder[notes]", poData.notes);
-    }
-    if (poData.description !== undefined) {
-      form.append("PurchaseOrder[description]", poData.description);
-    }
+    form.append("PurchaseOrder[status]", String(poData.status ?? currentStatus));
+    form.append(
+      "PurchaseOrder[description]",
+      poData.description ?? currentDescription,
+    );
     form.append("items", itemsJson);
 
     // Step 4 — POST and parse.
