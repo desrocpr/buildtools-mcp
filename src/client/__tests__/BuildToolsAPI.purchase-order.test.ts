@@ -29,6 +29,11 @@ const poFormHtml = readFileSync(
   "utf-8",
 );
 
+const poFormReadOnlyHtml = readFileSync(
+  join(__dirname, "fixtures", "po-form-readonly.html"),
+  "utf-8",
+);
+
 function makeStub(body: string, status = 200) {
   const stub: typeof fetch = (async () =>
     new Response(body, { status })) as typeof fetch;
@@ -66,6 +71,27 @@ describe("BuildToolsAPI.getPurchaseOrder", () => {
     expect(po!.items[0].companyId).toBe(977);
     expect(po!.items[0].companyName).toBe("Kai Muten, LLC");
     expect(po!.totalNumeric).toBe(300);
+  });
+
+  it("falls back to first numeric-value option on the read-only `disabled` select variant (older POs)", async () => {
+    const api = new BuildToolsAPI({
+      fetch: makeStub(poFormReadOnlyHtml),
+    } as any);
+    (api as unknown as { authenticated: boolean }).authenticated = true;
+
+    const po = await api.getPurchaseOrder(39741);
+    expect(po).not.toBeNull();
+    // Critical: the read-only `<select>` has no `selected` attribute, only
+    // a single `<option value="62">`. The `optSelected` lookahead misses;
+    // the parser must fall back to `optFirst` and still return 62.
+    expect(po!.companyId).toBe(62);
+    expect(po!.companyName).toBe("Charles Home");
+    // Also: the project_id input has `value=` BEFORE `name=` in this
+    // fixture — exercises the `inputValue` attribute-order lookahead fix.
+    expect(po!.projectId).toBe(185936);
+    expect(po!.name).toBe("Roof repair for remote blower");
+    expect(po!.items).toHaveLength(1);
+    expect(po!.items[0].budgetCategoryCode).toBe("3510");
   });
 
   it("returns null on non-200 responses", async () => {

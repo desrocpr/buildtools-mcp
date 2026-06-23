@@ -76,6 +76,23 @@ function escapeMarkdownCell(s: string): string {
 }
 
 /**
+ * Escape Markdown control characters in user-controlled prose (headings,
+ * list items, bold spans). Prevents an adversarial company name like
+ * `**APPROVED** [click](http://evil)` from rendering as emphasis or a
+ * link inside the LLM context. Use `escapeMarkdownCell` for table cells —
+ * over-escaping table contents produces noisy output.
+ */
+function escapeMarkdownInline(s: unknown): string {
+  if (s === undefined || s === null) return "";
+  return String(s).replace(/[\\`*_[\]<>]/g, (c) => `\\${c}`);
+}
+
+/** Apply both inline + cell escaping (for table cells with user content). */
+function escapeTableCellContent(s: unknown): string {
+  return escapeMarkdownInline(s).replace(/\|/g, "\\|").replace(/\n/g, " ");
+}
+
+/**
  * Extract the numeric id off a BuildTools companies row. The companies
  * datatable carries the id only in `DT_RowId` (e.g. `"row_977"`) — there is
  * no top-level `id` field on that endpoint.
@@ -167,10 +184,14 @@ async function searchCompaniesHandler(
       limit,
     });
     const rows = result?.data ?? [];
+    // The user-supplied `input.query` echoes into the response body, so
+    // escape it before interpolation. `role` is Zod-validated against a
+    // closed enum and is safe verbatim.
+    const safeQuery = escapeMarkdownInline(input.query);
     if (rows.length === 0) {
       const roleLabel = role ? ` (role=${role})` : "";
       return markdown(
-        `No companies matched query "${input.query}"${roleLabel}.`,
+        `No companies matched query "${safeQuery}"${roleLabel}.`,
       );
     }
 
@@ -178,7 +199,7 @@ async function searchCompaniesHandler(
     const filterSuffix = role ? `, role=${role}` : "";
     const header =
       `**${rows.length} compan${rows.length === 1 ? "y" : "ies"}** ` +
-      `(filtered ${total} total${filterSuffix}) for "${input.query}":`;
+      `(filtered ${total} total${filterSuffix}) for "${safeQuery}":`;
 
     const tableHeader = [
       "| ID | Name | Role | Default Budget Category | Phone | Email | Address | Last PO |",
@@ -192,14 +213,18 @@ async function searchCompaniesHandler(
     const tableBody = rows
       .map((row) => {
         const id = companyIdFromRow(row);
-        const name = escapeMarkdownCell(stripHtml(row.name));
+        const name = escapeTableCellContent(stripHtml(row.name));
         const roleName = orDash(row.type_name);
-        const budgetCat = escapeMarkdownCell(
+        const budgetCat = escapeTableCellContent(
           defaultBudgetCategory(row) || "—",
         );
-        const phone = orDash(row.phone);
-        const email = orDash(row.email);
-        const addr = escapeMarkdownCell(formatAddress(row) || "—");
+        // Phone and email also pass through `escapeTableCellContent` —
+        // a malformed address book entry like `it|support@example.com`
+        // would break the table layout otherwise, and `[link](javascript:)`
+        // in an unescaped field could render as a markdown link.
+        const phone = escapeTableCellContent(orDash(row.phone));
+        const email = escapeTableCellContent(orDash(row.email));
+        const addr = escapeTableCellContent(formatAddress(row) || "—");
         return `| ${id} | ${name} | ${roleName} | ${budgetCat} | ${phone} | ${email} | ${addr} | — |`;
       })
       .join("\n");
@@ -284,14 +309,18 @@ async function getCompanyHandler(
       total: 0,
     };
     try {
-      // BuildTools' global search tokenises on whitespace; punctuation in
-      // "Kai Muten, LLC" / "Smith & Sons (DC)" defeats a verbatim query.
-      // Strip the suffix after the first comma/paren/ampersand and search
-      // by the core name, then exact-match the full company name in the
-      // returned rows to filter out incidental hits (e.g. POs whose
-      // project name contains the same word).
+      // BuildTools' global search tokenises on whitespace; legal suffixes
+      // like ", LLC" / ", Inc." defeat a verbatim query. Strip ONLY a
+      // trailing legal-suffix token — not any comma/paren/ampersand —
+      // so we don't turn "L&W Supply" into "L" or "Smith & Sons (DC)"
+      // into "Smith". Then exact-match the FULL company name in the
+      // returned rows to filter out incidental hits (POs whose project
+      // name contains the same word).
       const fullName = String(row.name ?? "").trim();
-      const searchKey = fullName.split(/[,(&]/)[0].trim() || fullName;
+      const searchKey =
+        fullName
+          .replace(/,?\s+(LLC|L\.?L\.?C\.?|Inc\.?|Corp\.?|Ltd\.?|Co\.?)\b.*$/i, "")
+          .trim() || fullName;
       const poResp = await api.searchPurchaseOrders<PurchaseOrdersDatatable>(
         searchKey,
         50,
@@ -314,24 +343,28 @@ async function getCompanyHandler(
     }
 
     const lines: string[] = [];
-    lines.push(`## Company #${company_id} — ${stripHtml(row.name)}`);
+    // Every user-controlled field goes through `escapeMarkdownInline` so
+    // adversarial values (`**APPROVED**`, `[click](http://evil)`) can't
+    // bias the LLM by rendering as emphasis or links. BuildTools doesn't
+    // sanitize stored values; assume any text field is untrusted.
+    lines.push(`## Company #${company_id} — ${escapeMarkdownInline(stripHtml(row.name))}`);
     lines.push("");
-    lines.push(`- **Role**: ${orDash(row.type_name)}`);
-    lines.push(`- **Status**: ${orDash(row.status)}`);
-    if (row.main_contact) lines.push(`- **Primary contact**: ${row.main_contact}`);
-    if (row.phone) lines.push(`- **Phone**: ${row.phone}`);
-    if (row.email) lines.push(`- **Email**: ${row.email}`);
+    lines.push(`- **Role**: ${escapeMarkdownInline(orDash(row.type_name))}`);
+    lines.push(`- **Status**: ${escapeMarkdownInline(orDash(row.status))}`);
+    if (row.main_contact) lines.push(`- **Primary contact**: ${escapeMarkdownInline(row.main_contact)}`);
+    if (row.phone) lines.push(`- **Phone**: ${escapeMarkdownInline(row.phone)}`);
+    if (row.email) lines.push(`- **Email**: ${escapeMarkdownInline(row.email)}`);
     const addr = formatAddress(row as Record<string, unknown>);
-    if (addr) lines.push(`- **Address**: ${addr}`);
-    if (row.country) lines.push(`- **Country**: ${row.country}`);
-    if (row.created_at) lines.push(`- **Added**: ${row.created_at}`);
+    if (addr) lines.push(`- **Address**: ${escapeMarkdownInline(addr)}`);
+    if (row.country) lines.push(`- **Country**: ${escapeMarkdownInline(row.country)}`);
+    if (row.created_at) lines.push(`- **Added**: ${escapeMarkdownInline(row.created_at)}`);
     if (typeof row.rating === "number" && row.rating > 0) {
       lines.push(`- **Rating**: ${row.rating}`);
     }
 
     const defaultCat = defaultBudgetCategory(row as Record<string, unknown>);
     if (defaultCat) {
-      lines.push(`- **Default budget category**: ${defaultCat}`);
+      lines.push(`- **Default budget category**: ${escapeMarkdownInline(defaultCat)}`);
     }
 
     // Full budget category list. BuildTools renders these as a single
@@ -343,7 +376,7 @@ async function getCompanyHandler(
     const allCats = stripHtml(row.budget_relations);
     if (allCats && allCats !== defaultCat) {
       lines.push("");
-      lines.push(`**All associated budget categories**: ${allCats}`);
+      lines.push(`**All associated budget categories**: ${escapeMarkdownInline(allCats)}`);
     }
 
     lines.push("");
@@ -360,9 +393,9 @@ async function getCompanyHandler(
         (typeof mr.DT_RowId === "string"
           ? mr.DT_RowId.replace(/^row_/, "")
           : "?");
-      const poName = stripHtml(mr.name);
-      const poTotal = orDash(mr.total);
-      const poProject = orDash(mr.project_name);
+      const poName = escapeMarkdownInline(stripHtml(mr.name));
+      const poTotal = escapeMarkdownInline(orDash(mr.total));
+      const poProject = escapeMarkdownInline(orDash(mr.project_name));
       const poCreated = orDash(mr.created_at);
       lines.push(
         `- Most recent: PO #${poId} **${poName}** — ${poProject} — ${poTotal} (created ${poCreated})`,

@@ -50,6 +50,29 @@ function formatZodError(err: z.ZodError, toolName: string): ToolResult {
   return errorMarkdown(`**Invalid input for \`${toolName}\`:**\n${issues}`);
 }
 
+/**
+ * Escape Markdown control characters in user-controlled prose so values
+ * stored on BuildTools (company names, PO names, descriptions) can't
+ * inject formatting into the LLM context when they echo back in error
+ * messages or confirmation prompts. See `companies.ts` for matching impl.
+ */
+function escapeMarkdownInline(s: unknown): string {
+  if (s === undefined || s === null) return "";
+  return String(s).replace(/[\\`*_[\]<>]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Strip common trailing legal suffixes (`, LLC`, `, Inc`, `, Corp`, etc.)
+ * so the BuildTools datatable tokenizer matches on the core name.
+ * Verbatim queries like "Smith, LLC" return zero hits because BT splits
+ * on whitespace and the comma kills the match.
+ */
+function stripLegalSuffix(name: string): string {
+  return name
+    .replace(/,?\s+(LLC|L\.?L\.?C\.?|Inc\.?|Corp\.?|Ltd\.?|Co\.?)\b.*$/i, "")
+    .trim();
+}
+
 // ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
@@ -247,14 +270,31 @@ export function createMutationTools(
   // below) and overwrite the field before reaching the confirmation
   // framework — so the prompt shows the actual vendor and the args stored
   // for replay already carry the numeric id.
-  const createPOConfirmed = requiresConfirmation<
-    CreatePurchaseOrderArgs & { company_id: number }
-  >(
+  //
+  // `_resolved_from` carries the caller's ORIGINAL `company_name` input
+  // when (and only when) we did the fuzzy resolution. The confirmation
+  // prompt surfaces this explicitly so the user can see the substitution
+  // ("Resolved 'Kai Mutn' → #977 (Kai Muten, LLC)") rather than the
+  // server quietly accepting their misspelling.
+  type CreatePOExecutorArgs = CreatePurchaseOrderArgs & {
+    company_id: number;
+    _resolved_from?: string;
+  };
+  const createPOConfirmed = requiresConfirmation<CreatePOExecutorArgs>(
     "create_purchase_order",
-    (a) =>
-      `Create purchase order **"${a.name}"** on project #${a.project_id} for company #${a.company_id}` +
-      (a.company_name ? ` (${a.company_name})` : "") +
-      ".",
+    (a) => {
+      const safeName = escapeMarkdownInline(a.name);
+      const safeCompanyName = escapeMarkdownInline(a.company_name ?? "");
+      const safeFrom = escapeMarkdownInline(a._resolved_from ?? "");
+      const base = `Create purchase order **"${safeName}"** on project #${a.project_id}`;
+      if (a._resolved_from && a._resolved_from !== a.company_name) {
+        return `${base}. Resolved \`company_name: "${safeFrom}"\` → #${a.company_id} (${safeCompanyName}).`;
+      }
+      if (a.company_name) {
+        return `${base} for company #${a.company_id} (${safeCompanyName}).`;
+      }
+      return `${base} for company #${a.company_id}.`;
+    },
     async (a) => {
       try {
         const result = await getApi().createPurchaseOrder({
@@ -282,40 +322,79 @@ export function createMutationTools(
   async function resolveCompanyId(
     name: string,
   ): Promise<{ id: number; resolvedName: string } | ToolResult> {
-    const resp = (await getApi().searchCompanies<{
+    type CompaniesResp = {
       data?: Array<Record<string, unknown>>;
       recordsFiltered?: number;
-    }>(name, { limit: 10 })) ?? { data: [] };
-    const rows = resp.data ?? [];
-    if (rows.length === 0) {
-      return errorMarkdown(
-        `**Error calling \`create_purchase_order\`**: no company matches "${name}". Try \`search_companies\` to find the right vendor.`,
-      );
-    }
-    if (rows.length > 1) {
-      const candidates = rows
+    };
+
+    const formatCandidates = (rows: Array<Record<string, unknown>>): string =>
+      rows
         .slice(0, 10)
         .map((r) => {
           const dt = typeof r.DT_RowId === "string" ? r.DT_RowId.replace(/^row_/, "") : "?";
-          const nm = String(r.name ?? "").replace(/<[^>]*>/g, "").trim();
-          const role = String(r.type_name ?? "—");
+          const nm = escapeMarkdownInline(
+            String(r.name ?? "").replace(/<[^>]*>/g, "").trim(),
+          );
+          const role = escapeMarkdownInline(String(r.type_name ?? "—"));
           return `  - #${dt} **${nm}** (${role})`;
         })
         .join("\n");
+
+    // Initial query.
+    const resp =
+      (await getApi().searchCompanies<CompaniesResp>(name, { limit: 10 })) ??
+      ({ data: [] } as CompaniesResp);
+    const rows = resp.data ?? [];
+    const safeName = escapeMarkdownInline(name);
+
+    // Zero matches: best-effort retry with legal suffixes stripped (so
+    // "Kai Muten, LLC" → "Kai Muten"). If the retry surfaces near-matches,
+    // return them as candidates so the caller can pick rather than getting
+    // a dead-end "no match" message.
+    if (rows.length === 0) {
+      const stripped = stripLegalSuffix(name);
+      if (stripped !== name && stripped.length >= 2) {
+        const retry =
+          (await getApi().searchCompanies<CompaniesResp>(stripped, {
+            limit: 10,
+          })) ?? ({ data: [] } as CompaniesResp);
+        const retryRows = retry.data ?? [];
+        if (retryRows.length > 0) {
+          return errorMarkdown(
+            `**Error calling \`create_purchase_order\`**: no exact match for "${safeName}", but ${retryRows.length} near-match${retryRows.length === 1 ? "" : "es"} via "${escapeMarkdownInline(stripped)}". Pass an explicit \`company_id\`:\n${formatCandidates(retryRows)}`,
+          );
+        }
+      }
       return errorMarkdown(
-        `**Error calling \`create_purchase_order\`**: "${name}" matched ${rows.length} companies. Pass an explicit \`company_id\`:\n${candidates}`,
+        `**Error calling \`create_purchase_order\`**: no company matches "${safeName}". Try \`search_companies\` to find the right vendor.`,
       );
     }
+
+    // Ambiguity check: trust `recordsFiltered`, not the visible page. A
+    // search for "Smith" with limit=10 might return 1 visible row but
+    // actually match dozens — auto-resolving the top hit would create a
+    // PO against the wrong vendor. Require BOTH the visible count AND
+    // the filtered total to equal exactly 1 before resolving.
+    const totalMatches = resp.recordsFiltered ?? rows.length;
+    if (rows.length > 1 || totalMatches > 1) {
+      return errorMarkdown(
+        `**Error calling \`create_purchase_order\`**: "${safeName}" matched ${totalMatches} compan${totalMatches === 1 ? "y" : "ies"} (showing first ${Math.min(rows.length, 10)}). Pass an explicit \`company_id\`:\n${formatCandidates(rows)}`,
+      );
+    }
+
     const only = rows[0];
     const id = Number(
       typeof only.DT_RowId === "string" ? only.DT_RowId.replace(/^row_/, "") : NaN,
     );
     if (!Number.isFinite(id)) {
       return errorMarkdown(
-        `**Error calling \`create_purchase_order\`**: matched company has no usable id (DT_RowId=${only.DT_RowId}).`,
+        `**Error calling \`create_purchase_order\`**: matched company has no usable id (DT_RowId=${escapeMarkdownInline(only.DT_RowId)}).`,
       );
     }
-    return { id, resolvedName: String(only.name ?? "").replace(/<[^>]*>/g, "").trim() };
+    return {
+      id,
+      resolvedName: String(only.name ?? "").replace(/<[^>]*>/g, "").trim(),
+    };
   }
 
   // -- create_task ----------------------------------------------------------
@@ -680,6 +759,11 @@ export function createMutationTools(
         // an explicit `company_id` is ignored (id wins) and shouldn't be
         // shown back to them as if it were authoritative.
         let resolvedName: string | undefined;
+        // The caller's ORIGINAL `company_name` input (only set when we
+        // resolved). Threaded into the confirmation prompt so the user
+        // sees "Resolved 'Kai Mutn' → #977 (Kai Muten, LLC)" instead of
+        // a silent substitution.
+        let resolvedFrom: string | undefined;
         if (companyId === undefined) {
           if (!data.company_name) {
             return errorMarkdown(
@@ -690,6 +774,7 @@ export function createMutationTools(
           if ("content" in result) return result; // errorMarkdown branch
           companyId = result.id;
           resolvedName = result.resolvedName;
+          resolvedFrom = data.company_name;
         }
 
         return createPOConfirmed(
@@ -697,6 +782,7 @@ export function createMutationTools(
             ...data,
             company_id: companyId,
             company_name: resolvedName,
+            _resolved_from: resolvedFrom,
           },
           store,
           sessionId,

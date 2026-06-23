@@ -865,11 +865,15 @@ export class BuildToolsAPI {
   }
 
   /**
-   * Fetches a single company/vendor row by ID. Same backing as
-   * `getCustomer` — BuildTools doesn't expose `/companies/:id/form` for
-   * vendors any more than for customers, so we pull from the companies
-   * datatable and match `DT_RowId === "row_<id>"`. Up to 5000 rows
-   * scanned; Moss tenant has ~1100.
+   * Fetches a single row from the `companies` table by ID. BuildTools
+   * doesn't expose `/companies/:id/form` (returns 404), so we pull from
+   * the companies datatable and match by `DT_RowId === "row_<id>"`.
+   * Up to 5000 rows scanned; Moss tenant has ~1100.
+   *
+   * Note: BuildTools stores customers, vendors, and subcontractors in
+   * one `companies` table differentiated by `type_name`. This is the
+   * canonical lookup; `getCustomer` is a legacy alias that delegates
+   * here for the existing `get_customer` tool.
    */
   async getCompany<T = unknown>(
     companyId: string | number,
@@ -890,30 +894,16 @@ export class BuildToolsAPI {
   }
 
   /**
-   * Fetches a single customer/company by ID. BuildTools does not expose a JSON
-   * detail endpoint — `/companies/:id/form` returns 404. Instead we pull from
-   * the companies datatable and match by `DT_RowId` client-side (companies use
-   * `row_${id}` format; the raw `id` field is not in the datatable row).
-   *
-   * Limitation: requests up to 5000 rows. Moss tenant has ~1100 companies.
+   * Legacy alias for `getCompany` — kept so the existing `get_customer`
+   * MCP tool continues to work. BuildTools stores customers, vendors,
+   * and subcontractors in one `companies` table; this method just
+   * forwards to the canonical lookup. New callers should use
+   * `getCompany` directly.
    */
   async getCustomer<T = unknown>(
     customerId: string | number,
   ): Promise<T | null> {
-    const numericId = Number(customerId);
-    const result = await this.datatable<{
-      data?: Array<Record<string, unknown>>;
-    }>("companies", { length: 5000 });
-
-    const rows = result?.data ?? [];
-    const rowIdKey = `row_${numericId}`;
-    const match = rows.find(
-      (r) =>
-        r.DT_RowId === rowIdKey ||
-        r.id === numericId ||
-        r.id === String(numericId),
-    );
-    return (match as T) ?? null;
+    return this.getCompany<T>(customerId);
   }
 
   /**
@@ -2594,8 +2584,14 @@ export class BuildToolsAPI {
         .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
 
     const inputValue = (fieldName: string): string => {
+      // Use a lookahead for `name="PurchaseOrder[<field>]"` so we accept
+      // ANY ordering of attributes — Yii/Laravel scaffold sometimes emits
+      // `value=` before `name=` (especially for `type="text"` inputs), and
+      // a literal-order regex silently returns empty without surfacing the
+      // miss. Same defensive shape as the `<option selected>` lookahead
+      // used for the company `<select>` below.
       const re = new RegExp(
-        `<input[^>]*name="PurchaseOrder\\[${fieldName}\\]"[^>]*value="([^"]*)"`,
+        `<input(?=[^>]*name="PurchaseOrder\\[${fieldName}\\]")[^>]*value="([^"]*)"`,
       );
       const m = body.match(re);
       return m ? stripValue(m[1]) : "";

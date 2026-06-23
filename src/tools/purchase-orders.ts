@@ -76,6 +76,20 @@ function orDash(value: unknown): string {
   return s;
 }
 
+/**
+ * Escape Markdown emphasis / link / code-fence control characters so that
+ * user-supplied strings (PO names, vendor names, item descriptions) can't
+ * inject formatting into the LLM context.
+ *
+ * Scope: prose contexts (headings, list items, bold spans). For table
+ * cells use `escapeMarkdownCell` — only `|`/`\n` break table layout, and
+ * over-escaping inside cells produces noisy output.
+ */
+function escapeMarkdownInline(s: unknown): string {
+  if (s === undefined || s === null) return "";
+  return String(s).replace(/[\\`*_[\]<>]/g, (c) => `\\${c}`);
+}
+
 /** Markdown response shorthand. */
 function markdown(text: string): ToolResult {
   return { content: [{ type: "text", text }] };
@@ -319,17 +333,23 @@ async function getPurchaseOrderHandler(
 
     const header =
       `## Purchase Order #${detail.id}` +
-      (detail.name ? ` — ${detail.name}` : "") +
+      (detail.name ? ` — ${escapeMarkdownInline(detail.name)}` : "") +
       (detail.projectId !== null ? ` (project #${detail.projectId})` : "");
     lines.push(header);
     lines.push("");
     lines.push(`- **PO number**: ${poLabel}`);
+    // Always emit a vendor line, even when both id and name are missing —
+    // a silent omission would hide an HTML parse failure from the caller,
+    // and downstream `create_purchase_order` would propagate a null
+    // company_id without any indication something was wrong upstream.
     if (detail.companyId !== null) {
       lines.push(
-        `- **Vendor**: ${detail.companyName || "—"} (company #${detail.companyId})`,
+        `- **Vendor**: ${escapeMarkdownInline(detail.companyName) || "—"} (company #${detail.companyId})`,
       );
     } else if (detail.companyName) {
-      lines.push(`- **Vendor**: ${detail.companyName}`);
+      lines.push(`- **Vendor**: ${escapeMarkdownInline(detail.companyName)} _(no company_id parsed — extract before use)_`);
+    } else {
+      lines.push(`- **Vendor**: _(unknown — form parse failed)_`);
     }
     lines.push(`- **Line items**: ${detail.items.length}`);
     if (detail.totalNumeric > 0) {
@@ -358,9 +378,16 @@ async function getPurchaseOrderHandler(
         "| # | Budget Code | Category | Qty | Unit | Total | Notes |",
       );
       lines.push("|---|---|---|---|---|---|---|");
+      // Apply both inline-markdown and table-pipe escaping to user-supplied
+      // strings (budget category name, notes). Inline escaping prevents an
+      // adversarial note like "**SHIP IMMEDIATELY**" from bolding inside the
+      // table cell and biasing the LLM downstream; pipe escaping keeps the
+      // table layout intact.
+      const cell = (s: string): string =>
+        escapeMarkdownInline(s).replace(/\|/g, "\\|").replace(/\n/g, " ");
       detail.items.forEach((it, i) => {
         const code = orDash(it.budgetCategoryCode);
-        const cat = orDash(it.budgetCategoryName);
+        const cat = cell(it.budgetCategoryName || "—");
         // `amounts[]` typically has a single row `{a, q, d, u}`. Multiple
         // rows = breakdown of the same line. Summarise qty + unit price.
         const a0 = it.amounts[0] ?? {};
@@ -370,10 +397,11 @@ async function getPurchaseOrderHandler(
         const totalStr = Number.isFinite(totalNum)
           ? usd.format(totalNum)
           : orDash(it.total);
-        const notes =
-          [it.notes, it.internalNotes].filter(Boolean).join(" / ") || "—";
+        const notes = cell(
+          [it.notes, it.internalNotes].filter(Boolean).join(" / ") || "—",
+        );
         lines.push(
-          `| ${i + 1} | ${code} | ${cat.replace(/\|/g, "\\|")} | ${qty} | ${unit} | ${totalStr} | ${notes.replace(/\|/g, "\\|").replace(/\n/g, " ")} |`,
+          `| ${i + 1} | ${code} | ${cat} | ${qty} | ${unit} | ${totalStr} | ${notes} |`,
         );
       });
     }
