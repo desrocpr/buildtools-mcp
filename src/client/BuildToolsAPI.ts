@@ -1206,27 +1206,72 @@ export class BuildToolsAPI {
         const statusCode = Number(rowMatch[2]);
         const rowHtml = rowMatch[3];
 
-        const cells: string[] = [];
+        // Preserve raw cell HTML so we can do class-based extraction for
+        // the "selection" (chosen option) cell, which sits at a variable
+        // index depending on whether the "# REL." column is present.
+        const cellsRaw: string[] = [];
         const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/g;
         let cellMatch: RegExpExecArray | null;
         while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
-          cells.push(strip(cellMatch[1]));
+          cellsRaw.push(cellMatch[1]);
         }
 
-        // Column layout: [expand] [checkbox] status [icon] category location item price dueDate [relations] spec selection notes [actions]
-        // Indices vary by whether the "# REL." column is present, so find by content
-        const nonEmpty = cells.filter((c) => c.length > 0);
+        // Column layout (stable across all statuses, verified live 2026-06-12):
+        //   [0] expand  [1] checkbox  [2] status  [3] icon
+        //   [4] category  [5] location  [6] item  [7] price  [8] dueDate
+        //   then variable: [# REL.] [No] selection [info] [actions].
+        // The first 9 cells are positionally reliable; the prior parser
+        // tried to find them by content and bled Location/status-badge
+        // titles ("Kitchen"/"Pending"/"Incomplete") into `item`.
+        const cellAt = (i: number): string =>
+          i < cellsRaw.length ? strip(cellsRaw[i]) : "";
+
+        // Approved (status=3) rows drop the `edit-*` classes from the
+        // category/location/item divs (the row is locked from editing),
+        // so we can't rely on `class="edit-name"` etc. — we read by
+        // position instead. The category cell does also still carry the
+        // canonical name; fall back to the h2 category if cells[4] is empty.
+        const categoryFromCell = cellAt(4);
+        const locationFromCell = cellAt(5);
+        const itemFromCell = cellAt(6);
+        const priceFromCell = cellAt(7);
+        const dueDateFromCell = cellAt(8);
+
+        // The "chosen option" text lives in a div tagged `sgItemSelectText`
+        // (editable rows) or a plain div containing the option name with a
+        // checkmark icon (approved rows). Search by class first, fall back
+        // to scanning later cells for the icon-0012 marker.
+        let selectionFromCell = "";
+        for (const cellHtml of cellsRaw) {
+          const sgMatch = cellHtml.match(
+            /<div[^>]*class="[^"]*\bsgItemSelectText\b[^"]*"[^>]*>([\s\S]*?)<\/div>/,
+          );
+          if (sgMatch) {
+            selectionFromCell = strip(sgMatch[1]);
+            break;
+          }
+          // Approved rows: <div ...><span class="icon-0012" ...></span> NAME</div>
+          if (cellHtml.includes("icon-0012")) {
+            const txt = strip(cellHtml);
+            if (txt.length > 0) {
+              selectionFromCell = txt;
+              break;
+            }
+          }
+        }
 
         selections.push({
           id,
           statusCode,
           status: STATUS_MAP[statusCode] ?? String(statusCode),
-          category,
-          location: nonEmpty.find((c) => /^(Kitchen|Bathroom|Bedroom|Living|Dining|Basement|Attic|Office|Garage|Non-specified|Typical|Master|Hall|Laundry|Closet|Exterior|Porch|Deck|Foyer|Family|Great|Mud|Pantry|Powder|Study|Sun|Breezeway)/i.test(c)) ?? "",
-          item: nonEmpty.find((c) => c.length > 3 && !/^\d{4}\s*-/.test(c) && !/^\$/.test(c) && !/^(Open|Selected|Approved|Rejected|Complete|Purchased|No|Yes)$/i.test(c)) ?? "",
-          price: nonEmpty.find((c) => /^\$\s*[\d,]+\.\d{2}$/.test(c)) ?? "",
-          dueDate: nonEmpty.find((c) => /^\d{2}\/\d{2}\/\d{4}$/.test(c)) ?? "",
-          selection: nonEmpty.find((c) => c.includes("SELECT OPTION") || c.length > 20) ?? "",
+          // Prefer the per-row category cell when populated; else fall
+          // back to the grid section h2.
+          category: categoryFromCell || category,
+          location: locationFromCell,
+          item: itemFromCell,
+          price: /^\$\s*[\d,]+\.\d{2}$/.test(priceFromCell) ? priceFromCell : "",
+          dueDate: /^\d{2}\/\d{2}\/\d{4}$/.test(dueDateFromCell) ? dueDateFromCell : "",
+          selection: selectionFromCell,
           notes: "",
           // Lifecycle dates aren't in the dashboard HTML — they come
           // from the MySQL replica merge below.
@@ -1846,6 +1891,48 @@ export class BuildToolsAPI {
     }));
 
     return { items };
+  }
+
+  /**
+   * Fetches the parent selection's name (the `Selection[name]` input value
+   * on the edit form). The /selections/form/{id}?itemsData=1 JSON endpoint
+   * carries the items but not the parent name; the unsuffixed HTML form
+   * does. Returns null when the form 404s or doesn't contain the input —
+   * callers should treat null as "name unavailable" and degrade gracefully.
+   */
+  async getSelectionName(
+    selectionId: string | number,
+    projectId: string | number,
+  ): Promise<string | null> {
+    await this.ensureAuthenticated();
+
+    const numSelId = Number(selectionId);
+    const numProjId = Number(projectId);
+    if (!Number.isFinite(numSelId) || !Number.isFinite(numProjId)) return null;
+
+    const response = await this.requestWithReauthRetry(
+      `${this.baseUrl}/selections/form/${numSelId}?PR[]=${numProjId}`,
+      {
+        headers: {
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+
+    if (response.status !== 200) return null;
+
+    const m = response.body.match(
+      /<input[^>]*name="Selection\[name\]"[^>]*value="([^"]*)"/,
+    );
+    if (!m) return null;
+    // Decode common HTML entities the form may emit.
+    return m[1]
+      .replace(/&amp;/g, "&")
+      .replace(/&quot;/g, '"')
+      .replace(/&#039;/g, "'")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">");
   }
 
   /**
