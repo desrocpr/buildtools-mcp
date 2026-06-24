@@ -23,18 +23,22 @@ To turn it on for yourself, **one-time setup**:
 That's it. Your password is encrypted at rest; only the MCP server can
 read it.
 
-After enrollment, add this to your Claude Desktop config (Settings →
-Developer → Edit Config) under `mcpServers`:
+After enrollment, add BuildTools as a custom connector in Claude Desktop:
 
-```json
-"buildtools": {
-  "url": "https://buildtools-mcp.mossbuildinganddesign.com/sse"
-}
-```
+1. **Settings → Connectors** (older builds: **Developer → MCP Servers**)
+2. Click **Add custom connector**
+3. Name: `buildtools`
+4. Server URL: `https://buildtools-mcp.mossbuildinganddesign.com/sse`
+5. Save.
 
-Restart Claude Desktop. The first time you ask it to do something
-BuildTools-related, it'll pop a Microsoft sign-in window — that's the OAuth
-handshake. You won't see it again until ~30 days later.
+The first time you ask Claude to do something BuildTools-related, it'll
+pop a Microsoft sign-in window — that's the OAuth handshake. Sign in with
+your Moss email and you won't see it again until ~30 days later.
+
+(If you prefer the JSON config route, you can also add this under
+`mcpServers` in Settings → Developer → Edit Config:
+`"buildtools": { "url": "https://buildtools-mcp.mossbuildinganddesign.com/sse" }`
+and restart Claude Desktop.)
 
 **By default you get read-only access.** If you need write access (creating
 change orders, selections, etc.), reply to this email and I'll bump your

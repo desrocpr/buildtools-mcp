@@ -24,9 +24,28 @@ authenticates as you automatically.
 
 ## Connecting Claude Desktop
 
-Claude Desktop discovers the MCP via OAuth automatically. Add the MCP server
-to your Claude Desktop config and the first tool call will pop a Microsoft
-sign-in window:
+Once you've enrolled, add BuildTools as a custom connector:
+
+1. Open Claude Desktop → **Settings → Connectors** (on older builds: **Developer → MCP Servers**).
+2. Click **Add custom connector**.
+3. Set:
+   - **Name**: `buildtools`
+   - **Server URL**: `https://buildtools-mcp.mossbuildinganddesign.com/sse`
+4. Save.
+
+The first tool call pops a Microsoft sign-in window — sign in with the same
+`@mossbuildinganddesign.com` account you used at `/enroll`. After that, the
+desktop app caches a token and you only sign in again when the refresh
+token expires (~30 days).
+
+You never type your BuildTools password into Claude Desktop. The OAuth
+handshake authenticates *you*, and the server uses your enrolled
+BuildTools credentials on your behalf.
+
+### Alternative: editing the JSON config
+
+If you'd rather edit the config file directly (Settings → Developer →
+Edit Config), the equivalent snippet is:
 
 ```json
 {
@@ -38,8 +57,16 @@ sign-in window:
 }
 ```
 
-After that, the desktop app caches a token and you only sign in again when
-the refresh token expires (~30 days).
+Then fully quit and relaunch Claude Desktop.
+
+### Picking up new tools after a server update
+
+Claude Desktop caches the MCP server's tool list when it first connects
+and does **not** re-fetch automatically when the server announces a
+change. After we ship new MCP tools, you need to **toggle the buildtools
+connector off and back on** (or fully restart Claude Desktop) to see
+them. If you ever notice a tool you expect is "missing," try toggling
+first.
 
 ## Re-enrolling
 
