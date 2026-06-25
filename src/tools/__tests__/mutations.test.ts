@@ -495,6 +495,29 @@ describe("update_purchase_order", () => {
 });
 
 describe("update_purchase_order — status by label, real errors, verify-after-write", () => {
+  it("MCP-layer Zod schema rejects unknown status labels with a clear error", async () => {
+    // First line of defense: the MCP tool schema's z.enum(["Draft",
+    // "Sent","Confirmed","Rejected"]) blocks anything else from reaching
+    // the executor. A typo or new-label-not-yet-supported surfaces as a
+    // structured Zod error rather than a silent dropped field.
+    const updatePurchaseOrder = vi.fn();
+    const api = fakeApi({ updatePurchaseOrder: updatePurchaseOrder as any });
+    const tool = findUpdatePoTool(api, mkStore());
+
+    const result = await tool.handler(
+      {
+        purchase_order_id: 39752,
+        // Intentional cast — simulating a malformed MCP client call.
+        status: "Garbage" as unknown as "Draft",
+      },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Invalid input for `update_purchase_order`");
+    expect(textOf(result)).toContain("status");
+    expect(updatePurchaseOrder).not.toHaveBeenCalled();
+  });
+
   it("accepts status as a label ('Draft', 'Sent', 'Confirmed', 'Rejected') and shows the resolved label in the prompt", async () => {
     const updatePurchaseOrder = vi.fn();
     const api = fakeApi({ updatePurchaseOrder: updatePurchaseOrder as any });

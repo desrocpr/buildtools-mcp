@@ -22,11 +22,23 @@ import { requiresConfirmation, type ConfirmationStore } from "../confirm/index.j
 
 import type { ToolDefinition, ToolResult } from "./projects.js";
 
-/** Resolve `status` (number | label) → numeric code; undefined passthrough. */
+/**
+ * Resolve `status` (number | label) → numeric code; `undefined` passthrough.
+ * Throws on unknown string labels — Zod blocks them at the schema layer,
+ * but internal callers constructing args in code (tests, future
+ * auto-transition logic) bypass schema validation and would otherwise
+ * silently drop the status from the POST payload.
+ */
 function resolvePoStatusCode(s: number | string | undefined): number | undefined {
   if (s === undefined) return undefined;
   if (typeof s === "number") return s;
-  return PURCHASE_ORDER_STATUS_CODES[s];
+  const code = PURCHASE_ORDER_STATUS_CODES[s];
+  if (code === undefined) {
+    throw new Error(
+      `Unknown PO status label "${s}". Expected one of: ${Object.keys(PURCHASE_ORDER_STATUS_CODES).join(", ")}.`,
+    );
+  }
+  return code;
 }
 
 /** Render a status code as its canonical label (or fall back to "code N"). */
@@ -410,8 +422,20 @@ export function createMutationTools(
         parts.push(`change vendor → ${vendorLabel}`);
       }
       if (a.status !== undefined) {
-        const code = resolvePoStatusCode(a.status);
-        parts.push(`status → ${poStatusLabel(code)}${code === undefined ? "" : ` (${code})`}`);
+        // Render the resolved label when possible; on an unknown label
+        // the executor will throw with a helpful message, so warn in
+        // the prompt rather than letting `requiresConfirmation` blow up
+        // before the user sees anything.
+        try {
+          const code = resolvePoStatusCode(a.status);
+          parts.push(
+            `status → ${poStatusLabel(code)}${code === undefined ? "" : ` (${code})`}`,
+          );
+        } catch {
+          parts.push(
+            `status → **${escapeMarkdownInline(String(a.status))}** _(⚠ unknown label — will fail on commit)_`,
+          );
+        }
       }
       if (a.description !== undefined) parts.push("update description");
       if (a.prefix !== undefined) parts.push(`prefix → "${escapeMarkdownInline(a.prefix)}"`);

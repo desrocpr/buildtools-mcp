@@ -2926,10 +2926,16 @@ export class BuildToolsAPI {
     /**
      * Bypass the proactive lock check (currentStatus ∈
      * PURCHASE_ORDER_WRITE_LOCKED_STATUSES). Default false. Setting true
-     * lets the call attempt the BT save anyway — useful if BT's lock
-     * matrix changes or for testing. The save will still 403 if BT
-     * still locks; the only difference is we surface BT's 403 instead
-     * of returning our proactive error.
+     * lets the call attempt the BT save anyway — useful for testing
+     * (the integration test for lock-detection wiring) and as a seam
+     * for FUTURE auto-transition logic if BT ever exposes an unlock
+     * path. The save will still 403 if BT still locks; the only
+     * difference is we surface BT's 403 instead of our proactive error.
+     *
+     * Intentionally NOT exposed via the `update_purchase_order` MCP
+     * tool schema — the lock is real (verified live 2026-06-24) and
+     * exposing a "bypass" toggle to LLM callers would invite them to
+     * paper over it. Internal callers only.
      */
     force?: boolean;
   }): Promise<{
@@ -3228,7 +3234,7 @@ export class BuildToolsAPI {
       errorParts.push(`(empty body)`);
     }
     process.stderr.write(
-      `[updatePurchaseOrder] po=${poId} save FAILED status=${status} body=${JSON.stringify(bodyPreview)}\n`,
+      `[updatePurchaseOrder] po=${poId} project=${currentProjectId} save FAILED status=${status} body=${JSON.stringify(bodyPreview)}\n`,
     );
     return { success: false, errors: errorParts.join(" — ") };
   }

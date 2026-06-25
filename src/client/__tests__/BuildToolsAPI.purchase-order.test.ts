@@ -34,10 +34,40 @@ const poFormReadOnlyHtml = readFileSync(
   "utf-8",
 );
 
+const poFormConfirmedHtml = readFileSync(
+  join(__dirname, "fixtures", "po-form-confirmed.html"),
+  "utf-8",
+);
+
 function makeStub(body: string, status = 200) {
   const stub: typeof fetch = (async () =>
     new Response(body, { status })) as typeof fetch;
   return stub;
+}
+
+/**
+ * Build a fetch stub that returns `formHtml` on GET requests to the form
+ * URL, and tracks every other request in `recorded`. Used to assert
+ * whether the API layer attempted a save call when it shouldn't have.
+ */
+function makeRecordingStub(formHtml: string) {
+  const recorded: Array<{ url: string; method: string }> = [];
+  const stub: typeof fetch = (async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    recorded.push({ url, method });
+    // Form fetch
+    if (url.includes("/purchase-orders/form/")) {
+      return new Response(formHtml, { status: 200 });
+    }
+    // Anything else (save) — if this fires, the test fails because the
+    // proactive lock check should have prevented it.
+    return new Response("UNEXPECTED CALL", { status: 500 });
+  }) as typeof fetch;
+  return { stub, recorded };
 }
 
 beforeEach(() => {
@@ -108,3 +138,62 @@ describe("BuildToolsAPI.getPurchaseOrder", () => {
     expect(po).toBeNull();
   });
 });
+
+describe("BuildToolsAPI.updatePurchaseOrder — proactive lock detection", () => {
+  it("does NOT attempt the save call when current status is Confirmed (locked)", async () => {
+    // Critical correctness guarantee of PR #57: a Confirmed PO never
+    // sends a save request, no matter what fields the caller wants to
+    // update. The previous test suite mocked updatePurchaseOrder itself,
+    // which only proved the tool-layer wired the error through — it
+    // did NOT prove the API layer's proactive lock check fires.
+    const { stub, recorded } = makeRecordingStub(poFormConfirmedHtml);
+    const api = new BuildToolsAPI({ fetch: stub } as any);
+    (api as unknown as { authenticated: boolean }).authenticated = true;
+
+    const result = await api.updatePurchaseOrder({
+      purchaseOrderId: 39201,
+      items: [
+        {
+          budgetCategoryId: 1680,
+          description: "should not be saved",
+          total: 19533.81,
+        },
+      ],
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.currentStatus).toBe(3);
+    expect(String(result.errors)).toContain("Confirmed");
+    expect(String(result.errors)).toContain("BuildTools locks ALL writes");
+
+    // Only the form fetch should have happened — NO save POST.
+    const saveCalls = recorded.filter((r) =>
+      r.url.includes("/purchase-orders/save/"),
+    );
+    expect(saveCalls).toHaveLength(0);
+  });
+
+  it("respects `force: true` — bypasses lock detection so internal callers can probe BT directly", async () => {
+    // force=true is an internal seam (NOT exposed via the MCP tool
+    // schema) for future auto-transition wiring. When set, the save
+    // call proceeds — BT will likely still 403, but the proactive
+    // check is bypassed. Test with a name-only update so we don't
+    // also need to stub /budget (items[] would trigger that path).
+    const { stub, recorded } = makeRecordingStub(poFormConfirmedHtml);
+    const api = new BuildToolsAPI({ fetch: stub } as any);
+    (api as unknown as { authenticated: boolean }).authenticated = true;
+
+    await api.updatePurchaseOrder({
+      purchaseOrderId: 39201,
+      name: "renamed",
+      force: true,
+    });
+
+    const saveCalls = recorded.filter((r) =>
+      r.url.includes("/purchase-orders/save/"),
+    );
+    expect(saveCalls).toHaveLength(1);
+    expect(saveCalls[0].method).toBe("POST");
+  });
+});
+

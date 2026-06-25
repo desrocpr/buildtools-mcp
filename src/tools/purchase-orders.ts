@@ -37,19 +37,12 @@ import type { ToolDefinition, ToolResult } from "./projects.js";
 // Status mapping (inferred — see file header)
 // ---------------------------------------------------------------------------
 
-// PO status constants live in BuildToolsAPI.ts (where they're consumed by
-// the lock-detection logic in `updatePurchaseOrder`). Re-exported here to
-// keep the existing import surface stable for the tool layer.
-import {
-  PURCHASE_ORDER_STATUS_CODES,
-  PURCHASE_ORDER_STATUS_LABELS,
-  PURCHASE_ORDER_WRITE_LOCKED_STATUSES,
-} from "../client/BuildToolsAPI.js";
-export {
-  PURCHASE_ORDER_STATUS_CODES,
-  PURCHASE_ORDER_STATUS_LABELS,
-  PURCHASE_ORDER_WRITE_LOCKED_STATUSES,
-};
+// PO status constants live in BuildToolsAPI.ts (consumed by the
+// lock-detection logic in `updatePurchaseOrder`). `purchase-orders.ts`
+// only needs the labels for rendering datatable rows. Other consumers
+// (mutations.ts, tests) import directly from BuildToolsAPI.ts to keep
+// this file's public surface minimal.
+import { PURCHASE_ORDER_STATUS_LABELS } from "../client/BuildToolsAPI.js";
 
 function purchaseOrderStatusLabel(code: string | number | undefined): string {
   if (code === undefined || code === null || code === "") return "—";
