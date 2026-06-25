@@ -13,10 +13,27 @@ import { z } from "zod/v3";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
 import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
+import {
+  PURCHASE_ORDER_STATUS_CODES,
+  PURCHASE_ORDER_STATUS_LABELS,
+} from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 import { requiresConfirmation, type ConfirmationStore } from "../confirm/index.js";
 
 import type { ToolDefinition, ToolResult } from "./projects.js";
+
+/** Resolve `status` (number | label) → numeric code; undefined passthrough. */
+function resolvePoStatusCode(s: number | string | undefined): number | undefined {
+  if (s === undefined) return undefined;
+  if (typeof s === "number") return s;
+  return PURCHASE_ORDER_STATUS_CODES[s];
+}
+
+/** Render a status code as its canonical label (or fall back to "code N"). */
+function poStatusLabel(code: number | undefined): string {
+  if (code === undefined) return "—";
+  return PURCHASE_ORDER_STATUS_LABELS[code] ?? `code ${code}`;
+}
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -178,16 +195,23 @@ const UpdatePurchaseOrderSchema = z.object({
     .optional()
     .describe("Change the PO's vendor (use search_companies / get_company to look up IDs)."),
   status: z
-    .number()
+    .union([z.number(), z.enum(["Draft", "Sent", "Confirmed", "Rejected"])])
     .optional()
     .describe(
-      "Status code. 1=Draft, 2=Sent, 3=Confirmed, 4=Rejected. Omit to preserve the current status — BuildTools doesn't merge partial payloads so omitting + not echoing back would reset it.",
+      "Status — accepts either a numeric code (1=Draft, 2=Sent, 3=Confirmed, 4=Rejected) or a label string. Omit to preserve the current status; BuildTools doesn't merge partial payloads so omitting + not echoing back would reset it. " +
+        "NOTE: BuildTools LOCKS Confirmed POs against ALL writes via /save (including status-only transitions). Attempting to update a Confirmed PO returns a clear error explaining the lock — there's no API path to unlock.",
     ),
   items: z
     .array(UpdatePurchaseOrderItemSchema)
     .optional()
     .describe(
       "Full replacement for the line items. OMIT to preserve existing items. Pass `[]` to clear all items. Each item must include `budget_category_id` (from `list_budget`).",
+    ),
+  verify: z
+    .boolean()
+    .optional()
+    .describe(
+      "After the save succeeds, re-fetch the PO and confirm the result matches intent. Default true. Set false to skip the verification fetch (saves one HTTP call; useful for high-throughput batch updates).",
     ),
   confirmation_id: z.string().optional(),
 });
@@ -385,7 +409,10 @@ export function createMutationTools(
           : `#${a.company_id}`;
         parts.push(`change vendor → ${vendorLabel}`);
       }
-      if (a.status !== undefined) parts.push(`status → ${a.status}`);
+      if (a.status !== undefined) {
+        const code = resolvePoStatusCode(a.status);
+        parts.push(`status → ${poStatusLabel(code)}${code === undefined ? "" : ` (${code})`}`);
+      }
       if (a.description !== undefined) parts.push("update description");
       if (a.prefix !== undefined) parts.push(`prefix → "${escapeMarkdownInline(a.prefix)}"`);
       if (a.items !== undefined) {
@@ -400,13 +427,14 @@ export function createMutationTools(
     },
     async (a) => {
       try {
+        const statusCode = resolvePoStatusCode(a.status);
         const result = await getApi().updatePurchaseOrder({
           purchaseOrderId: a.purchase_order_id,
           name: a.name,
           prefix: a.prefix,
           description: a.description,
           companyId: a.company_id,
-          status: a.status,
+          status: statusCode,
           items: a.items?.map((i) => ({
             budgetCategoryId: i.budget_category_id,
             description: i.description,
@@ -417,12 +445,67 @@ export function createMutationTools(
             companyId: i.company_id,
           })),
         });
-        if (result.success) {
-          return markdown(
-            `Purchase order **#${result.purchaseOrderId}** updated. ${result.message ?? ""}`,
-          );
+        if (!result.success) {
+          // `errors` is already a human-readable string from the API
+          // layer (HTTP status + BT message + body preview). Don't
+          // JSON.stringify it — that wraps the helpful text in quotes
+          // and was the source of the `Failed: ""` we hit on locked POs.
+          const errorBody = String(result.errors ?? "(no detail)");
+          return errorMarkdown(`**Failed to update PO #${a.purchase_order_id}**: ${errorBody}`);
         }
-        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+
+        // Verify-after-write (default on). Re-fetch the PO and confirm
+        // the values match intent. Catches BT's edge cases where the
+        // save returns success but the field didn't actually stick.
+        const verify = a.verify ?? true;
+        const verifyLines: string[] = [];
+        if (verify) {
+          try {
+            const detail = await getApi().getPurchaseOrder(a.purchase_order_id);
+            if (detail) {
+              const mismatches: string[] = [];
+              if (a.name !== undefined && detail.name !== a.name) {
+                mismatches.push(`name: expected "${a.name}", got "${detail.name}"`);
+              }
+              if (a.company_id !== undefined && detail.companyId !== a.company_id) {
+                mismatches.push(`company_id: expected ${a.company_id}, got ${detail.companyId}`);
+              }
+              if (a.items !== undefined) {
+                const expectedTotal = a.items.reduce((s, i) => s + i.total, 0);
+                if (Math.abs(detail.totalNumeric - expectedTotal) > 0.01) {
+                  mismatches.push(
+                    `items total: expected $${expectedTotal.toFixed(2)}, got $${detail.totalNumeric.toFixed(2)}`,
+                  );
+                }
+                if (detail.items.length !== a.items.length) {
+                  mismatches.push(
+                    `item count: expected ${a.items.length}, got ${detail.items.length}`,
+                  );
+                }
+              }
+              if (mismatches.length > 0) {
+                return errorMarkdown(
+                  `**Update reported success but verify-after-write found mismatches** on PO #${a.purchase_order_id}:\n` +
+                    mismatches.map((m) => `- ${m}`).join("\n") +
+                    "\n\nRe-run `get_purchase_order` for current state. The save endpoint sometimes returns 200 OK while silently dropping fields.",
+                );
+              }
+              verifyLines.push(
+                `Verified: name="${escapeMarkdownInline(detail.name)}", vendor=${detail.companyName ? escapeMarkdownInline(detail.companyName) : "—"} (#${detail.companyId}), ${detail.items.length} item(s), total $${detail.totalNumeric.toFixed(2)}.`,
+              );
+            }
+          } catch (err) {
+            // Verify is best-effort — don't fail the whole update if
+            // the re-fetch itself errors. Just note it.
+            const msg = err instanceof Error ? err.message : String(err);
+            verifyLines.push(`_Verify skipped: ${escapeMarkdownInline(msg)}._`);
+          }
+        }
+
+        return markdown(
+          `Purchase order **#${result.purchaseOrderId}** updated. ${result.message ?? ""}` +
+            (verifyLines.length > 0 ? `\n\n${verifyLines.join("\n")}` : ""),
+        );
       } catch (err) { return formatError(err, "update_purchase_order"); }
     },
   );

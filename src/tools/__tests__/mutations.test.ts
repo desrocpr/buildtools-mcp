@@ -32,6 +32,7 @@ interface FakeApiOverrides {
   createPurchaseOrder?: BuildToolsAPI["createPurchaseOrder"];
   updatePurchaseOrder?: BuildToolsAPI["updatePurchaseOrder"];
   getCompany?: BuildToolsAPI["getCompany"];
+  getPurchaseOrder?: BuildToolsAPI["getPurchaseOrder"];
 }
 
 function fakeApi(overrides: FakeApiOverrides = {}): BuildToolsAPI {
@@ -490,5 +491,186 @@ describe("update_purchase_order", () => {
     expect(text).toContain("\\*\\*APPROVED\\*\\*");
     expect(text).toContain("\\[click\\]");
     expect(text).not.toMatch(/(?<!\\)\*\*APPROVED\*\*/);
+  });
+});
+
+describe("update_purchase_order — status by label, real errors, verify-after-write", () => {
+  it("accepts status as a label ('Draft', 'Sent', 'Confirmed', 'Rejected') and shows the resolved label in the prompt", async () => {
+    const updatePurchaseOrder = vi.fn();
+    const api = fakeApi({ updatePurchaseOrder: updatePurchaseOrder as any });
+    const tool = findUpdatePoTool(api, mkStore());
+
+    const result = await tool.handler(
+      { purchase_order_id: 39752, status: "Sent" },
+      api,
+    );
+    const text = textOf(result);
+    // Prompt should show the label AND the numeric code in parentheses so
+    // the user sees exactly what BT will receive.
+    expect(text).toMatch(/status → Sent \(2\)/);
+  });
+
+  it("forwards the resolved status CODE (not the label) to the API layer", async () => {
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const api = fakeApi({ updatePurchaseOrder: updatePurchaseOrder as any });
+    const store = mkStore();
+    const tool = findUpdatePoTool(api, store);
+
+    const args = { purchase_order_id: 39752, status: "Confirmed" as const };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args, confirmation_id: confirmationId, verify: false }, api);
+
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
+    expect(updatePurchaseOrder.mock.calls[0][0].status).toBe(3);
+  });
+
+  it("surfaces the API's error string verbatim (no JSON.stringify wrapping) — fixes the 'Failed: \"\"' bug", async () => {
+    // Simulate the locked-PO scenario: BT returns 403 with empty body,
+    // the API layer composes a useful error string from HTTP status +
+    // the lock-detection message.
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: false,
+      currentStatus: 3,
+      errors:
+        "PO #39201 is in **Confirmed** state (code 3) — BuildTools locks ALL writes...",
+    });
+    const api = fakeApi({ updatePurchaseOrder: updatePurchaseOrder as any });
+    const store = mkStore();
+    const tool = findUpdatePoTool(api, store);
+
+    const args = { purchase_order_id: 39201, items: [] };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    expect(exec.isError).toBe(true);
+    const text = textOf(exec);
+    // Regression check: the buggy code did `JSON.stringify(result.errors)`
+    // which on the locked-PO case wrapped a useful string in quotes and
+    // sometimes returned literally `"Failed: \"\""`. Make sure that
+    // never happens again — the error must contain the human message
+    // verbatim and NOT be wrapped in `"`.
+    expect(text).toContain("BuildTools locks ALL writes");
+    expect(text).toContain("PO #39201");
+    expect(text).not.toMatch(/Failed:\s*""\s*$/);
+    expect(text).not.toContain('"PO #39201'); // no leading-quote wrap
+  });
+
+  it("re-fetches the PO after a successful save and confirms intent matched (verify: true default)", async () => {
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const getPurchaseOrder = vi.fn().mockResolvedValue({
+      id: 39752,
+      projectId: 185936,
+      name: "renamed",
+      number: "PO-1",
+      prefix: "PO",
+      companyId: 977,
+      companyName: "Kai Muten, LLC",
+      items: [{ id: 1, budgetCategoryId: 1621, budgetCategoryCode: "6030", budgetCategoryName: "Plumbing Sub", total: "400.00", notes: "", internalNotes: "", invoiceRelated: "0.00", amounts: [], companyId: 977, companyName: "Kai Muten, LLC" }],
+      totalNumeric: 400,
+    });
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const store = mkStore();
+    const tool = findUpdatePoTool(api, store);
+
+    const args = {
+      purchase_order_id: 39752,
+      name: "renamed",
+      items: [{ budget_category_id: 1621, description: "x", total: 400 }],
+    };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    expect(exec.isError).toBeFalsy();
+    expect(getPurchaseOrder).toHaveBeenCalledWith(39752);
+    expect(textOf(exec)).toContain("Verified:");
+    expect(textOf(exec)).toContain("Kai Muten, LLC");
+    expect(textOf(exec)).toContain("total $400.00");
+  });
+
+  it("verify-after-write flags mismatches even when the API returned success", async () => {
+    // Simulates BT returning 200 OK but silently dropping the items[]
+    // change — the save says success but the PO actually has 0 items.
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const getPurchaseOrder = vi.fn().mockResolvedValue({
+      id: 39752, projectId: 185936, name: "renamed",
+      number: "", prefix: "PO", companyId: 977, companyName: "Kai Muten, LLC",
+      items: [], totalNumeric: 0,
+    });
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const store = mkStore();
+    const tool = findUpdatePoTool(api, store);
+
+    const args = {
+      purchase_order_id: 39752,
+      items: [{ budget_category_id: 1621, description: "x", total: 400 }],
+    };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    expect(exec.isError).toBe(true);
+    const text = textOf(exec);
+    expect(text).toContain("verify-after-write found mismatches");
+    expect(text).toContain("items total: expected $400.00, got $0.00");
+    expect(text).toContain("item count: expected 1, got 0");
+  });
+
+  it("verify: false skips the re-fetch", async () => {
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const getPurchaseOrder = vi.fn();
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const store = mkStore();
+    const tool = findUpdatePoTool(api, store);
+
+    const args = { purchase_order_id: 39752, name: "x", verify: false };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    expect(getPurchaseOrder).not.toHaveBeenCalled();
+  });
+
+  it("verify failure (re-fetch throws) degrades gracefully — does NOT fail the update", async () => {
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const getPurchaseOrder = vi.fn().mockRejectedValue(new Error("network blip"));
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const store = mkStore();
+    const tool = findUpdatePoTool(api, store);
+
+    const args = { purchase_order_id: 39752, name: "x" };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    // Update itself succeeded; verify failure surfaces as a note, not an error.
+    expect(exec.isError).toBeFalsy();
+    expect(textOf(exec)).toContain("updated");
+    expect(textOf(exec)).toContain("Verify skipped");
+    expect(textOf(exec)).toContain("network blip");
   });
 });

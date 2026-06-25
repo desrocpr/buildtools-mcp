@@ -155,7 +155,10 @@ describe("list_purchase_orders", () => {
     expect(text).toContain("#37904");
     expect(text).toContain("#37905");
     // Status labels inferred from CO mapping.
-    expect(text).toContain("[Approved]");
+    // Status labels verified live 2026-06-24: BT calls code 3 "Confirmed"
+    // (not "Approved" — that was inferred from change orders before live
+    // verification) and code 2 "Sent" (not "Pending").
+    expect(text).toContain("[Confirmed]");
     expect(text).toContain("[Draft]");
     // Currency strings rendered as-is.
     expect(text).toContain("$ 3,855.46");

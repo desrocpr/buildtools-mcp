@@ -84,6 +84,40 @@ type PostFieldValue =
 export type PostData = Record<string, PostFieldValue>;
 
 /**
+ * PO status code → human label. Verified live against moss.buildtools.app
+ * on 2026-06-24 from the form's `<select name="PurchaseOrder[status]">`
+ * dropdown. The previous "Pending" / "Approved" mapping was inferred from
+ * change orders and was WRONG for POs — BT calls them "Sent" and
+ * "Confirmed". Unknown codes fall back to `String(code)`.
+ *
+ * Note: BT's UI relabels code 1 as "Cancel (Draft)" when transitioning
+ * FROM a higher state — same code, context-dependent label. We use the
+ * canonical "Draft" label here.
+ */
+export const PURCHASE_ORDER_STATUS_LABELS: Record<number, string> = {
+  1: "Draft",
+  2: "Sent",
+  3: "Confirmed",
+  4: "Rejected",
+};
+
+/** Inverse map for label-to-code lookup (used by `update_purchase_order`'s `status` arg). */
+export const PURCHASE_ORDER_STATUS_CODES: Record<string, number> = {
+  Draft: 1,
+  Sent: 2,
+  Confirmed: 3,
+  Rejected: 4,
+};
+
+/**
+ * Statuses BT locks against writes via /purchase-orders/save. Verified
+ * 2026-06-24: a save call (even status-only, even no-op preserve-all)
+ * returns HTTP 403 with empty body when current status is 3 (Confirmed).
+ * There is no alternate unlock endpoint exposed by the UI — only /save.
+ */
+export const PURCHASE_ORDER_WRITE_LOCKED_STATUSES: ReadonlySet<number> = new Set([3]);
+
+/**
  * Decode the common HTML entities BuildTools emits on form inputs.
  * Shared by every form-HTML parser (selection name, PO name, etc.) —
  * keep the entity list in one place so a gap (`&hellip;`!) caught for
@@ -2889,11 +2923,22 @@ export class BuildToolsAPI {
       internalNotes?: string;
       companyId?: string | number;
     }>;
+    /**
+     * Bypass the proactive lock check (currentStatus ∈
+     * PURCHASE_ORDER_WRITE_LOCKED_STATUSES). Default false. Setting true
+     * lets the call attempt the BT save anyway — useful if BT's lock
+     * matrix changes or for testing. The save will still 403 if BT
+     * still locks; the only difference is we surface BT's 403 instead
+     * of returning our proactive error.
+     */
+    force?: boolean;
   }): Promise<{
     success: boolean;
     purchaseOrderId?: string | number;
     message?: unknown;
     errors?: unknown;
+    /** Set when the call returned without attempting save due to lock detection. */
+    currentStatus?: number;
   }> {
     await this.ensureAuthenticated();
 
@@ -2988,6 +3033,34 @@ export class BuildToolsAPI {
       /<input[^>]*name="items"[^>]*value="([^"]+)"/,
     );
     const currentItemsJson = itemsInput ? decodeFormEntities(itemsInput[1]) : "[]";
+
+    // Step 1.5 — proactive lock check. BT returns HTTP 403 + empty body
+    // for ANY /save call when current status is in
+    // PURCHASE_ORDER_WRITE_LOCKED_STATUSES (verified live 2026-06-24:
+    // status=3 / "Confirmed" blocks all writes, including status-only
+    // transitions away from Confirmed). There is no alternate unlock
+    // endpoint exposed by the UI — /save is the only path.
+    //
+    // We detect this BEFORE attempting the save so the caller gets a
+    // clear actionable message instead of an opaque 403. Skipped when
+    // the caller explicitly passes `force: true` (used by future
+    // auto-transition logic if BT ever exposes an unlock path).
+    if (
+      PURCHASE_ORDER_WRITE_LOCKED_STATUSES.has(Number(currentStatus)) &&
+      !poData.force
+    ) {
+      const currentLabel =
+        PURCHASE_ORDER_STATUS_LABELS[Number(currentStatus)] ?? `code ${currentStatus}`;
+      return {
+        success: false,
+        currentStatus: Number(currentStatus),
+        errors:
+          `PO #${poId} is in **${currentLabel}** state (code ${currentStatus}) — BuildTools locks ALL writes on this PO via /purchase-orders/save, ` +
+          `including status-only transitions. Verified live: even a no-op save returns HTTP 403 with empty body. ` +
+          `Workarounds: (a) void this PO in the BT web UI and create a replacement via create_purchase_order, ` +
+          `or (b) contact a BT admin to demote it out of ${currentLabel} (no API path is exposed for this).`,
+      };
+    }
 
     // Step 2 — enrich the caller's items with budget category metadata.
     // Only triggered when items[] was actually passed (vs left undefined).
@@ -3118,26 +3191,46 @@ export class BuildToolsAPI {
       false,
     );
 
+    // Step 4 (cont.) — parse + report. The previous implementation
+    // collapsed both branches of failure to a near-useless `Failed: ""`
+    // when BT returned `{message:""}` (which it does on 403/lock errors,
+    // confirmed live 2026-06-24). Now we always include the HTTP status
+    // code AND the raw body preview in the error, AND log the full
+    // request/response context to stderr so the operator can debug.
+    const status = response.status;
+    const bodyPreview = response.body.slice(0, 500);
+    let parsed: { result?: string; id?: string | number; message?: unknown } | null = null;
     try {
-      const result = JSON.parse(response.body) as {
-        result?: string;
-        id?: string | number;
-        message?: unknown;
-      };
-      if (result?.result === "success") {
-        return {
-          success: true,
-          purchaseOrderId: result.id ?? poId,
-          message: result.message,
-        };
-      }
-      return { success: false, errors: result?.message ?? response.body.slice(0, 200) };
+      parsed = JSON.parse(response.body);
     } catch {
+      /* non-JSON body — keep parsed === null */
+    }
+
+    if (parsed?.result === "success") {
       return {
-        success: false,
-        errors: `Server error (HTTP ${response.status})`,
+        success: true,
+        purchaseOrderId: parsed.id ?? poId,
+        message: parsed.message,
       };
     }
+
+    // Failure path. Compose a maximally-useful error: HTTP status + the
+    // server's `message` field (if non-empty) + a body preview as a fallback.
+    const errorParts: string[] = [`HTTP ${status}`];
+    const serverMsg = String(parsed?.message ?? "").trim();
+    if (serverMsg) errorParts.push(`message: ${serverMsg}`);
+    else if (parsed) {
+      const resultField = String(parsed.result ?? "unknown");
+      errorParts.push(`result: ${resultField} (empty message body — BT often returns this on 403/write-locked POs)`);
+    } else if (bodyPreview.trim()) {
+      errorParts.push(`body: ${bodyPreview}`);
+    } else {
+      errorParts.push(`(empty body)`);
+    }
+    process.stderr.write(
+      `[updatePurchaseOrder] po=${poId} save FAILED status=${status} body=${JSON.stringify(bodyPreview)}\n`,
+    );
+    return { success: false, errors: errorParts.join(" — ") };
   }
 
   // ========================================================================
