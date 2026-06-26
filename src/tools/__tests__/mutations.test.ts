@@ -704,3 +704,107 @@ describe("update_purchase_order — status by label, real errors, verify-after-w
     expect(textOf(exec)).toContain("network blip");
   });
 });
+
+describe("update_purchase_order — append mode + budget ID resolution", () => {
+  it("rejects passing both `items` and `items_append` at the Zod schema layer", async () => {
+    const updatePurchaseOrder = vi.fn();
+    const api = fakeApi({ updatePurchaseOrder: updatePurchaseOrder as any });
+    const tool = findUpdatePoTool(api, mkStore());
+    const result = await tool.handler(
+      {
+        purchase_order_id: 39752,
+        items: [{ budget_category_id: 1, description: "x", total: 1 }],
+        items_append: [{ budget_category_id: 1, description: "y", total: 2 }],
+      },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Pass either `items` (full replacement) OR `items_append`");
+    expect(updatePurchaseOrder).not.toHaveBeenCalled();
+  });
+
+  it("forwards `items_append` to the API layer with the appropriate ID-resolution field", async () => {
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const getPurchaseOrder = vi.fn().mockResolvedValue({
+      id: 39752, projectId: 185936, name: "x", number: "", prefix: "PO",
+      status: 1, description: "", companyId: 977, companyName: "v",
+      items: [
+        { id: 1, budgetCategoryId: 1680, budgetCategoryCode: "7051", budgetCategoryName: "Countertops", total: "17380.47", notes: "", internalNotes: "", invoiceRelated: "0.00", amounts: [], companyId: 977, companyName: "v" },
+        { id: 2, budgetCategoryId: 1680, budgetCategoryCode: "7051", budgetCategoryName: "Countertops", total: "2153.34", notes: "", internalNotes: "", invoiceRelated: "0.00", amounts: [], companyId: 977, companyName: "v" },
+      ],
+      totalNumeric: 19533.81,
+    });
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+
+    const args = {
+      purchase_order_id: 39752,
+      items_append: [
+        { budget_code: "7051", description: "delta correction", total: 2153.34 },
+      ],
+    };
+    const prompt = await tool.handler(args, api);
+    const promptText = textOf(prompt);
+    // Prompt should distinguish append from replace.
+    expect(promptText).toMatch(/append items \(1 new line, \+\$2153.34\)/);
+
+    const confirmationId = promptText.match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
+    const passed = updatePurchaseOrder.mock.calls[0][0];
+    // Critical: itemsAppend forwarded, items NOT set (we're appending, not replacing).
+    expect(passed.items).toBeUndefined();
+    expect(passed.itemsAppend).toEqual([
+      expect.objectContaining({
+        budgetCode: "7051",
+        description: "delta correction",
+        total: 2153.34,
+      }),
+    ]);
+
+    // Verify-line reports the appended delta + post-save state.
+    expect(textOf(exec)).toContain("appended 1 line(s) (+$2153.34)");
+    expect(textOf(exec)).toContain("PO now has 2 item(s)");
+    expect(textOf(exec)).toContain("$19533.81");
+  });
+
+  it("forwards budget_code and budget_item_id to the API verbatim — resolution happens server-side", async () => {
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const getPurchaseOrder = vi.fn().mockResolvedValue({
+      id: 39752, projectId: 185936, name: "x", number: "", prefix: "PO",
+      status: 1, description: "", companyId: 977, companyName: "v",
+      items: [{ id: 1, budgetCategoryId: 1680, budgetCategoryCode: "", budgetCategoryName: "", total: "100", notes: "", internalNotes: "", invoiceRelated: "0.00", amounts: [], companyId: 977, companyName: "v" }],
+      totalNumeric: 100,
+    });
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+
+    const args = {
+      purchase_order_id: 39752,
+      items: [{ budget_code: "7051", description: "x", total: 100 }],
+    };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    const passed = updatePurchaseOrder.mock.calls[0][0];
+    expect(passed.items[0]).toMatchObject({
+      budgetCode: "7051",
+      budgetCategoryId: undefined,
+      budgetItemId: undefined,
+      description: "x",
+      total: 100,
+    });
+  });
+});
