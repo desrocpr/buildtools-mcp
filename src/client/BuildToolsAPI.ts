@@ -125,6 +125,35 @@ export const PURCHASE_ORDER_STATUS_CODES: Record<string, number> = {
 export const PURCHASE_ORDER_WRITE_LOCKED_STATUSES: ReadonlySet<number> = new Set([3]);
 
 /**
+ * Input shape for a single PO line item in `updatePurchaseOrder`. Caller
+ * MUST provide exactly one of `budgetCategoryId`, `budgetItemId`, or
+ * `budgetCode` — the method resolves the others internally via
+ * `getBudget(projectId)`. Providing zero or multiple returns a clean
+ * error before any save attempt.
+ *
+ * - `budgetCategoryId` (e.g. 1680) is the catalog ID BT actually wants
+ *   on the line item record.
+ * - `budgetItemId` (e.g. 56990) is the per-project budget row ID
+ *   surfaced by `list_budget`. Common confusion point — many callers
+ *   reflexively copy the "ID" column from list_budget.
+ * - `budgetCode` (e.g. "7051") is the human-facing budget code. Most
+ *   ergonomic for LLM callers who can read the code from the budget
+ *   listing.
+ */
+export interface UpdatePurchaseOrderItemInput {
+  budgetCategoryId?: string | number;
+  budgetItemId?: string | number;
+  budgetCode?: string;
+  description: string;
+  total: number | string;
+  quantity?: number | string;
+  unit?: string;
+  notes?: string;
+  internalNotes?: string;
+  companyId?: string | number;
+}
+
+/**
  * Build the actionable error message returned when a caller attempts to
  * update a PO whose current status is in PURCHASE_ORDER_WRITE_LOCKED_STATUSES.
  * Extracted from the inline string so adding a new lock state (or refining
@@ -2977,16 +3006,21 @@ export class BuildToolsAPI {
     status?: string | number;
     description?: string;
     companyId?: string | number;
-    items?: Array<{
-      budgetCategoryId: string | number;
-      description: string;
-      total: number | string;
-      quantity?: number | string;
-      unit?: string;
-      notes?: string;
-      internalNotes?: string;
-      companyId?: string | number;
-    }>;
+    /**
+     * Full replacement for the line items. Mutually exclusive with
+     * `itemsAppend`. Pass `[]` to clear all items. Caller passes exactly
+     * one of `budgetCategoryId`, `budgetItemId`, or `budgetCode` per
+     * line — the method resolves the others internally via getBudget.
+     */
+    items?: Array<UpdatePurchaseOrderItemInput>;
+    /**
+     * Items to APPEND to the PO's existing line items. Preserves all
+     * current ids/descriptions/amounts and adds the new ones at the end.
+     * Mutually exclusive with `items`. Useful for delta entries
+     * (e.g., a +$2,153.34 correction line) where the caller doesn't
+     * have or want to re-send the original lines.
+     */
+    itemsAppend?: Array<UpdatePurchaseOrderItemInput>;
   }): Promise<{
     success: boolean;
     purchaseOrderId?: string | number;
@@ -3106,10 +3140,24 @@ export class BuildToolsAPI {
       };
     }
 
-    // Step 2 — enrich the caller's items with budget category metadata.
-    // Only triggered when items[] was actually passed (vs left undefined).
+    // Step 2 — handle item updates. Three call shapes are supported:
+    //   - `items` undefined          → preserve existing items as-is
+    //   - `items: []`                → clear all items
+    //   - `items: [...]`             → full replacement
+    //   - `itemsAppend: [...]`       → preserve existing + append new ones
+    // Caller passes EXACTLY ONE of `items` / `itemsAppend` per call.
     let itemsJson = currentItemsJson;
-    if (poData.items !== undefined && poData.items.length > 0) {
+    if (poData.items !== undefined && poData.itemsAppend !== undefined) {
+      return {
+        success: false,
+        errors:
+          "Pass either `items` (full replacement) OR `items_append` (append to existing) — not both. " +
+          "If you want to fully replace items, use `items`; if you want to add a delta line without re-sending originals, use `items_append`.",
+      };
+    }
+    const callerNewItems: UpdatePurchaseOrderItemInput[] | undefined =
+      poData.items ?? poData.itemsAppend;
+    if (callerNewItems !== undefined && callerNewItems.length > 0) {
       const projectIdForBudget = Number(currentProjectId);
       if (!Number.isFinite(projectIdForBudget) || projectIdForBudget === 0) {
         // Without a project_id we can't look up budget categories, and
@@ -3123,19 +3171,34 @@ export class BuildToolsAPI {
         };
       }
       const budgetItems = (await this.getBudget(projectIdForBudget)).items;
-      // Map budget_category_id → { code, name } parsed from the budget
-      // grid's combined "3510 - Roofing Sub" display name.
-      const categoryLookup = new Map<string, { code: string; name: string }>();
+      // Build three lookups from one fetch: by category id (catalog id
+      // BT actually wants), by budget item id (the per-project row id
+      // surfaced as the "ID" column in list_budget), and by human code
+      // ("7051"). All resolve to the same enrichment data so the caller
+      // can pass whichever they have without knowing the difference.
+      const categoryLookup = new Map<string, { code: string; name: string; categoryId: string }>();
+      const itemIdLookup = new Map<string, string>(); // budget item id → category id
+      // code → category id. BuildTools doesn't enforce code uniqueness
+      // at the DB level (it's a display string parsed from `name`), so
+      // we track ambiguities and reject a `budget_code` resolution when
+      // multiple categories share that code — better than silently
+      // picking one. Empty codes (rows like "- Misc" with no prefix)
+      // are skipped because you can't look up by an empty string.
+      const codeLookup = new Map<string, string>();
+      const ambiguousCodes = new Set<string>();
       for (const bi of budgetItems) {
         const display = bi.name;
         const dash = display.indexOf(" - ");
-        if (dash > 0) {
-          categoryLookup.set(bi.categoryId, {
-            code: display.slice(0, dash).trim(),
-            name: display.slice(dash + 3).trim(),
-          });
-        } else {
-          categoryLookup.set(bi.categoryId, { code: "", name: display });
+        const code = dash > 0 ? display.slice(0, dash).trim() : "";
+        const name = dash > 0 ? display.slice(dash + 3).trim() : display;
+        categoryLookup.set(bi.categoryId, { code, name, categoryId: bi.categoryId });
+        itemIdLookup.set(bi.id, bi.categoryId);
+        if (code) {
+          if (codeLookup.has(code) && codeLookup.get(code) !== bi.categoryId) {
+            ambiguousCodes.add(code);
+          } else {
+            codeLookup.set(code, bi.categoryId);
+          }
         }
       }
 
@@ -3144,13 +3207,63 @@ export class BuildToolsAPI {
           ? String(poData.companyId)
           : currentCompanyId;
 
-      // Reject items whose budget_category_id isn't on the project — these
-      // would post with `name: "Unknown"` and silently corrupt the line.
-      const missingCats: string[] = [];
-      const enriched = poData.items.map((it) => {
-        const catId = String(it.budgetCategoryId);
-        const cat = categoryLookup.get(catId);
-        if (!cat) missingCats.push(catId);
+      // Resolve each caller item's budget_category_id from whichever of
+      // the three fields was provided. Accumulate clean per-item errors
+      // so the caller sees ALL mistakes at once, not just the first.
+      const resolutionErrors: string[] = [];
+      const enriched = callerNewItems.map((it, i) => {
+        const provided = [
+          it.budgetCategoryId !== undefined ? "budget_category_id" : null,
+          it.budgetItemId !== undefined ? "budget_item_id" : null,
+          it.budgetCode !== undefined && it.budgetCode !== "" ? "budget_code" : null,
+        ].filter(Boolean);
+        if (provided.length === 0) {
+          resolutionErrors.push(
+            `items[${i}]: provide one of \`budget_category_id\`, \`budget_item_id\`, or \`budget_code\`.`,
+          );
+          return null;
+        }
+        if (provided.length > 1) {
+          resolutionErrors.push(
+            `items[${i}]: provide EXACTLY one of ${provided.join(", ")} — got ${provided.length}.`,
+          );
+          return null;
+        }
+
+        let resolvedCategoryId: string | undefined;
+        if (it.budgetCategoryId !== undefined) {
+          resolvedCategoryId = String(it.budgetCategoryId);
+          if (!categoryLookup.has(resolvedCategoryId)) {
+            resolutionErrors.push(
+              `items[${i}]: budget_category_id ${resolvedCategoryId} not found on project #${projectIdForBudget}. Run \`list_budget\` to see available categories.`,
+            );
+            return null;
+          }
+        } else if (it.budgetItemId !== undefined) {
+          resolvedCategoryId = itemIdLookup.get(String(it.budgetItemId));
+          if (!resolvedCategoryId) {
+            resolutionErrors.push(
+              `items[${i}]: budget_item_id ${it.budgetItemId} not found on project #${projectIdForBudget}. The ID column from \`list_budget\` is what this field expects.`,
+            );
+            return null;
+          }
+        } else if (it.budgetCode !== undefined) {
+          if (ambiguousCodes.has(it.budgetCode)) {
+            resolutionErrors.push(
+              `items[${i}]: budget_code "${it.budgetCode}" matches multiple categories on project #${projectIdForBudget}. Use \`budget_category_id\` or \`budget_item_id\` instead to be precise.`,
+            );
+            return null;
+          }
+          resolvedCategoryId = codeLookup.get(it.budgetCode);
+          if (!resolvedCategoryId) {
+            resolutionErrors.push(
+              `items[${i}]: budget_code "${it.budgetCode}" not found on project #${projectIdForBudget}. Codes are the prefix (e.g. "7051" for "7051 - Countertops Allowance").`,
+            );
+            return null;
+          }
+        }
+        const cat = categoryLookup.get(resolvedCategoryId!)!;
+
         // The single-amount path: qty defaults to 1, so unit price === total
         // for the common case. We use total directly when qty===1 to avoid
         // floating-point drift (`400 / 3 === 133.333…` rounds to 133.33 and
@@ -3166,9 +3279,9 @@ export class BuildToolsAPI {
               : totalNum.toFixed(2);
         return {
           id: null,
-          budget_category_id: Number(it.budgetCategoryId),
-          name: cat?.name ?? "Unknown",
-          code: cat?.code ?? "",
+          budget_category_id: Number(resolvedCategoryId),
+          name: cat.name,
+          code: cat.code,
           amounts: [
             {
               a: unitPrice,
@@ -3185,20 +3298,36 @@ export class BuildToolsAPI {
           invoice_related: "0.00",
         };
       });
-      if (missingCats.length > 0) {
+
+      if (resolutionErrors.length > 0) {
         return {
           success: false,
           errors:
-            `Budget category ID${missingCats.length === 1 ? "" : "s"} ` +
-            `[${[...new Set(missingCats)].join(", ")}] not found on project #${projectIdForBudget}. ` +
-            `Use \`list_budget\` to find valid IDs, or add the category first via \`create_budget_item\`.`,
+            `Budget resolution failed:\n` +
+            resolutionErrors.map((e) => `  - ${e}`).join("\n"),
         };
       }
-      itemsJson = JSON.stringify(enriched);
+
+      // Build the final items JSON. For append: prepend the existing
+      // items (parsed from the form snapshot) so their ids/descriptions
+      // are preserved. For replace: just use the new items directly.
+      const validEnriched = enriched.filter((x) => x !== null) as Array<Record<string, unknown>>;
+      if (poData.itemsAppend !== undefined) {
+        let existing: Array<Record<string, unknown>> = [];
+        try {
+          existing = JSON.parse(currentItemsJson) as Array<Record<string, unknown>>;
+        } catch {
+          existing = [];
+        }
+        itemsJson = JSON.stringify([...existing, ...validEnriched]);
+      } else {
+        itemsJson = JSON.stringify(validEnriched);
+      }
     } else if (poData.items !== undefined && poData.items.length === 0) {
       // Explicit clear.
       itemsJson = "[]";
     }
+    // itemsAppend: [] is a no-op (nothing to append) — leave currentItemsJson.
 
     // Step 3 — build the save payload. Re-submit current values for every
     // scalar; overlay updates from poData.

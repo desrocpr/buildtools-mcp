@@ -172,10 +172,28 @@ const CreatePurchaseOrderSchema = z
 type CreatePurchaseOrderArgs = z.infer<typeof CreatePurchaseOrderSchema>;
 
 const UpdatePurchaseOrderItemSchema = z.object({
+  // Caller passes EXACTLY ONE of these three. budget_category_id (the
+  // catalog id BT actually wants) is the most precise; budget_code
+  // ("7051") is the most ergonomic for humans; budget_item_id is what
+  // list_budget surfaces in its "ID" column and trips up callers who
+  // assume it's the category id.
   budget_category_id: z
     .number()
+    .optional()
     .describe(
-      "Budget category ID (from `list_budget` on the parent project). Required per line; BuildTools rejects items without one.",
+      "Catalog category ID (e.g. 1680 for Countertops Allowance). Get from `list_selection_categories` or the underlying budget data. Mutually exclusive with budget_item_id and budget_code.",
+    ),
+  budget_item_id: z
+    .number()
+    .optional()
+    .describe(
+      "Per-project budget row ID (e.g. 56990) — what `list_budget` shows in its ID column. Resolved server-side to the underlying category id. Mutually exclusive with budget_category_id and budget_code.",
+    ),
+  budget_code: z
+    .string()
+    .optional()
+    .describe(
+      'Human budget code prefix (e.g. "7051" for "7051 - Countertops Allowance"). Resolved server-side. Mutually exclusive with budget_category_id and budget_item_id.',
     ),
   description: z
     .string()
@@ -183,7 +201,11 @@ const UpdatePurchaseOrderItemSchema = z.object({
   total: z.number().describe("Line total in dollars."),
   quantity: z.number().optional().describe("Default 1."),
   unit: z.string().optional().describe("Default '1' (BuildTools' unit code; rarely changed)."),
-  notes: z.string().optional(),
+  notes: z.string().optional().describe("Line note visible to the vendor."),
+  internal_notes: z
+    .string()
+    .optional()
+    .describe("Internal-only note (not shown to the vendor). Default empty."),
   company_id: z
     .number()
     .optional()
@@ -217,7 +239,13 @@ const UpdatePurchaseOrderSchema = z.object({
     .array(UpdatePurchaseOrderItemSchema)
     .optional()
     .describe(
-      "Full replacement for the line items. OMIT to preserve existing items. Pass `[]` to clear all items. Each item must include `budget_category_id` (from `list_budget`).",
+      "Full replacement for the line items. OMIT to preserve existing items. Pass `[]` to clear all items. Each item must identify a budget category via ONE of `budget_category_id`, `budget_item_id`, or `budget_code`. Mutually exclusive with `items_append`.",
+    ),
+  items_append: z
+    .array(UpdatePurchaseOrderItemSchema)
+    .optional()
+    .describe(
+      "Items to APPEND to the existing line items, preserving originals. Use this when you want to add a delta line (e.g. a +$2,153 correction) without re-sending the existing lines. Mutually exclusive with `items`. Each item identifies a budget category the same way as items[].",
     ),
   verify: z
     .boolean()
@@ -226,7 +254,14 @@ const UpdatePurchaseOrderSchema = z.object({
       "After the save succeeds, re-fetch the PO and confirm the result matches intent. Default true. Set false to skip the verification fetch (saves one HTTP call; useful for high-throughput batch updates).",
     ),
   confirmation_id: z.string().optional(),
-});
+}).refine(
+  (d) => !(d.items !== undefined && d.items_append !== undefined),
+  {
+    message:
+      "Pass either `items` (full replacement) OR `items_append` (delta add) — not both. Use `items` to fully replace the line items; use `items_append` to add a new line without re-sending existing ones.",
+    path: ["items_append"],
+  },
+);
 type UpdatePurchaseOrderArgs = z.infer<typeof UpdatePurchaseOrderSchema>;
 
 const CreateTaskSchema = z.object({
@@ -450,6 +485,11 @@ export function createMutationTools(
             : `replace items (${a.items.length} line${a.items.length === 1 ? "" : "s"}, $${a.items.reduce((s, i) => s + i.total, 0).toFixed(2)} total)`,
         );
       }
+      if (a.items_append !== undefined && a.items_append.length > 0) {
+        parts.push(
+          `append items (${a.items_append.length} new line${a.items_append.length === 1 ? "" : "s"}, +$${a.items_append.reduce((s, i) => s + i.total, 0).toFixed(2)})`,
+        );
+      }
       const summary = parts.length > 0 ? parts.join("; ") : "_(no changes specified)_";
       return `Update purchase order #${a.purchase_order_id}: ${summary}.`;
     },
@@ -457,6 +497,50 @@ export function createMutationTools(
       try {
         // Status was resolved once in the outer handler; reuse.
         const statusCode = a._resolved_status_code;
+
+        // For items_append we snapshot the PRE-save count/total here so
+        // verify-after-write can make a strict assertion on the post-save
+        // delta (pre + appended = post). Without this snapshot the verify
+        // line could claim "appended N lines" when BT silently dropped
+        // them — defeating the whole point. Skip the pre-fetch when
+        // append isn't in play (zero extra HTTP calls on the common path).
+        let preSaveItemCount: number | undefined;
+        let preSaveTotal: number | undefined;
+        if (a.items_append !== undefined && a.items_append.length > 0 && (a.verify ?? true)) {
+          try {
+            const pre = await getApi().getPurchaseOrder(a.purchase_order_id);
+            if (pre) {
+              preSaveItemCount = pre.items.length;
+              preSaveTotal = pre.totalNumeric;
+            }
+          } catch {
+            // Pre-fetch is best-effort. If it fails the verify will
+            // degrade to a post-state-only report rather than a strict
+            // delta assertion.
+          }
+        }
+
+        // Forward both `items` (full replace) and `items_append` (delta
+        // add) to the API layer. The schema enforces mutual exclusion at
+        // the Zod refine, but a hand-crafted SECOND (confirmation_id)
+        // call could replay with both set if a caller is determined —
+        // the API layer's parallel guard catches that case. Both
+        // safeguards earn their keep because they fire in different
+        // phases of the two-step handshake.
+        // Each item's budget identifier (any of category_id, item_id,
+        // code) is resolved server-side in updatePurchaseOrder.
+        const mapItem = (i: z.infer<typeof UpdatePurchaseOrderItemSchema>) => ({
+          budgetCategoryId: i.budget_category_id,
+          budgetItemId: i.budget_item_id,
+          budgetCode: i.budget_code,
+          description: i.description,
+          total: i.total,
+          quantity: i.quantity,
+          unit: i.unit,
+          notes: i.notes,
+          internalNotes: i.internal_notes,
+          companyId: i.company_id,
+        });
         const result = await getApi().updatePurchaseOrder({
           purchaseOrderId: a.purchase_order_id,
           name: a.name,
@@ -464,15 +548,8 @@ export function createMutationTools(
           description: a.description,
           companyId: a.company_id,
           status: statusCode,
-          items: a.items?.map((i) => ({
-            budgetCategoryId: i.budget_category_id,
-            description: i.description,
-            total: i.total,
-            quantity: i.quantity,
-            unit: i.unit,
-            notes: i.notes,
-            companyId: i.company_id,
-          })),
+          items: a.items?.map(mapItem),
+          itemsAppend: a.items_append?.map(mapItem),
         });
         if (!result.success) {
           // `errors` is already a human-readable string from the API
@@ -584,6 +661,40 @@ export function createMutationTools(
                 }
                 if (totalOk && countOk) {
                   verified.push(`${detail.items.length} item(s), total $${detail.totalNumeric.toFixed(2)}`);
+                }
+              }
+              if (a.items_append !== undefined && a.items_append.length > 0) {
+                const appendDelta = a.items_append.reduce((s, i) => s + i.total, 0);
+                if (preSaveItemCount !== undefined && preSaveTotal !== undefined) {
+                  // Strict delta assertion when the pre-save snapshot
+                  // succeeded. expected count = pre + N appended;
+                  // expected total = pre + Δ.
+                  const expectedCount = preSaveItemCount + a.items_append.length;
+                  const expectedTotal = preSaveTotal + appendDelta;
+                  const countOk = detail.items.length === expectedCount;
+                  const totalOk = Math.abs(detail.totalNumeric - expectedTotal) <= 0.01;
+                  if (!countOk) {
+                    mismatches.push(
+                      `appended item count: expected ${expectedCount} (${preSaveItemCount} pre + ${a.items_append.length} appended), got ${detail.items.length}`,
+                    );
+                  }
+                  if (!totalOk) {
+                    mismatches.push(
+                      `appended total: expected $${expectedTotal.toFixed(2)} ($${preSaveTotal.toFixed(2)} pre + $${appendDelta.toFixed(2)} appended), got $${detail.totalNumeric.toFixed(2)}`,
+                    );
+                  }
+                  if (countOk && totalOk) {
+                    verified.push(
+                      `appended ${a.items_append.length} line(s) (+$${appendDelta.toFixed(2)}); PO now has ${detail.items.length} item(s) totalling $${detail.totalNumeric.toFixed(2)}`,
+                    );
+                  }
+                } else {
+                  // Pre-fetch failed; degrade to a post-state-only
+                  // report so the caller knows the strict check
+                  // didn't run.
+                  verifyLines.push(
+                    `_Append verify: pre-save snapshot failed; reporting post-save state only — PO now has ${detail.items.length} item(s) totalling $${detail.totalNumeric.toFixed(2)}._`,
+                  );
                 }
               }
               if (mismatches.length > 0) {
