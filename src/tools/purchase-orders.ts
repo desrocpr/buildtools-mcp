@@ -37,18 +37,12 @@ import type { ToolDefinition, ToolResult } from "./projects.js";
 // Status mapping (inferred — see file header)
 // ---------------------------------------------------------------------------
 
-/**
- * Best-guess PO status code → human label. `BUSINESS_LOGIC.md` does NOT
- * document PO statuses; this mapping is inferred by parallel with change
- * orders (which DO use this mapping per `BUSINESS_LOGIC.md` L59–65). Unknown
- * codes fall back to `String(code)`.
- */
-const PURCHASE_ORDER_STATUS_LABELS: Record<number, string> = {
-  1: "Draft",
-  2: "Pending",
-  3: "Approved",
-  4: "Rejected",
-};
+// PO status constants live in BuildToolsAPI.ts (consumed by the
+// lock-detection logic in `updatePurchaseOrder`). `purchase-orders.ts`
+// only needs the labels for rendering datatable rows. Other consumers
+// (mutations.ts, tests) import directly from BuildToolsAPI.ts to keep
+// this file's public surface minimal.
+import { PURCHASE_ORDER_STATUS_LABELS } from "../client/BuildToolsAPI.js";
 
 function purchaseOrderStatusLabel(code: string | number | undefined): string {
   if (code === undefined || code === null || code === "") return "—";

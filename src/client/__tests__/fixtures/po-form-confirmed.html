@@ -1,0 +1,27 @@
+<div class="form">
+    <!-- CSRF token harvested from the form. -->
+    <input type="hidden" name="_token" value="csrf-test-token-confirmed">
+
+    <!-- Scalars -->
+    <input type="hidden" name="PurchaseOrder[project_id]" value="185936">
+    <input type="hidden" name="PurchaseOrder[prefix]" value="PO">
+    <input type="text" name="PurchaseOrder[number]" value="333122771">
+    <input type="text" name="PurchaseOrder[name]" value="DesRoches Countertops">
+
+    <!-- Status: CONFIRMED (code 3). BT locks all writes when current status is 3. -->
+    <select name="PurchaseOrder[status]" id="select_status">
+        <option value="1">Cancel (Draft)</option>
+        <option value="3" selected>Confirmed</option>
+        <option value="4">Rejected</option>
+    </select>
+
+    <textarea name="PurchaseOrder[description]"></textarea>
+
+    <!-- Vendor read-only block (Euro Stone Craft, company 15). -->
+    <select name="" id="select_company_id" disabled="disabled">
+        <option value="15">Euro Stone Craft</option>
+    </select>
+
+    <!-- Existing items -->
+    <input id="bcItems" name="items" type="hidden" value="[{&quot;id&quot;:45201,&quot;budget_category_id&quot;:1680,&quot;name&quot;:&quot;Countertops Allowance&quot;,&quot;code&quot;:&quot;7051&quot;,&quot;amounts&quot;:[{&quot;a&quot;:&quot;17380.47&quot;,&quot;q&quot;:&quot;1&quot;,&quot;d&quot;:&quot;DesRoches Countertops&quot;,&quot;u&quot;:&quot;1&quot;}],&quot;total&quot;:&quot;17380.47&quot;,&quot;notes&quot;:&quot;&quot;,&quot;internal_notes&quot;:&quot;&quot;,&quot;company_id&quot;:15,&quot;company_name&quot;:&quot;Euro Stone Craft&quot;,&quot;invoice_related&quot;:&quot;0.00&quot;}]">
+</div>
