@@ -723,19 +723,33 @@ describe("update_purchase_order — append mode + budget ID resolution", () => {
     expect(updatePurchaseOrder).not.toHaveBeenCalled();
   });
 
-  it("forwards `items_append` to the API layer with the appropriate ID-resolution field", async () => {
+  it("forwards `items_append` to the API + strict-asserts pre+Δ=post via pre-save snapshot", async () => {
     const updatePurchaseOrder = vi.fn().mockResolvedValue({
       success: true, purchaseOrderId: 39752, message: "saved",
     });
-    const getPurchaseOrder = vi.fn().mockResolvedValue({
+    // Pre-fetch returns 1 item / $17380.47; post-fetch returns 2 items
+    // (the original + the appended) / $19533.81. This simulates BT
+    // actually performing the append.
+    const preState = {
       id: 39752, projectId: 185936, name: "x", number: "", prefix: "PO",
       status: 1, description: "", companyId: 977, companyName: "v",
       items: [
         { id: 1, budgetCategoryId: 1680, budgetCategoryCode: "7051", budgetCategoryName: "Countertops", total: "17380.47", notes: "", internalNotes: "", invoiceRelated: "0.00", amounts: [], companyId: 977, companyName: "v" },
+      ],
+      totalNumeric: 17380.47,
+    };
+    const postState = {
+      ...preState,
+      items: [
+        ...preState.items,
         { id: 2, budgetCategoryId: 1680, budgetCategoryCode: "7051", budgetCategoryName: "Countertops", total: "2153.34", notes: "", internalNotes: "", invoiceRelated: "0.00", amounts: [], companyId: 977, companyName: "v" },
       ],
       totalNumeric: 19533.81,
-    });
+    };
+    const getPurchaseOrder = vi
+      .fn()
+      .mockResolvedValueOnce(preState)   // pre-save snapshot
+      .mockResolvedValueOnce(postState); // post-save verify
     const api = fakeApi({
       updatePurchaseOrder: updatePurchaseOrder as any,
       getPurchaseOrder: getPurchaseOrder as any,
@@ -768,10 +782,88 @@ describe("update_purchase_order — append mode + budget ID resolution", () => {
       }),
     ]);
 
+    // getPurchaseOrder hit twice: once for pre-snapshot, once for verify.
+    expect(getPurchaseOrder).toHaveBeenCalledTimes(2);
     // Verify-line reports the appended delta + post-save state.
     expect(textOf(exec)).toContain("appended 1 line(s) (+$2153.34)");
     expect(textOf(exec)).toContain("PO now has 2 item(s)");
     expect(textOf(exec)).toContain("$19533.81");
+  });
+
+  it("append-verify FAILS LOUDLY when BT silently drops the appended line (count/total unchanged post-save)", async () => {
+    // The pre-fetch snapshot reports 1 item / $17380.47. The save
+    // returns success. The post-fetch ALSO reports 1 item / $17380.47 —
+    // BT silently dropped the append. The strict pre + Δ = post
+    // assertion must catch this; the old loose verify-line would have
+    // claimed success.
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const sameState = {
+      id: 39752, projectId: 185936, name: "x", number: "", prefix: "PO",
+      status: 1, description: "", companyId: 977, companyName: "v",
+      items: [
+        { id: 1, budgetCategoryId: 1680, budgetCategoryCode: "7051", budgetCategoryName: "Countertops", total: "17380.47", notes: "", internalNotes: "", invoiceRelated: "0.00", amounts: [], companyId: 977, companyName: "v" },
+      ],
+      totalNumeric: 17380.47,
+    };
+    const getPurchaseOrder = vi.fn().mockResolvedValue(sameState);
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+
+    const args = {
+      purchase_order_id: 39752,
+      items_append: [
+        { budget_code: "7051", description: "delta", total: 2153.34 },
+      ],
+    };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    expect(exec.isError).toBe(true);
+    const text = textOf(exec);
+    expect(text).toContain("verify-after-write found mismatches");
+    expect(text).toContain("appended item count: expected 2");
+    expect(text).toContain("appended total: expected $19533.81");
+  });
+
+  it("append-verify degrades gracefully when the pre-save snapshot fails", async () => {
+    // First getPurchaseOrder call (pre-snapshot) rejects; second
+    // (post-verify) succeeds. The strict assertion is unavailable, so
+    // we degrade to a post-state-only note rather than failing the
+    // whole update.
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const postOnly = {
+      id: 39752, projectId: 185936, name: "x", number: "", prefix: "PO",
+      status: 1, description: "", companyId: 977, companyName: "v",
+      items: [], totalNumeric: 0,
+    };
+    const getPurchaseOrder = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("transient blip"))
+      .mockResolvedValueOnce(postOnly);
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+
+    const args = {
+      purchase_order_id: 39752,
+      items_append: [{ budget_code: "7051", description: "x", total: 100 }],
+    };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    expect(exec.isError).toBeFalsy();
+    expect(textOf(exec)).toContain("Append verify: pre-save snapshot failed");
   });
 
   it("forwards budget_code and budget_item_id to the API verbatim — resolution happens server-side", async () => {
@@ -806,5 +898,8 @@ describe("update_purchase_order — append mode + budget ID resolution", () => {
       description: "x",
       total: 100,
     });
+    // Replace path: itemsAppend must be undefined (mirror assertion to
+    // the append test which checks the opposite direction).
+    expect(passed.itemsAppend).toBeUndefined();
   });
 });

@@ -3178,7 +3178,14 @@ export class BuildToolsAPI {
       // can pass whichever they have without knowing the difference.
       const categoryLookup = new Map<string, { code: string; name: string; categoryId: string }>();
       const itemIdLookup = new Map<string, string>(); // budget item id → category id
-      const codeLookup = new Map<string, string>(); // code → category id (first wins on duplicates)
+      // code → category id. BuildTools doesn't enforce code uniqueness
+      // at the DB level (it's a display string parsed from `name`), so
+      // we track ambiguities and reject a `budget_code` resolution when
+      // multiple categories share that code — better than silently
+      // picking one. Empty codes (rows like "- Misc" with no prefix)
+      // are skipped because you can't look up by an empty string.
+      const codeLookup = new Map<string, string>();
+      const ambiguousCodes = new Set<string>();
       for (const bi of budgetItems) {
         const display = bi.name;
         const dash = display.indexOf(" - ");
@@ -3186,7 +3193,13 @@ export class BuildToolsAPI {
         const name = dash > 0 ? display.slice(dash + 3).trim() : display;
         categoryLookup.set(bi.categoryId, { code, name, categoryId: bi.categoryId });
         itemIdLookup.set(bi.id, bi.categoryId);
-        if (code && !codeLookup.has(code)) codeLookup.set(code, bi.categoryId);
+        if (code) {
+          if (codeLookup.has(code) && codeLookup.get(code) !== bi.categoryId) {
+            ambiguousCodes.add(code);
+          } else {
+            codeLookup.set(code, bi.categoryId);
+          }
+        }
       }
 
       const fallbackCompanyId =
@@ -3235,6 +3248,12 @@ export class BuildToolsAPI {
             return null;
           }
         } else if (it.budgetCode !== undefined) {
+          if (ambiguousCodes.has(it.budgetCode)) {
+            resolutionErrors.push(
+              `items[${i}]: budget_code "${it.budgetCode}" matches multiple categories on project #${projectIdForBudget}. Use \`budget_category_id\` or \`budget_item_id\` instead to be precise.`,
+            );
+            return null;
+          }
           resolvedCategoryId = codeLookup.get(it.budgetCode);
           if (!resolvedCategoryId) {
             resolutionErrors.push(

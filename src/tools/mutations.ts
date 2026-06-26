@@ -201,7 +201,11 @@ const UpdatePurchaseOrderItemSchema = z.object({
   total: z.number().describe("Line total in dollars."),
   quantity: z.number().optional().describe("Default 1."),
   unit: z.string().optional().describe("Default '1' (BuildTools' unit code; rarely changed)."),
-  notes: z.string().optional(),
+  notes: z.string().optional().describe("Line note visible to the vendor."),
+  internal_notes: z
+    .string()
+    .optional()
+    .describe("Internal-only note (not shown to the vendor). Default empty."),
   company_id: z
     .number()
     .optional()
@@ -493,11 +497,38 @@ export function createMutationTools(
       try {
         // Status was resolved once in the outer handler; reuse.
         const statusCode = a._resolved_status_code;
+
+        // For items_append we snapshot the PRE-save count/total here so
+        // verify-after-write can make a strict assertion on the post-save
+        // delta (pre + appended = post). Without this snapshot the verify
+        // line could claim "appended N lines" when BT silently dropped
+        // them — defeating the whole point. Skip the pre-fetch when
+        // append isn't in play (zero extra HTTP calls on the common path).
+        let preSaveItemCount: number | undefined;
+        let preSaveTotal: number | undefined;
+        if (a.items_append !== undefined && a.items_append.length > 0 && (a.verify ?? true)) {
+          try {
+            const pre = await getApi().getPurchaseOrder(a.purchase_order_id);
+            if (pre) {
+              preSaveItemCount = pre.items.length;
+              preSaveTotal = pre.totalNumeric;
+            }
+          } catch {
+            // Pre-fetch is best-effort. If it fails the verify will
+            // degrade to a post-state-only report rather than a strict
+            // delta assertion.
+          }
+        }
+
         // Forward both `items` (full replace) and `items_append` (delta
-        // add) to the API layer. The schema enforces mutual exclusion,
-        // and the API layer rejects both-set as a belt-and-suspenders
-        // guard. Each item's budget identifier (any of category_id,
-        // item_id, code) is resolved server-side in updatePurchaseOrder.
+        // add) to the API layer. The schema enforces mutual exclusion at
+        // the Zod refine, but a hand-crafted SECOND (confirmation_id)
+        // call could replay with both set if a caller is determined —
+        // the API layer's parallel guard catches that case. Both
+        // safeguards earn their keep because they fire in different
+        // phases of the two-step handshake.
+        // Each item's budget identifier (any of category_id, item_id,
+        // code) is resolved server-side in updatePurchaseOrder.
         const mapItem = (i: z.infer<typeof UpdatePurchaseOrderItemSchema>) => ({
           budgetCategoryId: i.budget_category_id,
           budgetItemId: i.budget_item_id,
@@ -507,6 +538,7 @@ export function createMutationTools(
           quantity: i.quantity,
           unit: i.unit,
           notes: i.notes,
+          internalNotes: i.internal_notes,
           companyId: i.company_id,
         });
         const result = await getApi().updatePurchaseOrder({
@@ -632,16 +664,38 @@ export function createMutationTools(
                 }
               }
               if (a.items_append !== undefined && a.items_append.length > 0) {
-                // For append we can't make a strict assertion because
-                // we don't know the pre-save count/total in this scope
-                // (the API layer fetched them, not the executor). Report
-                // the POST-save state so the caller can sanity-check
-                // against their mental model. The expected delta is
-                // included in the line so it's easy to compare visually.
                 const appendDelta = a.items_append.reduce((s, i) => s + i.total, 0);
-                verified.push(
-                  `appended ${a.items_append.length} line(s) (+$${appendDelta.toFixed(2)}); PO now has ${detail.items.length} item(s) totalling $${detail.totalNumeric.toFixed(2)}`,
-                );
+                if (preSaveItemCount !== undefined && preSaveTotal !== undefined) {
+                  // Strict delta assertion when the pre-save snapshot
+                  // succeeded. expected count = pre + N appended;
+                  // expected total = pre + Δ.
+                  const expectedCount = preSaveItemCount + a.items_append.length;
+                  const expectedTotal = preSaveTotal + appendDelta;
+                  const countOk = detail.items.length === expectedCount;
+                  const totalOk = Math.abs(detail.totalNumeric - expectedTotal) <= 0.01;
+                  if (!countOk) {
+                    mismatches.push(
+                      `appended item count: expected ${expectedCount} (${preSaveItemCount} pre + ${a.items_append.length} appended), got ${detail.items.length}`,
+                    );
+                  }
+                  if (!totalOk) {
+                    mismatches.push(
+                      `appended total: expected $${expectedTotal.toFixed(2)} ($${preSaveTotal.toFixed(2)} pre + $${appendDelta.toFixed(2)} appended), got $${detail.totalNumeric.toFixed(2)}`,
+                    );
+                  }
+                  if (countOk && totalOk) {
+                    verified.push(
+                      `appended ${a.items_append.length} line(s) (+$${appendDelta.toFixed(2)}); PO now has ${detail.items.length} item(s) totalling $${detail.totalNumeric.toFixed(2)}`,
+                    );
+                  }
+                } else {
+                  // Pre-fetch failed; degrade to a post-state-only
+                  // report so the caller knows the strict check
+                  // didn't run.
+                  verifyLines.push(
+                    `_Append verify: pre-save snapshot failed; reporting post-save state only — PO now has ${detail.items.length} item(s) totalling $${detail.totalNumeric.toFixed(2)}._`,
+                  );
+                }
               }
               if (mismatches.length > 0) {
                 return errorMarkdown(
