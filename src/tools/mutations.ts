@@ -408,6 +408,15 @@ export function createMutationTools(
   // confirmed executor.
   type UpdatePOInternalArgs = UpdatePurchaseOrderArgs & {
     _resolved_company_name?: string;
+    /**
+     * Status code resolved from the (possibly label-form) `status` arg by
+     * the outer handler. Single resolution at handler entry — the prompt
+     * builder and the executor both read this rather than calling
+     * `resolvePoStatusCode` again. Undefined when caller didn't pass a
+     * `status` at all. NEVER undefined when `status !== undefined`
+     * (the handler throws/Zod-fails earlier on an unresolvable label).
+     */
+    _resolved_status_code?: number;
   };
   const updatePOConfirmed = requiresConfirmation<UpdatePOInternalArgs>(
     "update_purchase_order",
@@ -422,20 +431,15 @@ export function createMutationTools(
         parts.push(`change vendor → ${vendorLabel}`);
       }
       if (a.status !== undefined) {
-        // Render the resolved label when possible; on an unknown label
-        // the executor will throw with a helpful message, so warn in
-        // the prompt rather than letting `requiresConfirmation` blow up
-        // before the user sees anything.
-        try {
-          const code = resolvePoStatusCode(a.status);
-          parts.push(
-            `status → ${poStatusLabel(code)}${code === undefined ? "" : ` (${code})`}`,
-          );
-        } catch {
-          parts.push(
-            `status → **${escapeMarkdownInline(String(a.status))}** _(⚠ unknown label — will fail on commit)_`,
-          );
-        }
+        // The outer handler resolved status → code once and stashed it
+        // on `_resolved_status_code`. We just render it here — no
+        // re-resolution, no second throw path. (If the resolution
+        // failed earlier the handler would have returned an error
+        // before storing the confirmation.)
+        const code = a._resolved_status_code;
+        parts.push(
+          `status → ${poStatusLabel(code)}${code === undefined ? "" : ` (${code})`}`,
+        );
       }
       if (a.description !== undefined) parts.push("update description");
       if (a.prefix !== undefined) parts.push(`prefix → "${escapeMarkdownInline(a.prefix)}"`);
@@ -451,7 +455,8 @@ export function createMutationTools(
     },
     async (a) => {
       try {
-        const statusCode = resolvePoStatusCode(a.status);
+        // Status was resolved once in the outer handler; reuse.
+        const statusCode = a._resolved_status_code;
         const result = await getApi().updatePurchaseOrder({
           purchaseOrderId: a.purchase_order_id,
           name: a.name,
@@ -479,32 +484,106 @@ export function createMutationTools(
         }
 
         // Verify-after-write (default on). Re-fetch the PO and confirm
-        // the values match intent. Catches BT's edge cases where the
-        // save returns success but the field didn't actually stick.
+        // EVERY caller-passed field matches intent. Catches BT's edge
+        // cases where the save returns success but a field didn't stick.
+        //
+        // Coverage rule: a field is verified IFF the caller passed it.
+        // We don't assert anything about fields the caller didn't touch
+        // (they could legitimately have been left at their old values).
+        // The summary message ("Verified: ...") only mentions fields
+        // actually checked so the user can't read it as a green-checkmark
+        // for fields we didn't look at.
         const verify = a.verify ?? true;
         const verifyLines: string[] = [];
         if (verify) {
           try {
             const detail = await getApi().getPurchaseOrder(a.purchase_order_id);
-            if (detail) {
+            if (!detail) {
+              // Re-fetch returned null (404 / parse failure). Explicitly
+              // surface the gap so the caller knows verify didn't run —
+              // silently omitting was misleading.
+              verifyLines.push(
+                "_Verify skipped: re-fetched PO not found (possible race or transient BT issue). The save itself reported success._",
+              );
+            } else {
               const mismatches: string[] = [];
-              if (a.name !== undefined && detail.name !== a.name) {
-                mismatches.push(`name: expected "${a.name}", got "${detail.name}"`);
+              const verified: string[] = [];
+
+              if (a.name !== undefined) {
+                if (detail.name !== a.name) {
+                  mismatches.push(`name: expected "${a.name}", got "${detail.name}"`);
+                } else {
+                  verified.push(`name="${escapeMarkdownInline(detail.name)}"`);
+                }
               }
-              if (a.company_id !== undefined && detail.companyId !== a.company_id) {
-                mismatches.push(`company_id: expected ${a.company_id}, got ${detail.companyId}`);
+              if (a.prefix !== undefined) {
+                if (detail.prefix !== a.prefix) {
+                  mismatches.push(`prefix: expected "${a.prefix}", got "${detail.prefix}"`);
+                } else {
+                  verified.push(`prefix="${escapeMarkdownInline(detail.prefix)}"`);
+                }
+              }
+              if (a.description !== undefined) {
+                if (detail.description !== a.description) {
+                  mismatches.push(
+                    `description: expected ${JSON.stringify(a.description.slice(0, 80))}, got ${JSON.stringify(detail.description.slice(0, 80))}`,
+                  );
+                } else {
+                  verified.push(`description (${detail.description.length} chars)`);
+                }
+              }
+              if (a.status !== undefined) {
+                // Reuse the single resolved code from the outer handler;
+                // skip the assertion if BT's re-fetch couldn't parse the
+                // current status (same null-safety pattern as company_id).
+                const expectedStatus = a._resolved_status_code;
+                if (
+                  expectedStatus !== undefined &&
+                  detail.status !== null &&
+                  detail.status !== expectedStatus
+                ) {
+                  mismatches.push(
+                    `status: expected ${expectedStatus} (${poStatusLabel(expectedStatus)}), got ${detail.status} (${poStatusLabel(detail.status)})`,
+                  );
+                } else if (expectedStatus !== undefined && detail.status !== null) {
+                  verified.push(`status=${poStatusLabel(detail.status)} (${detail.status})`);
+                }
+              }
+              // Vendor: skip the mismatch check if the re-fetch couldn't
+              // parse the company block — null vs number always trips
+              // strict-equality and would fire a false positive when
+              // the save actually succeeded.
+              if (a.company_id !== undefined) {
+                if (detail.companyId !== null && detail.companyId !== a.company_id) {
+                  mismatches.push(
+                    `company_id: expected ${a.company_id}, got ${detail.companyId}`,
+                  );
+                } else if (detail.companyId !== null) {
+                  verified.push(
+                    `vendor=${detail.companyName ? escapeMarkdownInline(detail.companyName) : "—"} (#${detail.companyId})`,
+                  );
+                }
               }
               if (a.items !== undefined) {
                 const expectedTotal = a.items.reduce((s, i) => s + i.total, 0);
-                if (Math.abs(detail.totalNumeric - expectedTotal) > 0.01) {
+                // Tolerance is in CENTS (0.01 dollars). Reasonable for
+                // single-PO line-item totals; accumulated rounding noise
+                // across many items stays well under this for currency.
+                const totalOk =
+                  Math.abs(detail.totalNumeric - expectedTotal) <= 0.01;
+                const countOk = detail.items.length === a.items.length;
+                if (!totalOk) {
                   mismatches.push(
                     `items total: expected $${expectedTotal.toFixed(2)}, got $${detail.totalNumeric.toFixed(2)}`,
                   );
                 }
-                if (detail.items.length !== a.items.length) {
+                if (!countOk) {
                   mismatches.push(
                     `item count: expected ${a.items.length}, got ${detail.items.length}`,
                   );
+                }
+                if (totalOk && countOk) {
+                  verified.push(`${detail.items.length} item(s), total $${detail.totalNumeric.toFixed(2)}`);
                 }
               }
               if (mismatches.length > 0) {
@@ -514,9 +593,9 @@ export function createMutationTools(
                     "\n\nRe-run `get_purchase_order` for current state. The save endpoint sometimes returns 200 OK while silently dropping fields.",
                 );
               }
-              verifyLines.push(
-                `Verified: name="${escapeMarkdownInline(detail.name)}", vendor=${detail.companyName ? escapeMarkdownInline(detail.companyName) : "—"} (#${detail.companyId}), ${detail.items.length} item(s), total $${detail.totalNumeric.toFixed(2)}.`,
-              );
+              if (verified.length > 0) {
+                verifyLines.push(`Verified: ${verified.join(", ")}.`);
+              }
             }
           } catch (err) {
             // Verify is best-effort — don't fail the whole update if
@@ -1046,6 +1125,24 @@ export function createMutationTools(
         if (!parsed.success) return formatZodError(parsed.error, "update_purchase_order");
         const data = parsed.data;
 
+        // Resolve the status label → code ONCE up-front, fail-fast on
+        // unknown labels (Zod blocks them already, but a programmatic
+        // internal caller bypassing the schema would otherwise reach
+        // updatePurchaseOrder with the status silently dropped). Both
+        // the prompt builder and the executor read the resolved code
+        // off `_resolved_status_code` rather than re-resolving.
+        let resolvedStatusCode: number | undefined;
+        if (data.status !== undefined) {
+          try {
+            resolvedStatusCode = resolvePoStatusCode(data.status);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return errorMarkdown(
+              `**Error calling \`update_purchase_order\`**: ${msg}`,
+            );
+          }
+        }
+
         // If the caller is changing the vendor AND hasn't already gone
         // through the confirmation handshake (i.e. first call), resolve
         // the company name so the prompt shows it. Skip the lookup on
@@ -1060,6 +1157,7 @@ export function createMutationTools(
           {
             ...data,
             _resolved_company_name: resolvedCompanyName,
+            _resolved_status_code: resolvedStatusCode,
           },
           store,
           sessionId,

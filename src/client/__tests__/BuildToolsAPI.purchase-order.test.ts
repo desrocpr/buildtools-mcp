@@ -173,27 +173,9 @@ describe("BuildToolsAPI.updatePurchaseOrder — proactive lock detection", () =>
     expect(saveCalls).toHaveLength(0);
   });
 
-  it("respects `force: true` — bypasses lock detection so internal callers can probe BT directly", async () => {
-    // force=true is an internal seam (NOT exposed via the MCP tool
-    // schema) for future auto-transition wiring. When set, the save
-    // call proceeds — BT will likely still 403, but the proactive
-    // check is bypassed. Test with a name-only update so we don't
-    // also need to stub /budget (items[] would trigger that path).
-    const { stub, recorded } = makeRecordingStub(poFormConfirmedHtml);
-    const api = new BuildToolsAPI({ fetch: stub } as any);
-    (api as unknown as { authenticated: boolean }).authenticated = true;
-
-    await api.updatePurchaseOrder({
-      purchaseOrderId: 39201,
-      name: "renamed",
-      force: true,
-    });
-
-    const saveCalls = recorded.filter((r) =>
-      r.url.includes("/purchase-orders/save/"),
-    );
-    expect(saveCalls).toHaveLength(1);
-    expect(saveCalls[0].method).toBe("POST");
-  });
+  // (The `force: true` bypass flag was deleted in PR #57 review round 3
+  // — there's no known unlock path to wire it through to, so it was
+  // pure speculative API surface. If BT ever exposes an unlock workflow,
+  // re-add `force` + this test together.)
 });
 

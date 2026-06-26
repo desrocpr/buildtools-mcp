@@ -592,6 +592,8 @@ describe("update_purchase_order — status by label, real errors, verify-after-w
       name: "renamed",
       number: "PO-1",
       prefix: "PO",
+      status: 1,
+      description: "",
       companyId: 977,
       companyName: "Kai Muten, LLC",
       items: [{ id: 1, budgetCategoryId: 1621, budgetCategoryCode: "6030", budgetCategoryName: "Plumbing Sub", total: "400.00", notes: "", internalNotes: "", invoiceRelated: "0.00", amounts: [], companyId: 977, companyName: "Kai Muten, LLC" }],
@@ -604,9 +606,13 @@ describe("update_purchase_order — status by label, real errors, verify-after-w
     const store = mkStore();
     const tool = findUpdatePoTool(api, store);
 
+    // Pass company_id explicitly so vendor IS in the caller-passed set
+    // and shows up in the "Verified:" line. (After PR #57 round 3 the
+    // verify summary only mentions fields the caller actually passed.)
     const args = {
       purchase_order_id: 39752,
       name: "renamed",
+      company_id: 977,
       items: [{ budget_category_id: 1621, description: "x", total: 400 }],
     };
     const prompt = await tool.handler(args, api);
@@ -628,7 +634,8 @@ describe("update_purchase_order — status by label, real errors, verify-after-w
     });
     const getPurchaseOrder = vi.fn().mockResolvedValue({
       id: 39752, projectId: 185936, name: "renamed",
-      number: "", prefix: "PO", companyId: 977, companyName: "Kai Muten, LLC",
+      number: "", prefix: "PO", status: 1, description: "",
+      companyId: 977, companyName: "Kai Muten, LLC",
       items: [], totalNumeric: 0,
     });
     const api = fakeApi({
