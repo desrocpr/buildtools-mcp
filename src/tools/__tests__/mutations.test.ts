@@ -1568,9 +1568,10 @@ describe("transition_purchase_order_status — standalone tool (PR #62)", () => 
     const args = { purchase_order_id: 39752, status: "Sent" as const };
     const prompt = await tool.handler(args, api);
     const promptText = textOf(prompt);
-    // Prompt shows the resolved label + code so the user can verify intent
-    expect(promptText.toLowerCase()).toContain("transition purchase order #39752");
+    // PR #64: prompt now renders "from ... → ..." with the # bolded.
+    expect(promptText).toMatch(/Transition purchase order \*\*#39752\*\*/);
     expect(promptText).toContain("Sent");
+    expect(promptText.toLowerCase()).toContain("from");
 
     const confirmationId = promptText.match(/confirmation_id:\s*"([^"]+)"/)![1];
     const result = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
@@ -1626,6 +1627,105 @@ describe("transition_purchase_order_status — standalone tool (PR #62)", () => 
     );
     expect(result.isError).toBe(true);
     expect(textOf(result).toLowerCase()).toContain("status");
+  });
+
+  // ---------- PR #64 retro-review fixes for PR #62 ----------
+
+  it("review MEDIUM (M3): rejects arbitrary numeric status codes (status: 999)", async () => {
+    const transitionPurchaseOrderStatus = vi.fn();
+    const api = fakeApi({
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findTransitionTool(api, mkStore());
+    // status: 999 passes Zod (z.number() accepts any number) but
+    // resolvePoStatusCode now whitelists against the known enum.
+    const result = await tool.handler(
+      { purchase_order_id: 39752, status: 999 },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Unknown PO status code 999");
+    // CRITICAL: BT was never called with a bogus code.
+    expect(transitionPurchaseOrderStatus).not.toHaveBeenCalled();
+  });
+
+  it("review MEDIUM (M2): confirmation prompt shows current status (live fetch anchor)", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue({
+      id: 39752,
+      projectId: 185966,
+      name: "Test PO for prompt rendering",
+      number: "", prefix: "PO",
+      status: 2, // Sent
+      description: "",
+      companyId: 977, companyName: "Kai Muten, LLC",
+      items: [{ id: 1, budgetCategoryId: 1621, budgetCategoryCode: "6030", budgetCategoryName: "Plumbing Sub", total: "100", notes: "", internalNotes: "", invoiceRelated: "0.00", amounts: [], companyId: 977, companyName: "Kai Muten, LLC" }],
+      totalNumeric: 100,
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const tool = findTransitionTool(api, mkStore());
+    const prompt = await tool.handler(
+      { purchase_order_id: 39752, status: "Draft" as const },
+      api,
+    );
+    const text = textOf(prompt);
+    // Current status surfaced — from Sent (2) → Draft (1)
+    expect(text).toMatch(/from \*\*Sent \(2\)\*\*/);
+    expect(text).toMatch(/Draft \(1\)/);
+    // PO name surfaced for additional grounding
+    expect(text).toContain("Test PO for prompt rendering");
+  });
+
+  it("review MEDIUM (M2): prompt degrades gracefully when current-status fetch fails", async () => {
+    const getPurchaseOrder = vi.fn().mockRejectedValue(new Error("transient BT 503"));
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const tool = findTransitionTool(api, mkStore());
+    const prompt = await tool.handler(
+      { purchase_order_id: 39752, status: "Draft" as const },
+      api,
+    );
+    const text = textOf(prompt);
+    // Falls through to a marker — the confirmation still works.
+    expect(text).toContain("could not fetch current state");
+    expect(text).toContain("Draft (1)");
+  });
+
+  it("review MEDIUM (M5): idempotency_key replays cached result on retry — cross-tool consistency restored", async () => {
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      success: true, message: "ok",
+    });
+    const getPurchaseOrder = vi.fn().mockResolvedValue({
+      id: 39752, projectId: 185966, name: "x", number: "", prefix: "PO",
+      status: 1, description: "",
+      companyId: 977, companyName: "X",
+      items: [], totalNumeric: 0,
+    });
+    const api = fakeApi({
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const { IdempotencyStore } = await import("../../idempotency/index.js");
+    const idem = new IdempotencyStore();
+    const tools = createMutationTools(() => api, mkStore(), undefined, idem);
+    const tool = tools.find((t) => t.name === "transition_purchase_order_status")!;
+
+    const args = {
+      purchase_order_id: 39752,
+      status: "Sent" as const,
+      idempotency_key: "pr64-transition-test",
+    };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(1);
+
+    // Retry: same key + same args → cached replay
+    const retry = await tool.handler(args, api);
+    expect(textOf(retry)).toContain("Idempotency replay");
+    expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(1);
   });
 });
 

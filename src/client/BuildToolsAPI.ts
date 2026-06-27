@@ -3779,23 +3779,40 @@ export class BuildToolsAPI {
         { headers: { "X-Requested-With": "XMLHttpRequest" } },
         false,
       );
-      const fresh = this.absorbFormToken(refreshResp.body);
-      if (fresh) {
-        resp = await this.request(
-          `${this.baseUrl}/purchase-orders/status/update`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/x-www-form-urlencoded",
-              "X-Requested-With": "XMLHttpRequest",
-              Accept: "application/json",
-              ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
-            },
-            body: buildBody(fresh),
-          },
-          false,
-        );
+      // PR #64 review fix (MEDIUM): check the refresh's HTTP status BEFORE
+      // attempting to absorb a token. Without this guard, a 5xx form
+      // endpoint or a 404 (invalid poId) would silently fall through —
+      // the absorb returns null, the retry skips, and the original 419
+      // body ("Page Expired" HTML) gets parsed as JSON downstream,
+      // producing a confusing "non-JSON response from /status/update"
+      // error that hides the actual root cause (the form fetch failed).
+      if (refreshResp.status !== 200) {
+        return {
+          success: false,
+          errors: `CSRF refresh failed (HTTP ${refreshResp.status}) after 419 — original BT response: ${resp.body.slice(0, 200)}`,
+        };
       }
+      const fresh = this.absorbFormToken(refreshResp.body);
+      if (!fresh) {
+        return {
+          success: false,
+          errors: `CSRF refresh: form returned 200 but no _token field present`,
+        };
+      }
+      resp = await this.request(
+        `${this.baseUrl}/purchase-orders/status/update`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Requested-With": "XMLHttpRequest",
+            Accept: "application/json",
+            ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+          },
+          body: buildBody(fresh),
+        },
+        false,
+      );
     }
 
     // Response shape: `{r: 0|1, msg: string[], s: <success count>, f:

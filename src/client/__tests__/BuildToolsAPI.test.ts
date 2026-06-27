@@ -2124,4 +2124,45 @@ describe("BuildToolsAPI.transitionPurchaseOrderStatus — CSRF cache (PR #62)", 
     // Token cached without a second fetch
     expect((api as unknown as { cachedFormToken: string | null }).cachedFormToken).toBe("opportune-token");
   });
+
+  it("PR #64 review fix (M1): 419 followed by non-200 form refresh returns a CLEAR error (not 'non-JSON response')", async () => {
+    // The original PR #62 code called absorbFormToken on the refresh
+    // body regardless of HTTP status. If the form endpoint went 5xx,
+    // absorb returned null, the retry skipped, and the original 419
+    // body parsed as JSON downstream — surfacing as a confusing
+    // "Non-JSON response from /status/update (HTTP 419): Page expired"
+    // that hid the real cause (form endpoint failed).
+    let formCount = 0;
+    const calls: string[] = [];
+    const fetchImpl: typeof fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("/purchase-orders/form/")) {
+        formCount++;
+        // First form fetch: succeeds, populates initial token.
+        if (formCount === 1) {
+          return new Response(
+            `<form><input name="_token" value="initial-token"></form>`,
+            { status: 200 },
+          );
+        }
+        // Second form fetch (the post-419 refresh): 503.
+        return new Response("BT internal error", { status: 503 });
+      }
+      if (url.includes("/status/update")) {
+        return new Response("Page expired", { status: 419 });
+      }
+      return new Response("?", { status: 404 });
+    }) as typeof fetch;
+    const api = new BuildToolsAPI({ fetch: fetchImpl } as any);
+    (api as unknown as { authenticated: boolean }).authenticated = true;
+
+    const result = await api.transitionPurchaseOrderStatus({ purchaseOrderId: 39752, status: 1 });
+    expect(result.success).toBe(false);
+    // The error must name the refresh failure concretely. NOT the
+    // confusing "non-JSON response" pre-fix wording.
+    expect(String(result.errors)).toContain("CSRF refresh failed");
+    expect(String(result.errors)).toContain("503");
+    expect(String(result.errors)).not.toContain("Non-JSON response");
+  });
 });
