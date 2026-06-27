@@ -367,7 +367,7 @@ describe("post()", () => {
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
     // Inject a known XSRF so we can assert it goes out on the header.
-    (api as unknown as { xsrfToken: string }).xsrfToken = "xsrf-abc";
+    (api as unknown as { tokens: { xsrf: string } }).tokens.xsrf = "xsrf-abc";
 
     const out = await api.post("/projects/save", {
       name: "P",
@@ -2099,7 +2099,7 @@ describe("BuildToolsAPI.transitionPurchaseOrderStatus — CSRF cache (PR #62)", 
     const api = new BuildToolsAPI({ fetch: harness.fetchImpl } as any);
     (api as unknown as { authenticated: boolean }).authenticated = true;
     // Pre-seed the cache so we start with a stale token in cache.
-    (api as unknown as { cachedFormToken: string }).cachedFormToken = "stale-token";
+    (api as unknown as { tokens: { form: string } }).tokens.form = "stale-token";
 
     const r = await api.transitionPurchaseOrderStatus({ purchaseOrderId: 39752, status: 1 });
     expect(r.success).toBe(true);
@@ -2122,7 +2122,7 @@ describe("BuildToolsAPI.transitionPurchaseOrderStatus — CSRF cache (PR #62)", 
 
     await api.getPurchaseOrder(39752);
     // Token cached without a second fetch
-    expect((api as unknown as { cachedFormToken: string | null }).cachedFormToken).toBe("opportune-token");
+    expect((api as unknown as { tokens: { form: string | null } }).tokens.form).toBe("opportune-token");
   });
 
   it("PR #64 review fix (M1): 419 followed by non-200 form refresh returns a CLEAR error (not 'non-JSON response')", async () => {
@@ -2164,5 +2164,73 @@ describe("BuildToolsAPI.transitionPurchaseOrderStatus — CSRF cache (PR #62)", 
     expect(String(result.errors)).toContain("CSRF refresh failed");
     expect(String(result.errors)).toContain("503");
     expect(String(result.errors)).not.toContain("Non-JSON response");
+  });
+});
+
+describe("BuildToolsAPI — token cache consolidation (PR #70)", () => {
+  // Full TokenCache shape mirror — PR #70 review LOW 2: cast through
+  // the complete struct rather than property-narrow projections so a
+  // future rename of `tokens` becomes a compile error instead of a
+  // runtime TypeError.
+  type TokenCache = {
+    csrf: string | null;
+    xsrf: string | null;
+    form: string | null;
+    upload: string | null;
+  };
+  // Intersection won't work (BuildToolsAPI's private tokens collapses
+  // to never) — cast through unknown to expose the internals for tests.
+  type ApiInternal = {
+    tokens: TokenCache;
+    invalidateAllTokens: () => void;
+  };
+  function asInternal(api: BuildToolsAPI): ApiInternal {
+    return api as unknown as ApiInternal;
+  }
+
+  it("PR #70 review MEDIUM 1: invalidateAllTokens clears all four token slots in one call", () => {
+    const api = asInternal(new BuildToolsAPI({ tenant: "test" }));
+    api.tokens.csrf = "csrf-x";
+    api.tokens.xsrf = "xsrf-x";
+    api.tokens.form = "form-x";
+    api.tokens.upload = "upload-x";
+    api.invalidateAllTokens();
+    expect(api.tokens).toEqual({
+      csrf: null,
+      xsrf: null,
+      form: null,
+      upload: null,
+    });
+  });
+
+  it("targeted invalidation (419 path): only `form` is cleared; others survive", () => {
+    const api = asInternal(new BuildToolsAPI({ tenant: "test" }));
+    api.tokens.csrf = "csrf-stable";
+    api.tokens.xsrf = "xsrf-stable";
+    api.tokens.form = "form-stale";
+    api.tokens.upload = "upload-stable";
+    // Mimic the 419 retry path's invalidation (verbatim from
+    // bulkTransitionPurchaseOrderStatuses).
+    api.tokens.form = null;
+    expect(api.tokens).toEqual({
+      csrf: "csrf-stable",
+      xsrf: "xsrf-stable",
+      form: null,
+      upload: "upload-stable",
+    });
+  });
+
+  it("targeted invalidation (upload 401/403 path): only `upload` is cleared", () => {
+    const api = asInternal(new BuildToolsAPI({ tenant: "test" }));
+    api.tokens.csrf = "csrf-stable";
+    api.tokens.xsrf = "xsrf-stable";
+    api.tokens.form = "form-stable";
+    api.tokens.upload = "upload-stale";
+    // Mimic the upload-attachment retry path.
+    api.tokens.upload = null;
+    expect(api.tokens.csrf).toBe("csrf-stable");
+    expect(api.tokens.xsrf).toBe("xsrf-stable");
+    expect(api.tokens.form).toBe("form-stable");
+    expect(api.tokens.upload).toBeNull();
   });
 });
