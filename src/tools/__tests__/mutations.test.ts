@@ -1907,12 +1907,301 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
 
     const args = { ...baseArgs, auto_send: false };
     const prompt = await tool.handler(args, api);
-    // Prompt renders "**Final status**: Draft" (markdown bold around the
-    // label, then `: Draft`). Match the label + value separately.
     expect(textOf(prompt)).toMatch(/Final status\*\*:\s*Draft/);
     const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
     const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
     expect(exec.isError).toBeFalsy();
-    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({ purchaseOrderId: 39201, status: 1 });
+    // PR #63 review fix MEDIUM: PO already in Draft + auto_send:false →
+    // target = Draft = current. Tool now SKIPS the redundant transition
+    // (instead of issuing Draft→Draft which BT may treat as a duplicate).
+    expect(transitionPurchaseOrderStatus).not.toHaveBeenCalled();
+  });
+
+  // ---------- PR #63 round-2 review fixes ----------
+
+  it("review HIGH (race): re-fetches live status in executor — concurrent demote/edit/send by another user prevents an unintended demote", async () => {
+    const getPurchaseOrder = vi
+      .fn()
+      // Outer-handler pre-snapshot — Confirmed (stale)
+      .mockResolvedValueOnce(poSnapshot)
+      // Executor live re-fetch — actually Sent now
+      .mockResolvedValueOnce({ ...poSnapshot, status: 2 });
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39201, message: "saved",
+    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      success: true, message: "ok",
+    });
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      fileId: 1, name: "x.pdf", downloadUrl: "https://file.buildtools.app/o/0ye79w/file/hash/x?download=1", size: 1, module: 1500, moduleId: 39201,
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      uploadAttachment: uploadAttachment as any,
+    });
+    const tool = findTool(api, mkStore());
+    const prompt = await tool.handler(baseArgs, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...baseArgs, confirmation_id: cid }, api);
+    expect(exec.isError).toBeFalsy();
+    // NO demote issued (live PO is Sent, not locked).
+    // Only the Sent→Sent skip OR a single transition.
+    const demoteCalls = transitionPurchaseOrderStatus.mock.calls.filter(
+      (c: any[]) => c[0].status === 1,
+    );
+    expect(demoteCalls).toHaveLength(0);
+  });
+
+  it("review HIGH (rollback): final-transition failure on auto-transition path rolls back to original Confirmed", async () => {
+    const getPurchaseOrder = vi
+      .fn()
+      .mockResolvedValueOnce(poSnapshot) // outer
+      .mockResolvedValueOnce(poSnapshot); // executor live re-fetch — still Confirmed
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39201, message: "saved",
+    });
+    const transitionPurchaseOrderStatus = vi
+      .fn()
+      // Demote 3→1: OK
+      .mockResolvedValueOnce({ success: true, message: "demoted" })
+      // Restore-target 1→2 (Sent): FAILS
+      .mockResolvedValueOnce({ success: false, errors: "BT refused the transition" })
+      // Rollback 1→3 (original Confirmed): OK
+      .mockResolvedValueOnce({ success: true, message: "rolled back" });
+    const uploadAttachment = vi.fn();
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      uploadAttachment: uploadAttachment as any,
+    });
+    const tool = findTool(api, mkStore());
+    const prompt = await tool.handler(baseArgs, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...baseArgs, confirmation_id: cid }, api);
+    expect(exec.isError).toBe(true);
+    expect(textOf(exec)).toContain("Rolled back to original");
+    expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(3);
+    expect(transitionPurchaseOrderStatus.mock.calls[2][0]).toEqual({ purchaseOrderId: 39201, status: 3 });
+  });
+
+  it("review HIGH (idempotency): retry with same idempotency_key + same args returns cached result, no second BT call", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue({ ...poSnapshot, status: 1 });
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({ success: true });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({ success: true });
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      fileId: 1, name: "x.pdf", downloadUrl: "https://file.buildtools.app/o/0ye79w/file/hash/x?download=1", size: 1, module: 1500, moduleId: 39201,
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      uploadAttachment: uploadAttachment as any,
+    });
+    const { IdempotencyStore } = await import("../../idempotency/index.js");
+    const idem = new IdempotencyStore();
+    const tools = createMutationTools(() => api, mkStore(), undefined, idem);
+    const tool = tools.find((t) => t.name === "apply_vendor_quote")!;
+
+    const args = { ...baseArgs, idempotency_key: "round-2-replay-test" };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(exec.isError).toBeFalsy();
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
+
+    // Retry with same key + same args → cached replay
+    const retry = await tool.handler(args, api);
+    expect(textOf(retry)).toContain("Idempotency replay");
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1); // STILL 1
+    expect(uploadAttachment).toHaveBeenCalledTimes(1); // STILL 1
+  });
+
+  it("review HIGH (vendor null bypass): PO with companyId=null treated as mismatch — refuses to overwrite", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue({
+      ...poSnapshot, companyId: null, companyName: null,
+    });
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const updatePurchaseOrder = vi.fn();
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+    });
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler(baseArgs, api);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Vendor mismatch");
+    expect(textOf(result)).toContain("no vendor assigned");
+    expect(updatePurchaseOrder).not.toHaveBeenCalled();
+  });
+
+  it("review HIGH (HTML entities): vendor name with `&amp;` matches caller query `M&D`", async () => {
+    const searchCompanies = vi.fn().mockResolvedValue({
+      data: [{ DT_RowId: "row_42", name: "M&amp;D Construction LLC", type_name: "Vendor" }],
+    });
+    const getPurchaseOrder = vi.fn().mockResolvedValue({
+      ...poSnapshot, companyId: 42, companyName: "M&D Construction LLC",
+    });
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({ success: true });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({ success: true });
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      fileId: 1, name: "x.pdf", downloadUrl: "https://file.buildtools.app/o/x/file/hash/x?download=1", size: 1, module: 1500, moduleId: 39201,
+    });
+    const api = fakeApi({
+      searchCompanies: searchCompanies as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      uploadAttachment: uploadAttachment as any,
+    });
+    const tool = findTool(api, mkStore());
+    const args = {
+      vendor_name: "M&D Construction LLC", // user types &, not &amp;
+      purchase_order_id: 39201,
+      quote_total: 100,
+      filename: "x.pdf",
+      file_base64: tinyPdfBase64,
+    };
+    const prompt = await tool.handler(args, api);
+    // Should NOT return a disambiguation; the exact match should fire.
+    expect(textOf(prompt)).not.toContain("Multiple vendors match");
+    expect(textOf(prompt)).toContain("confirmation_id");
+  });
+
+  it("review HIGH (notes field): `notes` is internal-only, NEVER becomes the public line description", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue({ ...poSnapshot, status: 1 });
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({ success: true });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({ success: true });
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      fileId: 1, name: "x.pdf", downloadUrl: "https://file.buildtools.app/o/x/file/hash/x?download=1", size: 1, module: 1500, moduleId: 39201,
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      uploadAttachment: uploadAttachment as any,
+    });
+    const tool = findTool(api, mkStore());
+    const sensitiveNote = "INTERNAL: do not show to vendor — PM still negotiating";
+    const args = {
+      ...baseArgs,
+      notes: sensitiveNote,
+    };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args, confirmation_id: cid }, api);
+    const item = updatePurchaseOrder.mock.calls[0][0].items[0];
+    // CRITICAL: description is the public field. It must NOT contain the sensitive note.
+    expect(item.description).not.toContain("INTERNAL");
+    expect(item.description).toBe("Confirmed order ADMO55739-F");
+    // The note IS in internalNotes (where it belongs).
+    expect(item.internalNotes).toBe(sensitiveNote);
+  });
+
+  it("review LOW (size estimate): file >> 25MB rejected via base64 length estimate without Buffer allocation", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    // A base64 string representing ~100 MB. Mock it directly — large
+    // enough that the approx estimate alone rejects it.
+    const huge = "A".repeat(150 * 1024 * 1024);
+    const result = await tool.handler({ ...baseArgs, file_base64: huge }, api);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("25 MB");
+  });
+
+  it("review MEDIUM (collapse warning): prompt warns when multi-line PO will be replaced with one line", async () => {
+    const multiLineSnapshot = {
+      ...poSnapshot,
+      itemCount: 3,
+      items: [
+        { ...poSnapshot.items[0], id: 1 },
+        { ...poSnapshot.items[0], id: 2 },
+        { ...poSnapshot.items[0], id: 3 },
+      ],
+    };
+    const getPurchaseOrder = vi.fn().mockResolvedValue({ ...multiLineSnapshot, status: 1 });
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+    });
+    const tool = findTool(api, mkStore());
+    const prompt = await tool.handler(baseArgs, api);
+    expect(textOf(prompt)).toContain("replaces **3 existing lines**");
+    expect(textOf(prompt)).toContain("update_purchase_order");
+  });
+
+  it("review MEDIUM (vendor email warning): unconditional warning when finalStatus is Sent, not just on auto-transition path", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue({ ...poSnapshot, status: 1 }); // Draft, not locked
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+    });
+    const tool = findTool(api, mkStore());
+    const prompt = await tool.handler(baseArgs, api);
+    expect(textOf(prompt)).toContain("Vendor will receive an email");
+  });
+
+  it("review MEDIUM (quote_total): Zod rejects negative, zero, and Infinity", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    for (const bad of [-100, 0, Infinity, NaN]) {
+      const result = await tool.handler({ ...baseArgs, quote_total: bad }, api);
+      expect(result.isError).toBe(true);
+    }
+  });
+
+  it("review MEDIUM (content_type validation): Zod rejects non-MIME strings like `text/html<script>`", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler(
+      { ...baseArgs, content_type: "text/html<script>alert(1)</script>" },
+      api,
+    );
+    expect(result.isError).toBe(true);
+  });
+
+  it("review MEDIUM (downloadUrl validation): malicious URL from BT response is dropped from markdown link", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue({ ...poSnapshot, status: 1 });
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({ success: true });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({ success: true });
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      fileId: 1,
+      name: "x.pdf",
+      // Attacker-controlled URL: javascript: scheme + closing paren
+      downloadUrl: "javascript:alert(1))more text",
+      size: 1,
+      module: 1500,
+      moduleId: 39201,
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      uploadAttachment: uploadAttachment as any,
+    });
+    const tool = findTool(api, mkStore());
+    const prompt = await tool.handler(baseArgs, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...baseArgs, confirmation_id: cid }, api);
+    expect(exec.isError).toBeFalsy();
+    // The hostile URL must NOT appear in the response.
+    expect(textOf(exec)).not.toContain("javascript:");
+    // No markdown link rendered when URL is rejected.
+    expect(textOf(exec)).not.toContain("[Download]");
   });
 });

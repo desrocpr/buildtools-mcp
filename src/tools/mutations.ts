@@ -9,6 +9,8 @@
  * ~/code/buildtools/api-client.js and ~/code/buildtools/api-test-results.md.
  */
 
+import { createHash } from "node:crypto";
+
 import { z } from "zod/v3";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
@@ -90,7 +92,15 @@ function formatZodError(err: z.ZodError, toolName: string): ToolResult {
  */
 function escapeMarkdownInline(s: unknown): string {
   if (s === undefined || s === null) return "";
-  return String(s).replace(/[\\`*_[\]<>]/g, (c) => `\\${c}`);
+  // PR #63 security fix: include \n and \r in the escape set so
+  // BT-sourced data (vendor names, PO names, error fragments) can't
+  // break out of their markdown row and inject instructions into the
+  // LLM context. Newlines are replaced with a literal space — escaping
+  // them via backslash would render as a hard line break in some
+  // markdown viewers, which still leaks the breakout.
+  return String(s)
+    .replace(/[\r\n]+/g, " ")
+    .replace(/[\\`*_[\]<>]/g, (c) => `\\${c}`);
 }
 
 /**
@@ -357,7 +367,10 @@ const ApplyVendorQuoteSchema = z.object({
     ),
   quote_total: z
     .number()
-    .describe("New total dollar amount the vendor quoted. Replaces existing line items with a SINGLE line (collapse-to-one — for per-line granularity use update_purchase_order directly)."),
+    .positive()
+    .finite()
+    .max(10_000_000)
+    .describe("New total dollar amount the vendor quoted. Must be positive and finite. Replaces existing line items with a SINGLE line (collapse-to-one — for per-line granularity use update_purchase_order directly)."),
   filename: z
     .string()
     .min(1)
@@ -368,8 +381,12 @@ const ApplyVendorQuoteSchema = z.object({
     .describe("Base64-encoded file bytes. NO `data:` URL prefix. Hard cap: 25 MB after decode."),
   content_type: z
     .string()
+    .regex(
+      /^[a-z][a-z0-9!#&\-^_]*\/[a-z0-9!#&\-^_+.]+$/i,
+      "content_type must be a valid MIME type (e.g. 'application/pdf', 'image/png')",
+    )
     .optional()
-    .describe("MIME type. Default: 'application/pdf' if filename ends with .pdf, else 'application/octet-stream'."),
+    .describe("MIME type. Default: 'application/pdf' if filename ends with .pdf, else 'application/octet-stream'. Validated against MIME format to prevent stored-XSS attacks via BT's file server."),
   quote_reference: z
     .string()
     .optional()
@@ -1175,14 +1192,22 @@ export function createMutationTools(
         ),
       };
     }
-    const decoded = rows.map((r) => ({
-      id: Number(r.DT_RowId.replace(/^row_/, "")),
-      name: (r.name ?? "").replace(/<[^>]*>/g, "").trim(),
-      type: (r.type_name ?? "").trim(),
-    }));
+    // Decode BOTH BT's emitted name (HTML entities + tags) AND the
+    // caller's query through the same normalizer so e.g. "M&D
+    // Construction" matches the stored "M&amp;D Construction".
+    const decoded = rows.map((r) => {
+      const cleanName = decodeBtNameEntities((r.name ?? "").replace(/<[^>]*>/g, "")).replace(/\s+/g, " ").trim();
+      return {
+        id: Number(r.DT_RowId.replace(/^row_/, "")),
+        name: cleanName,
+        type: (r.type_name ?? "").trim(),
+        normalized: cleanName.toLowerCase(),
+      };
+    });
+    const normalizedQuery = normalizeVendorName(query);
     // Exact-name match takes precedence over partial matches.
     const exact = decoded.filter(
-      (r) => r.name.toLowerCase() === query.toLowerCase(),
+      (r) => r.normalized === normalizedQuery,
     );
     const matches = exact.length === 1 ? exact : decoded;
     if (matches.length === 1) {
@@ -1229,12 +1254,16 @@ export function createMutationTools(
     } as const;
     const list = (await getApi().getPurchaseOrders<{ data: POListRow[] }>(params as any)) ?? { data: [] };
     const rows = list.data ?? [];
-    // Match by company name in the row (datatable embeds it as a substring).
-    const candidates = rows.filter(
-      (r) =>
-        (r.company ?? "").toLowerCase().includes(vendor.name.toLowerCase()) ||
-        (r.name ?? "").toLowerCase().includes(vendor.name.toLowerCase()),
-    );
+    // Match strictly on the `company` column (NOT the PO name — a PO
+    // named "Smith Plumbing rough-in" should never match vendor "Smith"
+    // when the actual company is Acme). Normalize both sides through
+    // the same path that resolved the vendor in the first place to
+    // tolerate HTML-entity drift between datatable views.
+    const normalizedVendor = normalizeVendorName(vendor.name);
+    const candidates = rows.filter((r) => {
+      const company = normalizeVendorName(r.company ?? "");
+      return company === normalizedVendor;
+    });
     if (candidates.length === 0) {
       return {
         ok: false,
@@ -1307,6 +1336,26 @@ export function createMutationTools(
     return s.replace(/<[^>]*>/g, "").trim();
   }
 
+  // Decode the HTML entities BT emits in datatable names (M&amp;D
+  // Construction → M&D Construction). Without this the exact-name match
+  // in resolveVendorCompany silently fails on any vendor with `&`, `<`,
+  // `>`, or quoted characters in the name. The set is small because BT
+  // only encodes a fixed handful — no need for a full HTML parser.
+  function decodeBtNameEntities(s: string): string {
+    return s
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#039;/g, "'")
+      .replace(/&apos;/gi, "'")
+      .replace(/&nbsp;/gi, " ");
+  }
+
+  function normalizeVendorName(s: string): string {
+    return decodeBtNameEntities(stripHtml(s)).replace(/\s+/g, " ").trim().toLowerCase();
+  }
+
   const applyVendorQuoteConfirmed = requiresConfirmation<ApplyVendorQuoteInternalArgs>(
     "apply_vendor_quote",
     (a) => {
@@ -1334,17 +1383,36 @@ export function createMutationTools(
       }
       lines.push(`- **Attachment**: ${escapeMarkdownInline(a.filename)} (${sizeKb} KB, ${ct})`);
       lines.push(`- **Final status**: ${finalStatus}`);
+      // PR #63 review MEDIUM (architect): warn when the collapse-to-one
+      // replacement will destroy multiple existing line items — the
+      // single-line PO is the common case but a 3-line plumbing PO
+      // collapsed to one is a real loss of structure that the user
+      // should consent to explicitly.
+      if (pre && pre.itemCount > 1) {
+        lines.push(
+          `- **Line items**: replaces **${pre.itemCount} existing line${pre.itemCount === 1 ? "" : "s"}** with 1 new line ("${escapeMarkdownInline(a.quote_reference ? `Confirmed order ${a.quote_reference}` : `Quote applied`)}"). For per-line granularity use \`update_purchase_order\` directly.`,
+        );
+      }
       const isLocked =
         pre && pre.status !== null && PURCHASE_ORDER_WRITE_LOCKED_STATUSES.has(pre.status);
       if (isLocked && a.unlock_if_locked !== false) {
         lines.push(
           "",
-          `⚠️ **Auto-transition** (PO is currently **${poStatusLabel(pre.status as number)}**): demote → apply edits + attach PDF → ${finalStatus}. Vendor will see status flip in their portal${finalStatus === "Sent" ? " and may receive an email" : ""}.`,
+          `⚠️ **Auto-transition** (PO is currently **${poStatusLabel(pre.status as number)}**): demote → apply edits + attach PDF → ${finalStatus}. Vendor will see status flip in their portal.`,
         );
       } else if (isLocked && a.unlock_if_locked === false) {
         lines.push(
           "",
           `⛔ PO is **${poStatusLabel(pre.status as number)}** (write-locked) and \`unlock_if_locked\` is false. This call will fail with a lock error — re-invoke with \`unlock_if_locked: true\` to auto-orchestrate.`,
+        );
+      }
+      // PR #63 review MEDIUM (security): unconditional vendor-email
+      // warning when finalStatus is Sent. The original implementation
+      // only warned inside the isLocked branch, hiding the
+      // outbound-email side effect on the common Draft→Sent path.
+      if (finalStatus === "Sent" && a.auto_send !== false) {
+        lines.push(
+          `- _Vendor will receive an email when status moves to Sent._`,
         );
       }
       return lines.join("\n");
@@ -1353,21 +1421,50 @@ export function createMutationTools(
       try {
         const vendor = a._resolved_vendor!;
         const po = a._resolved_po!;
-        const pre = a._pre_state;
+        let pre = a._pre_state;
         const finalStatusCode = a.auto_send === false ? 1 : 2; // Draft : Sent
-        const isLocked =
-          pre && pre.status !== null && PURCHASE_ORDER_WRITE_LOCKED_STATUSES.has(pre.status);
         const unlockIfLocked = a.unlock_if_locked !== false;
+
+        // PR #63 review HIGH (race fix): re-fetch live status when we
+        // might need to demote. The outer handler's pre-snapshot was
+        // captured at confirmation-prompt time (potentially minutes
+        // ago) — a concurrent user could have moved the PO out of
+        // Confirmed in the meantime. Trusting the stale snapshot
+        // would issue an unintended demote against a now-Sent PO.
+        // Mirror the PR #61 fix in update_purchase_order.
+        if (unlockIfLocked) {
+          try {
+            const fresh = await getApi().getPurchaseOrder(po.id);
+            if (fresh) {
+              pre = {
+                status: fresh.status,
+                totalNumeric: fresh.totalNumeric,
+                itemCount: fresh.items.length,
+                companyId: fresh.companyId,
+                companyName: fresh.companyName,
+                projectId: fresh.projectId != null ? Number(fresh.projectId) : null,
+                firstItemBudgetCode: fresh.items[0]?.budgetCategoryCode,
+              };
+            }
+          } catch {
+            // Best-effort; fall through to whatever the outer snapshot says.
+          }
+        }
+        const isLocked =
+          !!pre && pre.status !== null && PURCHASE_ORDER_WRITE_LOCKED_STATUSES.has(pre.status);
+        const originalStatus = pre?.status ?? null;
 
         // === Step 1: update PO content + status orchestration ===
         // We replicate update_purchase_order's auto-transition logic
         // inline rather than calling the tool layer because we need
         // tighter control over the final-status target (driven by
         // auto_send, not the caller's status arg).
-        const lineDescription =
-          a.notes && a.notes.length > 0
-            ? a.notes
-            : defaultLineDescription(a, new Date().toISOString().slice(0, 10));
+        // PR #63 review HIGH: the line `description` is ALWAYS derived
+        // from quote_reference (or the dated default). `notes` is
+        // internal-only and goes to internalNotes ONLY — the schema
+        // documents it as such, and using it as the public description
+        // would silently expose internal notes to the vendor.
+        const lineDescription = defaultLineDescription(a, new Date().toISOString().slice(0, 10));
         // Pick budget code: caller-supplied → pre-state first item → reject
         const budgetCode = a.budget_code ?? pre?.firstItemBudgetCode;
         if (!budgetCode) {
@@ -1430,16 +1527,41 @@ export function createMutationTools(
         workflowSteps.push(`applied content (new total $${a.quote_total.toFixed(2)})`);
 
         // 1c. Final status transition.
-        const transitionResult = await getApi().transitionPurchaseOrderStatus({
-          purchaseOrderId: po.id,
-          status: finalStatusCode,
-        });
-        if (!transitionResult.success) {
-          return errorMarkdown(
-            `**Content updated** for PO #${po.id} but **status transition to ${poStatusLabel(finalStatusCode)} failed**: ${String(transitionResult.errors ?? "(no detail)")}. PO is currently in Draft.`,
-          );
+        // PR #63 review MEDIUM: skip when the PO is already at the
+        // target status AND we didn't demote — avoids a redundant
+        // Sent→Sent call that BT may treat as a duplicate vendor
+        // email trigger.
+        const currentAfterEdit = isLocked && unlockIfLocked ? 1 : originalStatus;
+        if (finalStatusCode !== currentAfterEdit) {
+          const transitionResult = await getApi().transitionPurchaseOrderStatus({
+            purchaseOrderId: po.id,
+            status: finalStatusCode,
+          });
+          if (!transitionResult.success) {
+            // PR #63 review HIGH (architect): mirror update_purchase_order's
+            // rollback on final-transition failure. When we entered via
+            // the auto-transition path, the PO is now in Draft with the
+            // edits applied — try to restore the original status so the
+            // PO doesn't get stranded in a state the caller didn't ask
+            // for. Report concretely either way.
+            if (isLocked && unlockIfLocked && originalStatus !== null) {
+              const rollback = await getApi().transitionPurchaseOrderStatus({
+                purchaseOrderId: po.id,
+                status: originalStatus,
+              });
+              const rollbackNote = rollback.success
+                ? `\n\n_Rolled back to original **${poStatusLabel(originalStatus)}** state — your content edits remain applied but the status didn't move forward._`
+                : `\n\n**Rollback to ${poStatusLabel(originalStatus)} ALSO failed** (${String(rollback.errors ?? "(no detail)")}). **PO is now in Draft with content applied — fix manually in the BT UI.**`;
+              return errorMarkdown(
+                `**Content updated** for PO #${po.id} but **status transition to ${poStatusLabel(finalStatusCode)} failed**: ${String(transitionResult.errors ?? "(no detail)")}.${rollbackNote}`,
+              );
+            }
+            return errorMarkdown(
+              `**Content updated** for PO #${po.id} but **status transition to ${poStatusLabel(finalStatusCode)} failed**: ${String(transitionResult.errors ?? "(no detail)")}. PO status is unchanged from ${poStatusLabel(currentAfterEdit ?? -1)}.`,
+            );
+          }
+          workflowSteps.push(`status → ${poStatusLabel(finalStatusCode)}`);
         }
-        workflowSteps.push(`status → ${poStatusLabel(finalStatusCode)}`);
 
         // === Step 2: upload attachment ===
         // Independent of step 1. We surface partial failures here
@@ -1460,7 +1582,22 @@ export function createMutationTools(
             filename: a.filename,
             contentType: a.content_type ?? defaultContentType(a.filename),
           });
-          attachmentNote = `Attached **${escapeMarkdownInline(upload.name)}** (file_id ${upload.fileId}). [Download](${upload.downloadUrl})`;
+          // PR #63 review MEDIUM: validate downloadUrl before
+          // interpolating into a markdown link. An unvalidated URL
+          // from BT's response could include `)` that terminates the
+          // link early (and injects trailing text into the LLM
+          // context), or a `javascript:` scheme that some markdown
+          // renderers will execute. The file domain is fixed; reject
+          // anything that doesn't match.
+          const safeDownloadUrl = typeof upload.downloadUrl === "string"
+            && /^https:\/\/file\.buildtools\.app\//.test(upload.downloadUrl)
+            && !upload.downloadUrl.includes(")")
+            ? upload.downloadUrl
+            : null;
+          const downloadFragment = safeDownloadUrl
+            ? ` [Download](${safeDownloadUrl})`
+            : "";
+          attachmentNote = `Attached **${escapeMarkdownInline(upload.name)}** (file_id ${upload.fileId}).${downloadFragment}`;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           attachmentNote = `⚠️ **Attachment upload failed**: ${escapeMarkdownInline(msg)}. PO was updated successfully; re-attach manually with \`upload_attachment\` or via the BT UI.`;
@@ -2192,7 +2329,19 @@ export function createMutationTools(
           );
         }
 
-        // Compute decoded byte length, enforce 25 MB cap.
+        // PR #63 review LOW: estimate decoded size from base64 length
+        // BEFORE allocating the Buffer, so a 100 MB upload is rejected
+        // without actually allocating 100 MB. Final precise check
+        // happens after if the estimate is close to the cap.
+        const approxBytes = Math.ceil(
+          data.file_base64.replace(/=+$/, "").length * 0.75,
+        );
+        if (approxBytes > APPLY_VENDOR_QUOTE_MAX_BYTES + 1024) {
+          return errorMarkdown(
+            `**File too large**: ~${(approxBytes / 1024 / 1024).toFixed(1)} MB exceeds the 25 MB cap.`,
+          );
+        }
+        // Compute decoded byte length, enforce 25 MB cap precisely.
         let decodedBytes: number;
         try {
           decodedBytes = Buffer.from(data.file_base64, "base64").byteLength;
@@ -2204,6 +2353,50 @@ export function createMutationTools(
           return errorMarkdown(
             `**File too large**: ${(decodedBytes / 1024 / 1024).toFixed(1)} MB exceeds the 25 MB cap.`,
           );
+        }
+
+        // === Idempotency lookup (PR #63 review HIGH) ===
+        // When caller passes idempotency_key, check the cache BEFORE
+        // running resolution + executor. The schema advertised this
+        // capability; the original PR shipped without wiring it. A
+        // retry after timeout would otherwise re-execute the full
+        // workflow (duplicate vendor email + duplicate attachment).
+        let idempotencyCacheKey: string | undefined;
+        let idempotencyArgsFingerprint: string | undefined;
+        if (idempotencyStore && data.idempotency_key) {
+          idempotencyCacheKey = IdempotencyStore.buildCacheKey(
+            "apply_vendor_quote",
+            sessionId,
+            data.idempotency_key,
+          );
+          // Strip per-call metadata + the large file_base64 from the
+          // fingerprint (we substitute its SHA-256 to keep retries
+          // detectable without bloating the cache key).
+          const { confirmation_id: _ci, idempotency_key: _ik, file_base64: _fb, ...semantic } = data;
+          const fileHash = createHash("sha256").update(data.file_base64).digest("hex");
+          idempotencyArgsFingerprint = IdempotencyStore.fingerprintArgs({
+            ...semantic,
+            _file_sha256: fileHash,
+          });
+          const lookup = idempotencyStore.lookup(
+            idempotencyCacheKey,
+            idempotencyArgsFingerprint,
+          );
+          if (lookup.kind === "hit") {
+            const original = lookup.result;
+            const banner = `_Idempotency replay: returning cached result for key \`${escapeMarkdownInline(data.idempotency_key)}\` — no BT call was made. Cache TTL ${idempotencyStore.ttlMinutes} min._\n\n`;
+            return {
+              ...original,
+              content: original.content.map((c) =>
+                "text" in c ? { ...c, text: banner + c.text } : c,
+              ),
+            };
+          }
+          if (lookup.kind === "mismatch") {
+            return errorMarkdown(
+              `**Idempotency key reused with different args.** The key \`${escapeMarkdownInline(data.idempotency_key)}\` was previously used (within the last ${idempotencyStore.ttlMinutes} min) with a DIFFERENT set of args. Use a fresh key per distinct write, or wait for the cache to expire.`,
+            );
+          }
         }
 
         // === First-call resolution (skip on confirmation_id replay
@@ -2235,17 +2428,29 @@ export function createMutationTools(
             itemCount: detail.items.length,
             companyId: detail.companyId,
             companyName: detail.companyName,
-            projectId: Number(detail.projectId),
+            // PR #63 review MEDIUM: preserve null (not coerce to 0
+            // via Number()) so the executor's `pre.projectId ??
+            // fetchProjectId(...)` fallback actually fires when BT's
+            // form omits the project id field.
+            projectId: detail.projectId != null ? Number(detail.projectId) : null,
             firstItemBudgetCode: detail.items[0]?.budgetCategoryCode,
           };
 
           // 4. Vendor/PO consistency check.
+          // PR #63 review HIGH: a PO with companyId=null (vendor-unassigned)
+          // must NOT silently pass this gate — that lets a caller
+          // overwrite any unassigned PO with arbitrary content under
+          // ANY vendor id. Treat null as a definite mismatch against
+          // any specific resolved vendor.
           if (
-            detail.companyId !== null &&
+            detail.companyId === null ||
             resolvedVendor.id !== detail.companyId
           ) {
+            const detailVendorLabel = detail.companyId === null
+              ? "_(no vendor assigned)_"
+              : `**${escapeMarkdownInline(detail.companyName ?? `#${detail.companyId}`)}** (#${detail.companyId})`;
             return errorMarkdown(
-              `**Vendor mismatch**: PO #${resolvedPo.id} is for vendor **${escapeMarkdownInline(detail.companyName ?? `#${detail.companyId}`)}** (#${detail.companyId}), not **${escapeMarkdownInline(resolvedVendor.name)}** (#${resolvedVendor.id}). Either pass \`company_id: ${detail.companyId}\` matching the PO, or change the vendor first with \`update_purchase_order\`.`,
+              `**Vendor mismatch**: PO #${resolvedPo.id} is for vendor ${detailVendorLabel}, not **${escapeMarkdownInline(resolvedVendor.name)}** (#${resolvedVendor.id}). Either pass \`company_id\` matching the PO, or change the vendor first with \`update_purchase_order\`.`,
             );
           }
 
@@ -2257,7 +2462,7 @@ export function createMutationTools(
           }
         }
 
-        return applyVendorQuoteConfirmed(
+        const result = await applyVendorQuoteConfirmed(
           {
             ...data,
             _resolved_vendor: resolvedVendor,
@@ -2268,6 +2473,23 @@ export function createMutationTools(
           store,
           sessionId,
         );
+
+        // Cache the result on the execute call (confirmation_id present)
+        // when it succeeded. Same proxy condition as update_purchase_order.
+        if (
+          idempotencyStore &&
+          idempotencyCacheKey &&
+          idempotencyArgsFingerprint &&
+          data.confirmation_id &&
+          !result.isError
+        ) {
+          idempotencyStore.store(
+            idempotencyCacheKey,
+            idempotencyArgsFingerprint,
+            result,
+          );
+        }
+        return result;
       },
     },
     makeTool(
