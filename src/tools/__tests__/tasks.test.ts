@@ -10,7 +10,7 @@
  *   (a) registry exports both tools in order
  *   (b) list_tasks happy path Markdown shape (incl. stripHtml on assigned_to)
  *   (c) list_tasks passes `columns[1][search][value]: "2"` when status is "In Progress"
- *   (d) list_tasks passes `search[value]` when project_name is given
+ *   (d) list_tasks passes `search[value]` when query is given
  *   (e) list_tasks returns plain Markdown on empty data (no isError)
  *   (f) list_tasks returns isError: true on BuildToolsError
  *   (g) list_tasks returns isError: true on Zod-invalid status
@@ -28,7 +28,6 @@ import {
 
 import {
   listTasksTool,
-  searchTasksTool,
   taskTools,
 } from "../tasks.js";
 import { type ToolResult } from "../projects.js";
@@ -95,7 +94,7 @@ const sampleInProgressTaskRow = {
 describe("taskTools registry", () => {
   it("exports exactly two tools with the contract-mandated names in order", () => {
     const names = taskTools.map((t) => t.name);
-    expect(names).toEqual(["list_tasks", "search_tasks"]);
+    expect(names).toEqual(["list_tasks"]);
   });
 
   it("each tool exposes a JSON Schema for its input", () => {
@@ -197,13 +196,13 @@ describe("list_tasks", () => {
     expect(callArgs["columns[1][search][value]"]).toBeUndefined();
   });
 
-  it("forwards project_name via the datatable's search[value]", async () => {
+  it("forwards query via the datatable's search[value]", async () => {
     const getTasks = vi.fn().mockResolvedValue({ data: [sampleTaskRow] });
     const api = fakeApi({
       getTasks: getTasks as BuildToolsAPI["getTasks"],
     });
 
-    await listTasksTool.handler({ project_name: "Doe" }, api);
+    await listTasksTool.handler({ query: "Doe" }, api);
 
     const callArgs = getTasks.mock.calls[0][0];
     expect(callArgs).toMatchObject({
@@ -231,13 +230,13 @@ describe("list_tasks", () => {
     });
 
     const result = await listTasksTool.handler(
-      { project_name: "zzz" },
+      { query: "zzz" },
       api,
     );
 
     expect(result.isError).toBeFalsy();
     expect(textOf(result)).toMatch(/No tasks matched/);
-    expect(textOf(result)).toContain('project_name: "zzz"');
+    expect(textOf(result)).toContain('query: "zzz"');
   });
 
   it("handles a null datatable envelope gracefully (treats as empty)", async () => {
@@ -308,61 +307,3 @@ describe("list_tasks", () => {
 // search_tasks
 // ---------------------------------------------------------------------------
 
-describe("search_tasks", () => {
-  it("calls searchTasks(query, 20) on the happy path", async () => {
-    const searchTasks = vi
-      .fn()
-      .mockResolvedValue({ data: [sampleTaskRow] });
-    const api = fakeApi({
-      searchTasks: searchTasks as BuildToolsAPI["searchTasks"],
-    });
-
-    const result = await searchTasksTool.handler({ query: "Permits" }, api);
-
-    expect(result.isError).toBeFalsy();
-    const text = textOf(result);
-    expect(text).toContain('**1 match** for "Permits"');
-    expect(text).toContain("Permits");
-    expect(searchTasks).toHaveBeenCalledWith("Permits", 20);
-  });
-
-  it("returns a Markdown 'no matches' message when result is empty (no isError)", async () => {
-    const searchTasks = vi.fn().mockResolvedValue({ data: [] });
-    const api = fakeApi({
-      searchTasks: searchTasks as BuildToolsAPI["searchTasks"],
-    });
-
-    const result = await searchTasksTool.handler({ query: "zzz" }, api);
-    expect(result.isError).toBeFalsy();
-    expect(textOf(result)).toContain('No tasks matched query "zzz"');
-  });
-
-  it("returns Markdown error content (isError: true) on BuildToolsError", async () => {
-    const searchTasks = vi
-      .fn()
-      .mockRejectedValue(
-        new BuildToolsServerError("Internal server error", { status: 500 }),
-      );
-    const api = fakeApi({
-      searchTasks: searchTasks as BuildToolsAPI["searchTasks"],
-    });
-
-    const result = await searchTasksTool.handler({ query: "anything" }, api);
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain("Internal server error");
-    expect(textOf(result)).toContain("BuildToolsServerError");
-  });
-
-  it("rejects a query shorter than 2 characters (Zod min length)", async () => {
-    const result = await searchTasksTool.handler({ query: "a" }, fakeApi({}));
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain("Invalid input for `search_tasks`");
-    expect(textOf(result)).toContain("query");
-  });
-
-  it("rejects a missing query (Zod required)", async () => {
-    const result = await searchTasksTool.handler({}, fakeApi({}));
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain("query");
-  });
-});

@@ -29,7 +29,6 @@ import {
   getPurchaseOrderTool,
   listPurchaseOrdersTool,
   purchaseOrderTools,
-  searchPurchaseOrdersTool,
 } from "../purchase-orders.js";
 import { type ToolResult } from "../projects.js";
 
@@ -112,7 +111,6 @@ describe("purchaseOrderTools registry", () => {
     const names = purchaseOrderTools.map((t) => t.name);
     expect(names).toEqual([
       "list_purchase_orders",
-      "search_purchase_orders",
       "get_purchase_order",
     ]);
   });
@@ -184,7 +182,7 @@ describe("list_purchase_orders", () => {
     expect(callArg.length).toBe(50);
   });
 
-  it("forwards project_name as the datatable global search and respects limit", async () => {
+  it("forwards query as the datatable global search and respects limit", async () => {
     const getPurchaseOrders = vi.fn().mockResolvedValue({
       data: [samplePurchaseOrderRow],
       recordsTotal: 37644,
@@ -196,7 +194,7 @@ describe("list_purchase_orders", () => {
     });
 
     const result = await listPurchaseOrdersTool.handler(
-      { project_name: "Cabero", limit: 25 },
+      { query: "Cabero", limit: 25 },
       api,
     );
 
@@ -215,7 +213,7 @@ describe("list_purchase_orders", () => {
     });
 
     const result = await listPurchaseOrdersTool.handler(
-      { project_name: "Nonesuch" },
+      { query: "Nonesuch" },
       api,
     );
 
@@ -293,92 +291,7 @@ describe("list_purchase_orders", () => {
 });
 
 // ---------------------------------------------------------------------------
-// search_purchase_orders
-// ---------------------------------------------------------------------------
-
-describe("search_purchase_orders", () => {
-  it("returns Markdown list rows on the happy path", async () => {
-    const searchPurchaseOrders = vi.fn().mockResolvedValue({
-      data: [samplePurchaseOrderRow],
-      recordsTotal: 1,
-      recordsFiltered: 1,
-    });
-    const api = fakeApi({
-      searchPurchaseOrders:
-        searchPurchaseOrders as BuildToolsAPI["searchPurchaseOrders"],
-    });
-
-    const result = await searchPurchaseOrdersTool.handler(
-      { query: "Cabero" },
-      api,
-    );
-
-    expect(result.isError).toBeFalsy();
-    const text = textOf(result);
-    expect(text).toContain('**1 match** for "Cabero"');
-    expect(text).toContain("PO 333121488");
-    expect(text).toContain("Cabero - Wedi materials");
-    expect(text).toContain("Best Tile");
-    // Search delegates to client with the fixed limit of 20.
-    expect(searchPurchaseOrders).toHaveBeenCalledWith("Cabero", 20);
-  });
-
-  it("returns a Markdown 'no purchase orders' message when result is empty", async () => {
-    const searchPurchaseOrders = vi.fn().mockResolvedValue({ data: [] });
-    const api = fakeApi({
-      searchPurchaseOrders:
-        searchPurchaseOrders as BuildToolsAPI["searchPurchaseOrders"],
-    });
-
-    const result = await searchPurchaseOrdersTool.handler(
-      { query: "zzzzzz" },
-      api,
-    );
-
-    expect(result.isError).toBeFalsy();
-    expect(textOf(result)).toContain('No purchase orders matched query "zzzzzz"');
-  });
-
-  it("returns Markdown error content (isError: true) on BuildToolsError", async () => {
-    const searchPurchaseOrders = vi
-      .fn()
-      .mockRejectedValue(new BuildToolsServerError("Bad gateway", { status: 502 }));
-    const api = fakeApi({
-      searchPurchaseOrders:
-        searchPurchaseOrders as BuildToolsAPI["searchPurchaseOrders"],
-    });
-
-    const result = await searchPurchaseOrdersTool.handler(
-      { query: "Cabero" },
-      api,
-    );
-
-    expect(result.isError).toBe(true);
-    const text = textOf(result);
-    expect(text).toContain("Bad gateway");
-    expect(text).toContain("BuildToolsServerError");
-    expect(text).toContain("search_purchase_orders");
-  });
-
-  it("returns Markdown error content (isError: true) when query is too short", async () => {
-    const result = await searchPurchaseOrdersTool.handler(
-      { query: "a" },
-      fakeApi({}),
-    );
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain("Invalid input for `search_purchase_orders`");
-    expect(textOf(result)).toContain("query");
-  });
-
-  it("returns Markdown error content (isError: true) when query is missing", async () => {
-    const result = await searchPurchaseOrdersTool.handler({}, fakeApi({}));
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain("query");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// get_purchase_order
+// get_purchase_order (restored — PR #71 review HIGH 1)
 // ---------------------------------------------------------------------------
 
 describe("get_purchase_order", () => {
@@ -449,3 +362,4 @@ describe("get_purchase_order", () => {
     expect(textOf(result)).toContain("Invalid input for `get_purchase_order`");
   });
 });
+

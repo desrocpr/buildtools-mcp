@@ -3,7 +3,6 @@
  *
  * Two tools:
  *   - list_purchase_orders   — paged datatable, optionally filtered by project name.
- *   - search_purchase_orders — free-text fuzzy match across PO rows.
  *
  * Design notes:
  *
@@ -177,11 +176,12 @@ interface PurchaseOrdersDatatable {
 // ---------------------------------------------------------------------------
 
 const ListPurchaseOrdersInputSchema = z.object({
-  project_name: z
+  query: z
     .string()
+    .min(2)
     .optional()
     .describe(
-      "Substring filter applied as the datatable's global free-text search.",
+      "Free-text substring search across PO number, name, company, project, and relations. Min 2 chars.",
     ),
   limit: z
     .number()
@@ -203,22 +203,22 @@ async function listPurchaseOrdersHandler(
 
   const limit = input.limit ?? 50;
   const params: Record<string, string | number> = { length: limit };
-  if (input.project_name) {
-    params["search[value]"] = input.project_name;
+  if (input.query) {
+    params["search[value]"] = input.query;
   }
 
   try {
     const result = await api.getPurchaseOrders<PurchaseOrdersDatatable>(params);
     const rows = result?.data ?? [];
     if (rows.length === 0) {
-      const filter = input.project_name
-        ? ` matching project "${input.project_name}"`
+      const filter = input.query
+        ? ` matching project "${input.query}"`
         : "";
       return markdown(`No purchase orders matched${filter}.`);
     }
     const total = result?.recordsFiltered ?? result?.recordsTotal ?? rows.length;
-    const filterLabel = input.project_name
-      ? `, project filter: "${input.project_name}"`
+    const filterLabel = input.query
+      ? `, project filter: "${input.query}"`
       : "";
     const header = `**${rows.length} purchase order${rows.length === 1 ? "" : "s"}** (filtered ${total} total${filterLabel}):`;
     const body = rows.map(formatPurchaseOrderRow).join("\n");
@@ -231,62 +231,12 @@ async function listPurchaseOrdersHandler(
 export const listPurchaseOrdersTool: ToolDefinition = {
   name: "list_purchase_orders",
   description:
-    "List BuildTools purchase orders. Optionally filter by project name (substring). Returns up to 50 by default.",
+    "List or search BuildTools purchase orders. " +
+    "Pass `query` for free-text substring search across PO number, name, company, project, and relations. " +
+    "Returns up to 50 by default. ",
   inputSchema: zodToJsonSchema(ListPurchaseOrdersInputSchema),
   permission: "read",
   handler: listPurchaseOrdersHandler,
-};
-
-// ---------------------------------------------------------------------------
-// search_purchase_orders
-// ---------------------------------------------------------------------------
-
-const SearchPurchaseOrdersInputSchema = z.object({
-  query: z.string().min(2).describe("Search query."),
-});
-
-export type SearchPurchaseOrdersInput = z.infer<
-  typeof SearchPurchaseOrdersInputSchema
->;
-
-/** Maximum results surfaced by `search_purchase_orders`. */
-const SEARCH_PURCHASE_ORDERS_LIMIT = 20;
-
-async function searchPurchaseOrdersHandler(
-  args: unknown,
-  api: BuildToolsAPI,
-): Promise<ToolResult> {
-  const parsed = SearchPurchaseOrdersInputSchema.safeParse(args ?? {});
-  if (!parsed.success) return formatZodError(parsed.error, "search_purchase_orders");
-  const { query } = parsed.data;
-
-  try {
-    const result = await api.searchPurchaseOrders<PurchaseOrdersDatatable>(
-      query,
-      SEARCH_PURCHASE_ORDERS_LIMIT,
-    );
-    const rows = result?.data ?? [];
-    if (rows.length === 0) {
-      return markdown(`No purchase orders matched query "${query}".`);
-    }
-    const header = `**${rows.length} match${rows.length === 1 ? "" : "es"}** for "${query}":`;
-    const body = rows
-      .slice(0, SEARCH_PURCHASE_ORDERS_LIMIT)
-      .map(formatPurchaseOrderRow)
-      .join("\n");
-    return markdown(`${header}\n\n${body}`);
-  } catch (err) {
-    return formatError(err, "search_purchase_orders");
-  }
-}
-
-export const searchPurchaseOrdersTool: ToolDefinition = {
-  name: "search_purchase_orders",
-  description:
-    "Free-text search across BuildTools purchase orders (matches PO number, name, company, project, relations).",
-  inputSchema: zodToJsonSchema(SearchPurchaseOrdersInputSchema),
-  permission: "read",
-  handler: searchPurchaseOrdersHandler,
 };
 
 // ---------------------------------------------------------------------------
@@ -297,7 +247,7 @@ const GetPurchaseOrderInputSchema = z.object({
   purchase_order_id: z
     .number()
     .describe(
-      "BuildTools purchase order ID (the `#` shown by list_purchase_orders / search_purchase_orders).",
+      "BuildTools purchase order ID (the `#` shown by list_purchase_orders).",
     ),
 });
 
@@ -414,7 +364,7 @@ export const getPurchaseOrderTool: ToolDefinition = {
   name: "get_purchase_order",
   description:
     "[v1 2026-06-23] Get full detail for a single BuildTools purchase order: vendor (with company_id), project, PO number, line items (with budget category code + names, qty, unit, total, notes), and invoiced/unpaid summary. " +
-    "Use this when you have a PO ID from list_purchase_orders / search_purchase_orders and need the structured company_id for downstream create_purchase_order or invoice flows. Read-only — no confirmation required.",
+    "Use this when you have a PO ID from list_purchase_orders and need the structured company_id for downstream create_purchase_order or invoice flows. Read-only — no confirmation required.",
   inputSchema: zodToJsonSchema(GetPurchaseOrderInputSchema),
   permission: "read",
   handler: getPurchaseOrderHandler,
@@ -426,6 +376,5 @@ export const getPurchaseOrderTool: ToolDefinition = {
 
 export const purchaseOrderTools: ToolDefinition[] = [
   listPurchaseOrdersTool,
-  searchPurchaseOrdersTool,
   getPurchaseOrderTool,
 ];

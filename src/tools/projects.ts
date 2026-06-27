@@ -220,10 +220,15 @@ const ListProjectsInputSchema = z.object({
     .describe(
       'Filter by project status. "Active" matches all four active teams (Nexus/Omega/Invicta/Alpha). Default: Active.',
     ),
-  customer_name: z
+  query: z
     .string()
+    .min(2)
     .optional()
-    .describe("Substring match against customer name."),
+    .describe(
+      "Free-text substring search across project name, customer, address, and project number. " +
+        "Combine with `status` to filter (e.g. status=Active + query=\"Smith\" finds active projects matching Smith). " +
+        "Min 2 chars to avoid matching too broadly.",
+    ),
   limit: z
     .number()
     .min(1)
@@ -270,12 +275,13 @@ async function listProjectsHandler(
     params["columns[1][search][regex]"] = "true";
   }
 
-  // Customer-name filter: there is no canonical column for "customer name" on
-  // the project datatable (the row's `managers` HTML blob is project managers,
-  // not customers). We pass the user's substring via the global free-text
-  // `search[value]` — the datatable searches across all column values.
-  if (input.customer_name) {
-    params["search[value]"] = input.customer_name;
+  // Free-text query: BT's datatable doesn't expose per-column filters
+  // for project name / customer / address / project-number separately,
+  // so we use the global `search[value]` which searches across all
+  // columns. PR #71 unifies what was previously two tools (`list` +
+  // `search`) into one with this `query` arg.
+  if (input.query) {
+    params["search[value]"] = input.query;
   }
 
   try {
@@ -284,7 +290,7 @@ async function listProjectsHandler(
     if (rows.length === 0) {
       return markdown(
         `No projects matched the filter (status: ${status}` +
-          (input.customer_name ? `, customer: ${input.customer_name}` : "") +
+          (input.query ? `, query: "${input.query}"` : "") +
           `).`,
       );
     }
@@ -300,7 +306,10 @@ async function listProjectsHandler(
 export const listProjectsTool: ToolDefinition = {
   name: "list_projects",
   description:
-    "List BuildTools projects with optional filters. Returns up to 50 projects by default. Use filters to narrow scope.",
+    "List or search BuildTools projects. " +
+    "Returns up to 50 projects by default. " +
+    "Pass `query` for free-text substring search across name, customer, address, project number. " +
+    "Combine `status` + `query` to filter by team AND match text (e.g. status=Active + query=Smith).",
   inputSchema: zodToJsonSchema(ListProjectsInputSchema),
   permission: "read",
   handler: listProjectsHandler,
@@ -400,52 +409,6 @@ export const getProjectTool: ToolDefinition = {
   handler: getProjectHandler,
 };
 
-// ---------------------------------------------------------------------------
-// search_projects
-// ---------------------------------------------------------------------------
-
-const SearchProjectsInputSchema = z.object({
-  query: z.string().min(2).describe("Search query."),
-});
-
-export type SearchProjectsInput = z.infer<typeof SearchProjectsInputSchema>;
-
-/** Maximum results surfaced by `search_projects`. */
-const SEARCH_PROJECTS_LIMIT = 20;
-
-async function searchProjectsHandler(
-  args: unknown,
-  api: BuildToolsAPI,
-): Promise<ToolResult> {
-  const parsed = SearchProjectsInputSchema.safeParse(args ?? {});
-  if (!parsed.success) return formatZodError(parsed.error, "search_projects");
-  const { query } = parsed.data;
-
-  try {
-    const result = await api.searchProjects<ProjectsDatatable>(
-      query,
-      SEARCH_PROJECTS_LIMIT,
-    );
-    const rows = result?.data ?? [];
-    if (rows.length === 0) {
-      return markdown(`No projects matched query "${query}".`);
-    }
-    const header = `**${rows.length} match${rows.length === 1 ? "" : "es"}** for "${query}":`;
-    const body = rows.slice(0, SEARCH_PROJECTS_LIMIT).map(formatProjectRow).join("\n");
-    return markdown(`${header}\n\n${body}`);
-  } catch (err) {
-    return formatError(err, "search_projects");
-  }
-}
-
-export const searchProjectsTool: ToolDefinition = {
-  name: "search_projects",
-  description:
-    "Free-text search across BuildTools projects (matches name, customer, address, project number).",
-  inputSchema: zodToJsonSchema(SearchProjectsInputSchema),
-  permission: "read",
-  handler: searchProjectsHandler,
-};
 
 // ---------------------------------------------------------------------------
 // Exported registry
@@ -454,5 +417,4 @@ export const searchProjectsTool: ToolDefinition = {
 export const projectTools: ToolDefinition[] = [
   listProjectsTool,
   getProjectTool,
-  searchProjectsTool,
 ];
