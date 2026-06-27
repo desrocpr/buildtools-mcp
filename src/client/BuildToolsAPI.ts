@@ -43,6 +43,8 @@
  *     they still call `ensureAuthenticated()` up-front.
  */
 
+import { randomBytes } from "node:crypto";
+
 import {
   BuildToolsAuthError,
   BuildToolsNetworkError,
@@ -564,6 +566,14 @@ export class BuildToolsAPI {
     // (Most-recent call wins over constructor-seeded values.)
     this.username = email;
     this.password = password;
+
+    // Invalidate the cached App.bt.token from any prior session — the
+    // value is session-bound and the upload retry logic in
+    // `uploadAttachment` only re-harvests on a 401/403, not on every
+    // re-auth. Without this clear, a session rotation on the BT side
+    // followed by a manual `authenticate()` call would leave the
+    // upload path using a stale token until the first failure.
+    this.uploadToken = null;
 
     // 1. GET login page (NO redirect follow) to harvest CSRF `_token`.
     const loginPage = await this.request(
@@ -1323,47 +1333,83 @@ export class BuildToolsAPI {
       throw new BuildToolsServerError("filename is required");
     }
 
-    const token = await this.getUploadToken(opts.projectId);
+    // Sanitize the filename + content-type BEFORE interpolating into
+    // the multipart header. Any literal `\r` / `\n` (or `"`) in either
+    // string would let an attacker close the header early and inject
+    // arbitrary new headers — classic CRLF injection in a multipart
+    // boundary. We strip control chars; non-ASCII filenames lose
+    // fidelity here (RFC 5987's `filename*=UTF-8''...` would preserve
+    // them, but BT's parser is the bottleneck and we haven't probed
+    // that surface).
+    const safeFilename = opts.filename.replace(/["\r\n]/g, "");
+    const safeContentType = (opts.contentType ?? "application/octet-stream")
+      .replace(/[\r\n]/g, "");
 
     // Build a manual multipart body — we don't pull in form-data as a
-    // dep for a single call site. CRLF line endings + boundary markers
-    // per RFC 7578.
-    const boundary = `----BTMCPBoundary${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+    // dep for a single call site. CRLF line endings per RFC 7578.
+    // Boundary: 32 hex chars from crypto.randomBytes (~128 bits of
+    // entropy) so a binary payload can never collide with it — the
+    // previous `Math.random()` form was non-crypto and gave only ~50
+    // bits, theoretically race-able for large file uploads.
     const CRLF = "\r\n";
-    const enc = (s: string) => Buffer.from(s, "utf8");
-    const fieldPart = (name: string, value: string): Buffer =>
-      enc(
-        `--${boundary}${CRLF}` +
-          `Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}` +
-          `${value}${CRLF}`,
-      );
-    const filePartHeader = enc(
-      `--${boundary}${CRLF}` +
-        `Content-Disposition: form-data; name="files[]"; filename="${opts.filename.replace(/"/g, "")}"${CRLF}` +
-        `Content-Type: ${opts.contentType ?? "application/octet-stream"}${CRLF}${CRLF}`,
-    );
-    const body = Buffer.concat([
-      fieldPart("token", token),
-      fieldPart("project_id", String(opts.projectId)),
-      fieldPart("module", String(opts.module)),
-      fieldPart("module_id", String(opts.moduleId)),
-      filePartHeader,
-      opts.fileBuffer,
-      enc(`${CRLF}--${boundary}--${CRLF}`),
-    ]);
-
     const uploadUrl = "https://file.buildtools.app/files";
-    const resp = await this.fetchImpl(uploadUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": `multipart/form-data; boundary=${boundary}`,
-        Accept: "application/json",
-        Cookie: this.getCookieString(uploadUrl),
-      },
-      body,
-    });
-    const respText = await resp.text();
-    if (resp.status !== 200) {
+
+    // Retry-once wrapper around the actual upload — if BT returns 401/403
+    // we assume the cached App.bt.token has been rotated server-side,
+    // clear the cache, re-harvest, and try again. Without this a long-
+    // running MCP session would silently fail uploads after the first
+    // session rotation.
+    let attempt = 0;
+    let resp: Response;
+    let respText = "";
+    while (true) {
+      const token = await this.getUploadToken(opts.projectId);
+      const boundary = `----BTMCPBoundary${randomBytes(16).toString("hex")}`;
+      const enc = (s: string) => Buffer.from(s, "utf8");
+      const fieldPart = (name: string, value: string): Buffer =>
+        enc(
+          `--${boundary}${CRLF}` +
+            `Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}` +
+            `${value}${CRLF}`,
+        );
+      const filePartHeader = enc(
+        `--${boundary}${CRLF}` +
+          `Content-Disposition: form-data; name="files[]"; filename="${safeFilename}"${CRLF}` +
+          `Content-Type: ${safeContentType}${CRLF}${CRLF}`,
+      );
+      const body = Buffer.concat([
+        fieldPart("token", token),
+        fieldPart("project_id", String(opts.projectId)),
+        fieldPart("module", String(opts.module)),
+        fieldPart("module_id", String(opts.moduleId)),
+        filePartHeader,
+        opts.fileBuffer,
+        enc(`${CRLF}--${boundary}--${CRLF}`),
+      ]);
+
+      resp = await this.fetchImpl(uploadUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          Accept: "application/json",
+          // Cookie jar is keyed by HOSTNAME — passing the full URL
+          // resolves to an empty jar entry and sends no cookies. The
+          // upload currently succeeds because file.buildtools.app
+          // authenticates via the `token` form field alone, but BT
+          // could add session validation at any time and we'd silently
+          // 403; doing this right today removes that latent risk.
+          Cookie: this.getCookieString(new URL(uploadUrl).hostname),
+        },
+        body,
+      });
+      respText = await resp.text();
+      if (resp.status === 200) break;
+      // Retry once on auth-style failures with a fresh token.
+      if ((resp.status === 401 || resp.status === 403) && attempt === 0) {
+        attempt++;
+        this.uploadToken = null;
+        continue;
+      }
       throw new BuildToolsServerError(
         `Upload failed (HTTP ${resp.status}): ${respText.slice(0, 300)}`,
       );

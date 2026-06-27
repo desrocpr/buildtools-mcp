@@ -514,7 +514,11 @@ async function uploadAttachmentHandler(
   // surrounding whitespace and reject data: URL prefixes so callers
   // who pass them get a clear error rather than upload garbage.
   const b64 = input.file_base64.trim();
-  if (b64.startsWith("data:")) {
+  // Case-insensitive check: `DATA:...` would otherwise pass and
+  // `Buffer.from(..., "base64")` would silently strip the non-base64
+  // prefix chars, uploading a slightly-wrong file with no helpful
+  // error. URI scheme matching is case-insensitive per RFC 3986.
+  if (b64.toLowerCase().startsWith("data:")) {
     return errorMarkdown(
       "**Invalid `file_base64`**: looks like a `data:` URL. Strip the `data:<mime>;base64,` prefix — pass ONLY the base64 payload.",
     );

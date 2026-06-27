@@ -556,6 +556,30 @@ describe("upload_attachment", () => {
     expect(uploadAttachment).not.toHaveBeenCalled();
   });
 
+  it("rejects the `data:` URL prefix CASE-INSENSITIVELY (DATA:, Data:, etc.)", async () => {
+    // RFC 3986 says URI schemes are case-insensitive. The historical
+    // check used `startsWith("data:")` only, which let `DATA:...`
+    // through — Node's lenient base64 decoder would then silently strip
+    // the prefix chars and upload a slightly-wrong file.
+    for (const variant of ["DATA:", "Data:", "DaTa:"]) {
+      const uploadAttachment = vi.fn();
+      const api = fakeApi({ uploadAttachment: uploadAttachment as any });
+      const result = await uploadAttachmentTool.handler(
+        {
+          entity_type: "project",
+          entity_id: 185936,
+          filename: "x.pdf",
+          content_type: "application/pdf",
+          file_base64: variant + "application/pdf;base64," + validB64,
+        },
+        api,
+      );
+      expect(result.isError, `variant ${variant}`).toBe(true);
+      expect(textOf(result)).toContain("Strip the `data:");
+      expect(uploadAttachment).not.toHaveBeenCalled();
+    }
+  });
+
   it("rejects empty / whitespace-only base64", async () => {
     const uploadAttachment = vi.fn();
     const api = fakeApi({ uploadAttachment: uploadAttachment as any });
