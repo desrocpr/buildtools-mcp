@@ -136,6 +136,13 @@ type ProjectRow = {
   name?: string;
   status?: string | number;
   status_id?: string | number;
+  // PR #72: surface extra metadata for the project summary header.
+  budget_revised?: string;     // BT's pre-formatted contract value
+  address?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  managers?: string | string[];
 };
 
 type RfiRow = {
@@ -185,11 +192,27 @@ interface ProjectDigest {
   id: number;
   name: string;
   status?: number;
+  // PR #72 — project metadata pulled from the project row + lookups.
+  // Populated on the same getProject call that fetches the name/status.
+  contractValue?: number;        // numeric for math; rendered as currency
+  contractValueRaw?: string;     // BT's pre-formatted string (e.g. "$ 665,124.94")
+  address?: string;
+  city?: string;
+  state?: string;
+  managers?: string;             // comma-separated PM names (from the row)
   rfis?: { count: number; lines: string[] };
   tasks?: { count: number; lines: string[] };
   pos?: { count: number; totalApprox: number; lines: string[] };
-  cos?: { count: number; totalApprox: number; lines: string[] };
-  draws?: { count: number; lastTwo: string[] };
+  cos?: { count: number; totalApprox: number; lines: string[]; byStatus?: Record<string, { count: number; total: number }> };
+  // PR #72: full draws history (was just lastTwo) so callers see the
+  // billing trajectory. Includes running totals + paid/balance roll-up.
+  draws?: {
+    count: number;
+    totalBilled: number;
+    totalPaid: number;
+    totalBalance: number;
+    all: Array<{ name: string; amount: number; paid: number; balance: number; status: string; date: string }>;
+  };
   errors: string[];
 }
 
@@ -340,7 +363,7 @@ async function fetchPOs(api: BuildToolsAPI, projectName: string): Promise<{ coun
   }
 }
 
-async function fetchCOs(api: BuildToolsAPI, projectName: string): Promise<{ count: number; totalApprox: number; lines: string[] } | null> {
+async function fetchCOs(api: BuildToolsAPI, projectName: string): Promise<ProjectDigest["cos"] | null> {
   try {
     const result = await api.getChangeOrders<{ data: (CoRow & { project?: string })[] }>({
       "search[value]": projectName,
@@ -348,19 +371,33 @@ async function fetchCOs(api: BuildToolsAPI, projectName: string): Promise<{ coun
     });
     const rows = result?.data ?? [];
     const targetProjectKey = projectName.toLowerCase();
-    const approved = rows.filter((r) => {
+    const projectRows = rows.filter((r) => {
       const rowProject = stripHtml(r.project ?? "").toLowerCase();
-      if (rowProject && rowProject !== targetProjectKey) return false;
-      const status = stripHtml(r.status ?? "").toLowerCase();
-      return status.includes("approved");
+      return !rowProject || rowProject === targetProjectKey;
     });
+    // PR #72: bucket by status, not just "approved". Shows real CO
+    // landscape (Pending, Approved, Rejected, etc.) with $ impact per
+    // bucket. Surface in the digest so the brief is actionable.
+    const byStatus: Record<string, { count: number; total: number }> = {};
+    for (const r of projectRows) {
+      const statusKey = stripHtml(r.status ?? "Unknown") || "Unknown";
+      const t = parseDollarAmount(r.total);
+      if (!byStatus[statusKey]) byStatus[statusKey] = { count: 0, total: 0 };
+      byStatus[statusKey].count += 1;
+      byStatus[statusKey].total += t;
+    }
+    // Round all status totals to cents.
+    for (const k of Object.keys(byStatus)) {
+      byStatus[k].total = Math.round(byStatus[k].total * 100) / 100;
+    }
+    const approved = projectRows.filter((r) => stripHtml(r.status ?? "").toLowerCase().includes("approved"));
     const totalApprox = approved.reduce((acc, r) => acc + parseDollarAmount(r.total), 0);
     const lines = approved.slice(0, 3).map((r) => {
       const name = stripHtml(r.name ?? "(unnamed CO)");
       const total = escapeMarkdownInline(stripHtml(r.total ?? "$0"));
       return `  - ${escapeMarkdownInline(name.slice(0, 70))} — ${total}`;
     });
-    return { count: approved.length, totalApprox, lines };
+    return { count: approved.length, totalApprox, lines, byStatus };
   } catch (err) {
     process.stderr.write(
       `[project_status_brief] CO section fetch failed: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -369,28 +406,29 @@ async function fetchCOs(api: BuildToolsAPI, projectName: string): Promise<{ coun
   }
 }
 
-async function fetchDraws(api: BuildToolsAPI, projectId: number): Promise<{ count: number; lastTwo: string[] } | null> {
+async function fetchDraws(api: BuildToolsAPI, projectId: number): Promise<ProjectDigest["draws"] | null> {
   try {
     const result = await api.getFinancialStatements(projectId);
     const statements = result?.statements ?? [];
-    // Reverse-chronological — BT returns oldest first in some forms;
-    // sort by date string descending for safety.
+    // Reverse-chronological for display.
     const sorted = [...statements].sort(
       (a, b) => (b.date ?? "").localeCompare(a.date ?? ""),
     );
-    const lastTwo = sorted.slice(0, 2).map((s) => {
-      const name = stripHtml(s.name ?? "(unnamed)");
-      // PR #66 review MEDIUM (security): all BT-sourced fields
-      // routed through escapeMarkdownInline to neutralize markdown
-      // injection vectors.
-      const amount = typeof s.amount === "number"
-        ? `$${s.amount.toFixed(2)}`
-        : `$${escapeMarkdownInline(stripHtml(String(s.amount ?? "0")))}`;
-      const status = escapeMarkdownInline(stripHtml(s.status ?? ""));
-      const date = s.date ? ` on ${escapeMarkdownInline(stripHtml(s.date))}` : "";
-      return `  - ${escapeMarkdownInline(name)} — ${amount} — _${status}_${date}`;
-    });
-    return { count: statements.length, lastTwo };
+    const all = sorted.map((s) => ({
+      name: stripHtml(s.name ?? "(unnamed)"),
+      amount: typeof s.amount === "number" ? s.amount : 0,
+      paid: typeof s.paid === "number" ? s.paid : 0,
+      balance: typeof s.balance === "number" ? s.balance : 0,
+      status: stripHtml(s.status ?? ""),
+      date: stripHtml(s.date ?? ""),
+    }));
+    // PR #72: roll-up totals across all draws — the high-value
+    // numbers a PM looks for in a project summary.
+    const round = (n: number) => Math.round(n * 100) / 100;
+    const totalBilled = round(all.reduce((a, s) => a + s.amount, 0));
+    const totalPaid = round(all.reduce((a, s) => a + s.paid, 0));
+    const totalBalance = round(all.reduce((a, s) => a + s.balance, 0));
+    return { count: statements.length, totalBilled, totalPaid, totalBalance, all };
   } catch (err) {
     process.stderr.write(
       `[project_status_brief] draws section fetch failed: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -427,6 +465,15 @@ async function buildProjectDigest(
       digest.name = stripHtml(String(project.name ?? `#${projectId}`));
       const statusCode = Number(project.status_id ?? project.status);
       digest.status = Number.isFinite(statusCode) ? statusCode : undefined;
+      // PR #72: harvest metadata for the project summary header.
+      digest.contractValueRaw = stripHtml(project.budget_revised ?? "") || undefined;
+      digest.contractValue = parseDollarAmount(project.budget_revised);
+      digest.address = stripHtml(project.address ?? "") || undefined;
+      digest.city = stripHtml(project.city ?? "") || undefined;
+      digest.state = stripHtml(project.state ?? "") || undefined;
+      digest.managers = Array.isArray(project.managers)
+        ? project.managers.map((m) => stripHtml(String(m))).filter(Boolean).join(", ") || undefined
+        : stripHtml(String(project.managers ?? "")) || undefined;
       projectLookupOk = true;
     } else {
       digest.errors.push(`project ${projectId} unavailable`);
@@ -460,37 +507,92 @@ async function buildProjectDigest(
   return digest;
 }
 
+// PR #72: richer renderer — surface the project metadata that makes
+// this a "real project summary" instead of just a what's-on-fire
+// digest. Header now carries contract value + address + PMs, draws
+// expand to full history + roll-up, change orders bucket by status.
+function fmtUsd(n: number, decimals = 2): string {
+  return `$${n.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}`;
+}
+
 function renderDigest(d: ProjectDigest): string {
   const lines: string[] = [];
   const teamSuffix = d.status !== undefined ? ` — _${teamLabel(d.status)} (${d.status})_` : "";
   lines.push(`## #${d.id} ${escapeMarkdownInline(d.name)}${teamSuffix}`);
+  lines.push("");
 
+  // === Project header metadata (PR #72) ===
+  if (d.contractValueRaw || (d.contractValue && d.contractValue > 0)) {
+    lines.push(`- **Contract value**: ${d.contractValueRaw ?? fmtUsd(d.contractValue ?? 0)}`);
+  }
+  const addressParts = [d.address, [d.city, d.state].filter(Boolean).join(", ")].filter(Boolean);
+  if (addressParts.length > 0) {
+    lines.push(`- **Address**: ${addressParts.map((p) => escapeMarkdownInline(p!)).join(" · ")}`);
+  }
+  if (d.managers) {
+    lines.push(`- **Project managers**: ${escapeMarkdownInline(d.managers)}`);
+  }
+
+  // === Open RFIs ===
   if (d.rfis) {
     lines.push(`- **Open RFIs**: ${d.rfis.count}${d.rfis.count > 0 ? "" : " ✓"}`);
     if (d.rfis.lines.length > 0) lines.push(...d.rfis.lines);
   }
+  // === Open tasks ===
   if (d.tasks) {
     lines.push(`- **Open tasks**: ${d.tasks.count}${d.tasks.count > 0 ? "" : " ✓"}`);
     if (d.tasks.lines.length > 0) lines.push(...d.tasks.lines);
   }
+  // === POs ===
   if (d.pos) {
     lines.push(
-      `- **Open POs**: ${d.pos.count}${d.pos.totalApprox > 0 ? ` (~$${d.pos.totalApprox.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })} total)` : ""}`,
+      `- **Open POs**: ${d.pos.count}${d.pos.totalApprox > 0 ? ` (~${fmtUsd(d.pos.totalApprox, 0)} total)` : ""}`,
     );
     if (d.pos.lines.length > 0) lines.push(...d.pos.lines);
   }
+  // === Change orders by status (PR #72) ===
   if (d.cos) {
-    lines.push(
-      `- **Approved change orders**: ${d.cos.count}${d.cos.totalApprox > 0 ? ` (~$${d.cos.totalApprox.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })} total)` : ""}`,
-    );
-    if (d.cos.lines.length > 0) lines.push(...d.cos.lines);
+    const breakdown = d.cos.byStatus ?? {};
+    const statusKeys = Object.keys(breakdown).sort();
+    if (statusKeys.length > 0) {
+      const totalAll = statusKeys.reduce((s, k) => s + breakdown[k].count, 0);
+      lines.push(`- **Change orders**: ${totalAll} total`);
+      for (const key of statusKeys) {
+        const entry = breakdown[key];
+        const totalLabel = entry.total !== 0 ? ` (${fmtUsd(entry.total, 0)})` : "";
+        lines.push(`  - _${escapeMarkdownInline(key)}_: ${entry.count}${totalLabel}`);
+      }
+    } else {
+      lines.push(`- **Change orders**: 0`);
+    }
+    if (d.cos.lines.length > 0) {
+      lines.push(`  Recent approved:`);
+      lines.push(...d.cos.lines);
+    }
   }
+  // === Draws (full history + roll-up; PR #72) ===
   if (d.draws) {
-    lines.push(`- **Draws**: ${d.draws.count} statement(s) on record${d.draws.lastTwo.length > 0 ? " — last 2:" : ""}`);
-    if (d.draws.lastTwo.length > 0) lines.push(...d.draws.lastTwo);
+    const billPct = d.contractValue && d.contractValue > 0 && d.draws.totalBilled > 0
+      ? ` — **${((d.draws.totalBilled / d.contractValue) * 100).toFixed(1)}%** of contract`
+      : "";
+    lines.push(
+      `- **Draws**: ${d.draws.count} statement(s) — billed ${fmtUsd(d.draws.totalBilled)}` +
+        ` · paid ${fmtUsd(d.draws.totalPaid)} · balance ${fmtUsd(d.draws.totalBalance)}` +
+        billPct,
+    );
+    for (const s of d.draws.all) {
+      const amount = fmtUsd(s.amount);
+      const paid = s.paid > 0 ? ` · paid ${fmtUsd(s.paid)}` : "";
+      const bal = s.balance !== 0 ? ` · bal ${fmtUsd(s.balance)}` : "";
+      const date = s.date ? ` on ${escapeMarkdownInline(s.date)}` : "";
+      lines.push(
+        `  - ${escapeMarkdownInline(s.name)} — ${amount}${paid}${bal} — _${escapeMarkdownInline(s.status)}_${date}`,
+      );
+    }
   }
   if (d.errors.length > 0) {
-    lines.push(`- _Caveats: ${d.errors.join("; ")}_`);
+    lines.push("");
+    lines.push(`_Caveats: ${d.errors.join("; ")}_`);
   }
   return lines.join("\n");
 }
@@ -502,11 +604,13 @@ function renderDigest(d: ProjectDigest): string {
 export const projectStatusBriefTool: ToolDefinition = {
   name: "project_status_brief",
   description:
-    "Read-only digest of project state, designed for 'what's on fire' standup-style queries. " +
-    "For each project, returns counts + top items per category: open RFIs (priority-sorted), open tasks " +
-    "(past-due first), open POs (with running total), approved change orders, and the last two draws (FS). " +
+    "Read-only one-call project summary. For each project, returns: " +
+    "project header (contract value, address, project managers, team), " +
+    "open RFIs (priority-sorted, top 3), open tasks (past-due first, top 3), " +
+    "open POs (count + $ total), change orders bucketed by status (Pending / Approved / Rejected / etc. with $ impact per bucket), " +
+    "and the FULL draws history with billed/paid/balance roll-up + percent of contract billed. " +
     "Pass EITHER `project_ids` (1-30 explicit IDs) OR `team` (filter active-team projects). Up to 30 projects per call. " +
-    "Sections can be trimmed via `include`. No mutations.",
+    "Sections can be trimmed via `include` to skip per-section fetches. No mutations.",
   inputSchema: zodToJsonSchema(ProjectStatusBriefSchema),
   permission: "read:projects",
   handler: async (rawArgs: unknown, api: BuildToolsAPI) => {
