@@ -2681,7 +2681,9 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
     const args = { purchase_order_ids: [39201, 39202, 39203], status: "Sent" as const };
     const prompt = await tool.handler(args, api);
     expect(textOf(prompt)).toContain("Bulk-transition **3** purchase order(s) to **Sent (2)**");
+    // PR #69 review HIGH 2: all IDs shown verbatim in code block (no truncation)
     expect(textOf(prompt)).toContain("39201, 39202, 39203");
+    expect(textOf(prompt)).toContain("review carefully");
     const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
     const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
     expect(exec.isError).toBeFalsy();
@@ -2752,7 +2754,7 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
     expect(result.isError).toBe(true);
   });
 
-  it("Zod: rejects unknown numeric status codes (999)", async () => {
+  it("Zod: rejects unknown numeric status codes (999) at the schema layer", async () => {
     const api = fakeApi({});
     const tool = findTool(api, mkStore());
     const result = await tool.handler(
@@ -2760,10 +2762,11 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
       api,
     );
     expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain("Unknown PO status code 999");
+    // PR #69 round-2 fix: rejection now at Zod, not resolver
+    expect(textOf(result).toLowerCase()).toMatch(/invalid|status must be a valid/);
   });
 
-  it("prompt truncates large id list to first 5 + count", async () => {
+  it("PR #69 review HIGH 2: prompt shows ALL ids (no truncation) so adversarial expansion is visible", async () => {
     const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
       success: true, successCount: 8, failureCount: 0,
     });
@@ -2777,7 +2780,10 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
     };
     const prompt = await tool.handler(args, api);
     const text = textOf(prompt);
-    expect(text).toContain("1, 2, 3, 4, 5, … (+3 more)");
+    // ALL 8 ids must appear — no truncation that hides adversarial appendices
+    expect(text).toContain("1, 2, 3, 4, 5, 6, 7, 8");
+    expect(text).not.toContain("…");
+    expect(text).not.toContain("+3 more");
   });
 
   it("idempotency: order-insensitive — {3,1,2} and {1,2,3} hit the same cache entry", async () => {
@@ -2807,6 +2813,60 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
     const retry = await tool.handler(args2, api);
     expect(textOf(retry)).toContain("Idempotency replay");
     expect(bulkTransitionPurchaseOrderStatuses).toHaveBeenCalledTimes(1); // STILL 1
+  });
+
+  it("PR #69 review HIGH 1: partial-failure surfaces BT's actual error message (not '(no detail)')", async () => {
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
+      success: true,
+      successCount: 0,
+      failureCount: 1,
+      message: "Partial: 0 succeeded, 1 failed.",
+      errors: "The Signature field is required.", // BT's actual reason
+    });
+    const api = fakeApi({
+      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+    });
+    const tool = findTool(api, mkStore());
+    const args = { purchase_order_ids: [1], status: "Confirmed" as const };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
+    // The actual BT reason should appear in the result, not '(no detail)'
+    expect(textOf(exec)).toContain("BT message: The Signature field is required.");
+    expect(textOf(exec)).not.toContain("(no detail)");
+  });
+
+  it("PR #69 review MEDIUM 7: partial-failure includes enumeration warning", async () => {
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
+      success: true, successCount: 5, failureCount: 5,
+    });
+    const api = fakeApi({
+      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+    });
+    const tool = findTool(api, mkStore());
+    const args = {
+      purchase_order_ids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      status: "Sent" as const,
+    };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(textOf(exec)).toContain("If you did not expect any failures");
+    expect(textOf(exec)).toContain("write access");
+  });
+
+  it("PR #69 review MEDIUM 4: Zod rejects unknown numeric status codes at schema layer (not just resolver)", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    for (const bad of [1.5, 0, -1, 5, 99]) {
+      const result = await tool.handler(
+        { purchase_order_ids: [1], status: bad },
+        api,
+      );
+      expect(result.isError).toBe(true);
+      // Error path should be the Zod refine, not the resolver throw
+      expect(textOf(result).toLowerCase()).toMatch(/invalid|status must be/);
+    }
   });
 
   it("partial-failure result is CACHED (so retries replay the report, not re-execute)", async () => {

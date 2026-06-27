@@ -608,7 +608,9 @@ const BulkTransitionPurchaseOrdersSchema = z.object({
     ),
   status: z
     .union([
-      z.number(),
+      z.number().int().refine((v) => [1, 2, 3, 4].includes(v), {
+        message: "status must be a valid PO code: 1 (Draft), 2 (Sent), 3 (Confirmed), or 4 (Rejected)",
+      }),
       z.enum(["Draft", "Sent", "Confirmed", "Rejected"]),
     ])
     .describe(
@@ -1334,11 +1336,19 @@ export function createMutationTools(
       const targetLabel = code !== undefined
         ? `${poStatusLabel(code)} (${code})`
         : String(a.status);
-      const sampleIds = a.purchase_order_ids.slice(0, 5).join(", ");
-      const suffix = a.purchase_order_ids.length > 5
-        ? `, … (+${a.purchase_order_ids.length - 5} more)`
-        : "";
-      return `Bulk-transition **${a.purchase_order_ids.length}** purchase order(s) to **${targetLabel}**: ${sampleIds}${suffix}.`;
+      // PR #69 review HIGH 2: render ALL ids (not just first 5) so an
+      // adversarial expansion of the list is visible to the user
+      // before they confirm. Code block keeps it scannable for 50.
+      const idList = a.purchase_order_ids.join(", ");
+      // PR #69 review MEDIUM 5 (deferred): a richer prompt would
+      // fetch each PO's current status and surface direction
+      // (demotion warning when going downward from Confirmed/Sent).
+      // Deferred to a follow-up — adds N HTTP round-trips per
+      // confirmation prompt; needs UX scoping.
+      return (
+        `Bulk-transition **${a.purchase_order_ids.length}** purchase order(s) to **${targetLabel}**.\n\n` +
+        `Full ID list (review carefully — large batches affect many vendor records):\n\`\`\`\n${idList}\n\`\`\``
+      );
     },
     async (a) => {
       try {
@@ -1373,9 +1383,19 @@ export function createMutationTools(
         // BT doesn't give us per-id results back, only counts. The
         // caller needs to refetch individual POs to identify which
         // ones failed; surface this caveat.
+        // PR #69 review HIGH 1: BT's actual message is now in
+        // result.errors — surface it so the caller sees the reason.
+        // PR #69 review MEDIUM 7: warn about ID enumeration — BT's
+        // bulk endpoint silently rejects unauthorized IDs as `f`,
+        // indistinguishable from status-transition failures. If
+        // caller didn't expect failures, the IDs may include ones
+        // they don't have access to.
+        const btReason = result.errors ? `\n\nBT message: ${String(result.errors)}` : "";
         return markdown(
-          `**Partial bulk transition**: ${succ} of ${total} purchase orders transitioned to **${poStatusLabel(code)}** (${code}); ${fail} failed.\n\n` +
-            `_BT doesn't return per-id results — refetch the POs via \`get_purchase_order\` to identify which ${fail} didn't transition. Common cause: promotion to Confirmed requires a per-PO signature; demote-to-Draft and Sent transitions usually succeed in bulk._`,
+          `**Partial bulk transition**: ${succ} of ${total} purchase orders transitioned to **${poStatusLabel(code)}** (${code}); ${fail} failed.${btReason}\n\n` +
+            `_BT doesn't return per-id results — refetch the POs via \`get_purchase_order\` to identify which ${fail} didn't transition._\n\n` +
+            `_If you did not expect any failures, verify all provided IDs belong to a project you have write access to — BT's bulk endpoint silently rejects unauthorized IDs and counts them as failures, indistinguishable from status-transition errors._\n\n` +
+            `_Common cause: promotion to Confirmed requires a per-PO signature; demote-to-Draft and Sent transitions usually succeed in bulk._`,
         );
       } catch (err) {
         return formatError(err, "bulk_transition_purchase_orders");
@@ -2658,7 +2678,10 @@ export function createMutationTools(
         "Use for ops workflows like 'send all my Draft POs on project X' or 'cancel all my Rejected POs'. " +
         "Accepts 1-50 PO IDs per call. ALL transition to the same target status. " +
         "Reports per-id breakdown: total / succeeded / failed. Partial failures are NOT a top-level error — surfaces success count + failure count so you can refetch failing POs individually. " +
-        "WARNING: Promoting TO Confirmed (3) requires a per-PO signature this tool doesn't supply — that transition will fail for every PO. Demote-to-Draft and Sent transitions usually succeed in bulk.",
+        "Confirmation prompt shows the full ID list (not truncated) so the user can verify scope before commit — review carefully for adversarial expansions. " +
+        "WARNING (signature): Promoting TO Confirmed (3) requires a per-PO signature this tool doesn't supply — that transition will fail for every PO. Demote-to-Draft and Sent transitions usually succeed in bulk. " +
+        "WARNING (authorization): BT does NOT publish its bulk endpoint's per-ID authorization model. Unauthorized IDs are silently counted as failures, indistinguishable from status-transition errors. Caller is responsible for ensuring all IDs belong to projects they have write access to. " +
+        "WARNING (demotion): demoting Confirmed POs to Draft cancels them from vendor visibility. Bulk-demote with care — the prompt does NOT currently fetch per-PO current status; you may be cancelling more Confirmed orders than you realize.",
       inputSchema: zodToJsonSchema(BulkTransitionPurchaseOrdersSchema),
       permission: "write:financial",
       handler: async (rawArgs: unknown, _api: BuildToolsAPI) => {

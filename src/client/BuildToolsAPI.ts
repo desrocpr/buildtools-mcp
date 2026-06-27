@@ -3891,8 +3891,9 @@ export class BuildToolsAPI {
       const msg = Array.isArray(parsed.msg)
         ? (parsed.msg as unknown[]).join("; ")
         : String(parsed.msg ?? "");
+      // PR #69 review MEDIUM 6: log count + sample, not the full list.
       process.stderr.write(
-        `[bulkTransitionPurchaseOrderStatuses] ids=${ids.join(",")} status=${opts.status} WIRE_FAILED body=${JSON.stringify(resp.body.slice(0, 300))}\n`,
+        `[bulkTransitionPurchaseOrderStatuses] ids_count=${ids.length} ids_sample=${ids.slice(0, 3).join(",")} status=${opts.status} WIRE_FAILED body=${JSON.stringify(resp.body.slice(0, 300))}\n`,
       );
       return {
         success: false,
@@ -3906,15 +3907,28 @@ export class BuildToolsAPI {
       const msg = Array.isArray(parsed.msg)
         ? (parsed.msg as unknown[]).join("; ")
         : String(parsed.msg ?? "");
+      // PR #69 review MEDIUM 6: don't dump the full ids list to
+      // stderr — under log aggregation that creates a durable
+      // (ids → failure) record. Log count + a 3-id sample only.
+      const sampleIds = ids.slice(0, 3).join(",");
       process.stderr.write(
-        `[bulkTransitionPurchaseOrderStatuses] ids=${ids.join(",")} status=${opts.status} PARTIAL success=${successCount} failed=${failureCount} msg=${JSON.stringify(msg)}\n`,
+        `[bulkTransitionPurchaseOrderStatuses] ids_count=${ids.length} ids_sample=${sampleIds} status=${opts.status} PARTIAL success=${successCount} failed=${failureCount} msg=${JSON.stringify(msg)}\n`,
       );
+      // PR #69 review HIGH 1: preserve BT's actual message in the
+      // `errors` field so downstream callers (the 8 sites that fall
+      // back to `result.errors ?? "(no detail)"`) keep getting the
+      // human-readable reason instead of degrading silently.
+      return {
+        success: true,
+        message: `Partial: ${successCount} succeeded, ${failureCount} failed.`,
+        errors: msg || undefined,
+        successCount,
+        failureCount,
+      };
     }
     return {
       success: true,
-      message: failureCount === 0
-        ? "Status updated."
-        : `Partial: ${successCount} succeeded, ${failureCount} failed.`,
+      message: "Status updated.",
       successCount,
       failureCount,
     };
