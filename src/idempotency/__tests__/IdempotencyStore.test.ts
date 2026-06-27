@@ -90,6 +90,22 @@ describe("IdempotencyStore", () => {
     expect(fp).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it("fingerprint treats undefined-valued keys as ABSENT (matches JSON.stringify semantics)", () => {
+    // Zod's parsed-output shape can vary across versions: optional
+    // fields not in the input are sometimes present as `undefined` and
+    // sometimes omitted. Both should fingerprint identically — otherwise
+    // a Zod-version bump or schema reorder silently breaks idempotency.
+    const fpExplicit = IdempotencyStore.fingerprintArgs({ a: 1, b: undefined });
+    const fpOmitted = IdempotencyStore.fingerprintArgs({ a: 1 });
+    expect(fpExplicit).toBe(fpOmitted);
+  });
+
+  it("fingerprint treats undefined and null identically at the top level", () => {
+    expect(IdempotencyStore.fingerprintArgs(undefined)).toBe(
+      IdempotencyStore.fingerprintArgs(null),
+    );
+  });
+
   it("entry expires after TTL — lookup returns miss and removes the entry", () => {
     let nowMs = 1_000_000;
     const s = new IdempotencyStore({ ttlMinutes: 1, now: () => nowMs });

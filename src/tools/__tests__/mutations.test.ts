@@ -1072,6 +1072,76 @@ describe("update_purchase_order — idempotency guard (PR #60)", () => {
     expect(idem.size).toBe(0);
   });
 
+  it("`verify` flag is EXCLUDED from the fingerprint (retrying with verify:false after a verify:true timeout still hits the cache)", async () => {
+    // This was the lead HIGH finding from the PR #60 review: if `verify`
+    // were included in the fingerprint, a caller who passed `verify:
+    // true` on the first (ambiguous-timeout) call and dropped to
+    // `verify: false` on the safe retry would get a key-reuse error
+    // instead of the cached replay. That defeats the whole point.
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const getPurchaseOrder = vi.fn().mockResolvedValue(baseDetail);
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const store = mkStore();
+    const idem = new IdempotencyStore();
+    const tool = findToolWithIdem(api, store, idem);
+
+    // First call: verify: false (cache populates)
+    const args1 = {
+      purchase_order_id: 39752,
+      name: "renamed",
+      idempotency_key: "verify-flag-exclusion-test",
+      verify: false,
+    };
+    const prompt1 = await tool.handler(args1, api);
+    const cid1 = textOf(prompt1).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args1, confirmation_id: cid1 }, api);
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
+
+    // Retry with verify:true → SAME write semantically, should hit cache.
+    const retry = await tool.handler(
+      { ...args1, verify: true },
+      api,
+    );
+    expect(retry.isError).toBeFalsy();
+    expect(textOf(retry)).toContain("Idempotency replay");
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1); // no re-execution
+  });
+
+  it("does NOT populate the cache during the confirmation-prompt phase", async () => {
+    // The store check requires `data.confirmation_id && !result.isError`.
+    // The prompt phase has no confirmation_id, so the cache must remain
+    // empty until the execute phase. This test guards against accidental
+    // re-ordering or removal of that condition — if it regressed, every
+    // subsequent retry would replay a cached confirmation prompt instead
+    // of executing the actual write.
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const getPurchaseOrder = vi.fn().mockResolvedValue(baseDetail);
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const store = mkStore();
+    const idem = new IdempotencyStore();
+    const tool = findToolWithIdem(api, store, idem);
+
+    const args = {
+      purchase_order_id: 39752,
+      name: "x",
+      idempotency_key: "prompt-no-cache",
+      verify: false,
+    };
+    // Prompt only — no confirmation_id, no execute.
+    await tool.handler(args, api);
+    expect(idem.size).toBe(0);
+  });
+
   it("Zod enforces idempotency_key min length 8 (prevents trivial collisions)", async () => {
     const api = fakeApi({});
     const store = mkStore();

@@ -143,23 +143,32 @@ export class IdempotencyStore {
  * canonical input to the args fingerprint hash so two args objects
  * with the same content but different key insertion order produce
  * the same fingerprint.
+ *
+ * Notes on `undefined`:
+ *   - `JSON.stringify(undefined)` returns the JS value `undefined`,
+ *     NOT the string `"undefined"`. Concatenating that with our
+ *     `'"key":'` prefix coerces to the literal text `'"key":undefined'`,
+ *     which is invalid JSON AND differs from the standard semantics
+ *     where `JSON.stringify({a: undefined})` drops the key.
+ *   - To produce stable fingerprints across Zod-version variations
+ *     (some versions include optional `undefined` fields in parsed
+ *     output, others drop them), we OMIT `undefined`-valued keys from
+ *     object output and treat top-level `undefined` as `null`.
  */
 function canonicalStringify(value: unknown): string {
-  if (value === null || value === undefined) return JSON.stringify(value);
+  if (value === undefined || value === null) return "null";
   if (typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) {
     return "[" + value.map(canonicalStringify).join(",") + "]";
   }
-  const keys = Object.keys(value as Record<string, unknown>).sort();
+  const obj = value as Record<string, unknown>;
+  // Drop undefined-valued keys for stability with JSON.stringify
+  // semantics and across-Zod-version variations.
+  const keys = Object.keys(obj).filter((k) => obj[k] !== undefined).sort();
   return (
     "{" +
     keys
-      .map(
-        (k) =>
-          JSON.stringify(k) +
-          ":" +
-          canonicalStringify((value as Record<string, unknown>)[k]),
-      )
+      .map((k) => JSON.stringify(k) + ":" + canonicalStringify(obj[k]))
       .join(",") +
     "}"
   );

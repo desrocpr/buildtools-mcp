@@ -1266,7 +1266,21 @@ export function createMutationTools(
             sessionId,
             data.idempotency_key,
           );
-          const { confirmation_id: _ci, idempotency_key: _ik, ...semantic } = data;
+          // Strip fields that don't represent the semantic write BT will
+          // apply:
+          //   - confirmation_id: rotates per call
+          //   - idempotency_key: already in the cache key
+          //   - verify: a client-side post-write check, not a BT mutation.
+          //     If a caller times out with `verify: true` and retries with
+          //     `verify: false` to skip the second round-trip, that's the
+          //     SAME write — fingerprinting them differently would turn
+          //     the safety net into a trap.
+          const {
+            confirmation_id: _ci,
+            idempotency_key: _ik,
+            verify: _v,
+            ...semantic
+          } = data;
           idempotencyArgsFingerprint = IdempotencyStore.fingerprintArgs(semantic);
           const lookup = idempotencyStore.lookup(
             idempotencyCacheKey,
