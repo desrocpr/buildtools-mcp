@@ -36,7 +36,20 @@ import type { ToolDefinition, ToolResult } from "./projects.js";
  */
 function resolvePoStatusCode(s: number | string | undefined): number | undefined {
   if (s === undefined) return undefined;
-  if (typeof s === "number") return s;
+  if (typeof s === "number") {
+    // PR #64 review fix (MEDIUM): validate numeric codes against the
+    // known enum. Without this guard `status: 999` passes through to
+    // BT's POST and the server's behavior on unknown codes is
+    // undocumented — could silently no-op or trigger undefined
+    // transitions. Tighten at the boundary.
+    const known = new Set(Object.values(PURCHASE_ORDER_STATUS_CODES));
+    if (!known.has(s)) {
+      throw new Error(
+        `Unknown PO status code ${s}. Expected one of: ${[...known].sort().join(", ")}.`,
+      );
+    }
+    return s;
+  }
   const code = PURCHASE_ORDER_STATUS_CODES[s];
   if (code === undefined) {
     throw new Error(
@@ -449,6 +462,17 @@ const TransitionPurchaseOrderStatusSchema = z.object({
     .describe(
       "Target status — accepts either a numeric code (1=Draft, 2=Sent, 3=Confirmed, 4=Rejected) or a label string. " +
         "NOTE: Promoting TO Confirmed (3) requires a canvas-drawn signature on the PO that this tool doesn't supply; that transition will fail with 'Signature field is required'. The vendor advances the PO to Confirmed on their side after acknowledging.",
+    ),
+  // PR #64 review fix (MEDIUM): cross-tool consistency — other mutation
+  // tools (update_purchase_order, apply_vendor_quote) accept
+  // idempotency_key. Standalone transition omitted it; restoring parity.
+  idempotency_key: z
+    .string()
+    .min(8)
+    .max(128)
+    .optional()
+    .describe(
+      "Optional client-supplied idempotency key. When set, a successful execution is cached for 1 hour. Retry with same key + same args returns the cached result (no second BT call).",
     ),
   confirmation_id: z.string().optional(),
 });
@@ -1105,13 +1129,25 @@ export function createMutationTools(
   //     surfaces the capability via tool search in a way that "look at
   //     the rarely-used `status` field of `update_purchase_order`" does
   //     not.
-  const transitionPOStatusConfirmed = requiresConfirmation<TransitionPurchaseOrderStatusArgs & { _resolved_status_code?: number }>(
+  const transitionPOStatusConfirmed = requiresConfirmation<TransitionPurchaseOrderStatusArgs & { _resolved_status_code?: number; _current_status?: number | null; _po_name?: string }>(
     "transition_purchase_order_status",
     (a) => {
       const targetLabel = a._resolved_status_code !== undefined
         ? `${poStatusLabel(a._resolved_status_code)} (${a._resolved_status_code})`
         : String(a.status);
-      return `Transition purchase order #${a.purchase_order_id} to **${targetLabel}**.`;
+      // PR #64 review fix (MEDIUM): include the current status in the
+      // confirmation prompt. Two reasons: (1) a from→to delta is far
+      // more meaningful for the user gating the action than a target
+      // alone, and (2) it's an injection-defense anchor — a
+      // BT-sourced field can't fake live state, so an LLM under
+      // indirect prompt injection can't confidently confirm a
+      // transition without the actual live current state matching the
+      // attacker's expectation.
+      const currentLabel = a._current_status !== null && a._current_status !== undefined
+        ? `${poStatusLabel(a._current_status)} (${a._current_status})`
+        : "_(could not fetch current state)_";
+      const poName = a._po_name ? ` — ${escapeMarkdownInline(a._po_name)}` : "";
+      return `Transition purchase order **#${a.purchase_order_id}**${poName} from **${currentLabel}** → **${targetLabel}**.`;
     },
     async (a) => {
       try {
@@ -2299,11 +2335,88 @@ export function createMutationTools(
             `**Error calling \`transition_purchase_order_status\`**: ${msg}`,
           );
         }
-        return transitionPOStatusConfirmed(
-          { ...data, _resolved_status_code: resolvedStatusCode },
+
+        // PR #64 review fix (MEDIUM): idempotency lookup BEFORE the
+        // current-status fetch + confirmation flow. Matches the
+        // pattern in update_purchase_order + apply_vendor_quote.
+        let idempotencyCacheKey: string | undefined;
+        let idempotencyArgsFingerprint: string | undefined;
+        if (idempotencyStore && data.idempotency_key) {
+          idempotencyCacheKey = IdempotencyStore.buildCacheKey(
+            "transition_purchase_order_status",
+            sessionId,
+            data.idempotency_key,
+          );
+          const { confirmation_id: _ci, idempotency_key: _ik, ...semantic } = data;
+          idempotencyArgsFingerprint = IdempotencyStore.fingerprintArgs(semantic);
+          const lookup = idempotencyStore.lookup(
+            idempotencyCacheKey,
+            idempotencyArgsFingerprint,
+          );
+          if (lookup.kind === "hit") {
+            const original = lookup.result;
+            const banner = `_Idempotency replay: returning cached result for key \`${escapeMarkdownInline(data.idempotency_key)}\` — no BT call was made. Cache TTL ${idempotencyStore.ttlMinutes} min._\n\n`;
+            return {
+              ...original,
+              content: original.content.map((c) =>
+                "text" in c ? { ...c, text: banner + c.text } : c,
+              ),
+            };
+          }
+          if (lookup.kind === "mismatch") {
+            return errorMarkdown(
+              `**Idempotency key reused with different args.** The key \`${escapeMarkdownInline(data.idempotency_key)}\` was previously used with DIFFERENT args.`,
+            );
+          }
+        }
+
+        // PR #64 review fix (MEDIUM): fetch current status for the
+        // confirmation prompt. Best-effort — a failed fetch leaves
+        // _current_status undefined and the describer renders
+        // "(could not fetch current state)" rather than blocking.
+        // Only on the FIRST call (the framework replays stored args
+        // on the second call with the snapshot already attached).
+        let currentStatus: number | null | undefined;
+        let poName: string | undefined;
+        if (!data.confirmation_id) {
+          try {
+            const detail = await getApi().getPurchaseOrder(data.purchase_order_id);
+            if (detail) {
+              currentStatus = detail.status;
+              poName = detail.name;
+            } else {
+              currentStatus = null;
+            }
+          } catch {
+            currentStatus = null;
+          }
+        }
+
+        const result = await transitionPOStatusConfirmed(
+          {
+            ...data,
+            _resolved_status_code: resolvedStatusCode,
+            _current_status: currentStatus,
+            _po_name: poName,
+          },
           store,
           sessionId,
         );
+
+        if (
+          idempotencyStore &&
+          idempotencyCacheKey &&
+          idempotencyArgsFingerprint &&
+          data.confirmation_id &&
+          !result.isError
+        ) {
+          idempotencyStore.store(
+            idempotencyCacheKey,
+            idempotencyArgsFingerprint,
+            result,
+          );
+        }
+        return result;
       },
     },
     // apply_vendor_quote (PR #63) — multi-step workflow consolidator.
