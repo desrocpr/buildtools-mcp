@@ -326,6 +326,21 @@ const CreateFinancialStatementSchema = z.object({
 });
 type CreateFinancialStatementArgs = z.infer<typeof CreateFinancialStatementSchema>;
 
+const TransitionPurchaseOrderStatusSchema = z.object({
+  purchase_order_id: z.number().describe("BuildTools purchase order ID."),
+  status: z
+    .union([
+      z.number(),
+      z.enum(["Draft", "Sent", "Confirmed", "Rejected"]),
+    ])
+    .describe(
+      "Target status — accepts either a numeric code (1=Draft, 2=Sent, 3=Confirmed, 4=Rejected) or a label string. " +
+        "NOTE: Promoting TO Confirmed (3) requires a canvas-drawn signature on the PO that this tool doesn't supply; that transition will fail with 'Signature field is required'. The vendor advances the PO to Confirmed on their side after acknowledging.",
+    ),
+  confirmation_id: z.string().optional(),
+});
+type TransitionPurchaseOrderStatusArgs = z.infer<typeof TransitionPurchaseOrderStatusSchema>;
+
 const DeleteFinancialStatementSchema = z.object({
   statement_ids: z.array(z.number()).min(1).describe("Array of financial statement IDs to delete."),
   project_id: z.number().describe("BuildTools project ID (required for session scoping)."),
@@ -955,6 +970,59 @@ export function createMutationTools(
             (verifyLines.length > 0 ? `\n\n${verifyLines.join("\n")}` : ""),
         );
       } catch (err) { return formatError(err, "update_purchase_order"); }
+    },
+  );
+
+  // ---------------------------------------------------------------------
+  // transition_purchase_order_status — standalone status-only tool
+  // ---------------------------------------------------------------------
+  //
+  // Wraps the workflow endpoint `/purchase-orders/status/update`
+  // directly. Useful when caller wants ONLY a status change with no
+  // content edits — same routing the `update_purchase_order` tool uses
+  // internally for the status step.
+  //
+  // Why two tools instead of just `update_purchase_order`?
+  //   - This tool's surface is intentionally narrow (PO id + target
+  //     status). Easier to reason about for the LLM than
+  //     `update_purchase_order` which carries 10+ fields.
+  //   - The endpoint is `ids[]`-capable; future bulk-status workflows
+  //     can extend this tool without touching the larger update tool.
+  //   - Discoverability: a tool named `transition_purchase_order_status`
+  //     surfaces the capability via tool search in a way that "look at
+  //     the rarely-used `status` field of `update_purchase_order`" does
+  //     not.
+  const transitionPOStatusConfirmed = requiresConfirmation<TransitionPurchaseOrderStatusArgs & { _resolved_status_code?: number }>(
+    "transition_purchase_order_status",
+    (a) => {
+      const targetLabel = a._resolved_status_code !== undefined
+        ? `${poStatusLabel(a._resolved_status_code)} (${a._resolved_status_code})`
+        : String(a.status);
+      return `Transition purchase order #${a.purchase_order_id} to **${targetLabel}**.`;
+    },
+    async (a) => {
+      try {
+        const code = a._resolved_status_code;
+        if (code === undefined) {
+          return errorMarkdown(
+            `**Error calling \`transition_purchase_order_status\`**: status code was not resolved`,
+          );
+        }
+        const result = await getApi().transitionPurchaseOrderStatus({
+          purchaseOrderId: a.purchase_order_id,
+          status: code,
+        });
+        if (!result.success) {
+          return errorMarkdown(
+            `**Failed to transition PO #${a.purchase_order_id} to ${poStatusLabel(code)}**: ${String(result.errors ?? "(no detail)")}`,
+          );
+        }
+        return markdown(
+          `Purchase order **#${a.purchase_order_id}** status → **${poStatusLabel(code)}** (${code}). ${String(result.message ?? "")}`,
+        );
+      } catch (err) {
+        return formatError(err, "transition_purchase_order_status");
+      }
     },
   );
 
@@ -1609,6 +1677,40 @@ export function createMutationTools(
           );
         }
         return result;
+      },
+    },
+    // transition_purchase_order_status — standalone status-only tool
+    // (PR #62). Custom wrapper (not makeTool) so we can resolve the
+    // status label → code once and pass through to the confirmed
+    // executor and prompt.
+    {
+      name: "transition_purchase_order_status",
+      description:
+        "Transition a purchase order's status via BuildTools' workflow endpoint (`/purchase-orders/status/update`). " +
+        "Unlike status changes via `update_purchase_order` (which run through `/save` and refuse on Confirmed POs), this endpoint accepts ALL transitions including Confirmed → Draft. " +
+        "Requires confirmation. " +
+        "Use for: pure status workflow steps (sending a Draft PO, cancelling a Sent PO, demoting a Confirmed PO for editing). " +
+        "WARNING: Promoting TO Confirmed (3) requires a canvas-drawn signature this tool doesn't supply — that transition will fail with 'Signature field is required'. The vendor advances the PO to Confirmed on their side after acknowledging.",
+      inputSchema: zodToJsonSchema(TransitionPurchaseOrderStatusSchema),
+      permission: "write:financial",
+      handler: async (rawArgs: unknown, _api: BuildToolsAPI) => {
+        const parsed = TransitionPurchaseOrderStatusSchema.safeParse(rawArgs ?? {});
+        if (!parsed.success) return formatZodError(parsed.error, "transition_purchase_order_status");
+        const data = parsed.data;
+        let resolvedStatusCode: number | undefined;
+        try {
+          resolvedStatusCode = resolvePoStatusCode(data.status);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return errorMarkdown(
+            `**Error calling \`transition_purchase_order_status\`**: ${msg}`,
+          );
+        }
+        return transitionPOStatusConfirmed(
+          { ...data, _resolved_status_code: resolvedStatusCode },
+          store,
+          sessionId,
+        );
       },
     },
     makeTool(
