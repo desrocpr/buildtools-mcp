@@ -15,6 +15,9 @@ interface FakeApiOverrides {
   getPurchaseOrders?: BuildToolsAPI["getPurchaseOrders"];
   getChangeOrders?: BuildToolsAPI["getChangeOrders"];
   getFinancialStatements?: BuildToolsAPI["getFinancialStatements"];
+  // PR #73 new sections use budget + selections.
+  getBudget?: BuildToolsAPI["getBudget"];
+  getSelections?: BuildToolsAPI["getSelections"];
 }
 
 function fakeApi(overrides: FakeApiOverrides = {}): BuildToolsAPI {
@@ -127,7 +130,7 @@ describe("project_status_brief — single project digest", () => {
       getFinancialStatements: getFinancialStatements as any,
     });
 
-    const result = await projectStatusBriefTool.handler({ project_ids: [100002] }, api);
+    const result = await projectStatusBriefTool.handler({ project_ids: [100002], include: ["rfis", "tasks", "purchase_orders", "change_orders", "draws"] }, api);
     expect(result.isError).toBeFalsy();
     const text = textOf(result);
     expect(text).toContain("Jones Addition");
@@ -193,7 +196,7 @@ describe("project_status_brief — single project digest", () => {
       getFinancialStatements: getFinancialStatements as any,
     });
 
-    const result = await projectStatusBriefTool.handler({ project_ids: [100002] }, api);
+    const result = await projectStatusBriefTool.handler({ project_ids: [100002], include: ["rfis", "tasks", "purchase_orders", "change_orders", "draws"] }, api);
     expect(result.isError).toBeFalsy();
     const text = textOf(result);
     // Successful sections still present
@@ -405,7 +408,7 @@ describe("project_status_brief — round-2 review fixes", () => {
       getChangeOrders: getChangeOrders as any,
       getFinancialStatements: getFinancialStatements as any,
     });
-    const result = await projectStatusBriefTool.handler({ project_ids: [100002] }, api);
+    const result = await projectStatusBriefTool.handler({ project_ids: [100002], include: ["rfis", "tasks", "purchase_orders", "change_orders", "draws"] }, api);
     const text = textOf(result);
     // Name-based BT searches must NOT have happened — they would
     // have searched for "#100002" which matches nothing, falsely
@@ -543,7 +546,7 @@ describe("project_status_brief — PR #72 richer summary", () => {
       getChangeOrders: stubEmpty as any,
       getFinancialStatements: stubEmptyFs as any,
     });
-    const result = await projectStatusBriefTool.handler({ project_ids: [100002] }, api);
+    const result = await projectStatusBriefTool.handler({ project_ids: [100002], include: ["rfis", "tasks", "purchase_orders", "change_orders", "draws"] }, api);
     const text = textOf(result);
     expect(text).toContain("Contract value**: $ 665,124.94");
     expect(text).toContain("Address**: 5210 Rosalie Ridge Drive · Centreville, VA");
@@ -572,7 +575,7 @@ describe("project_status_brief — PR #72 richer summary", () => {
       getChangeOrders: stubEmpty as any,
       getFinancialStatements: getFinancialStatements as any,
     });
-    const result = await projectStatusBriefTool.handler({ project_ids: [100002] }, api);
+    const result = await projectStatusBriefTool.handler({ project_ids: [100002], include: ["rfis", "tasks", "purchase_orders", "change_orders", "draws"] }, api);
     const text = textOf(result);
     // Roll-up: $95k billed, $50k paid, $45k balance — 95% of $100k contract
     expect(text).toContain("Draws**: 3 statement(s)");
@@ -608,7 +611,7 @@ describe("project_status_brief — PR #72 richer summary", () => {
       getChangeOrders: getChangeOrders as any,
       getFinancialStatements: stubEmptyFs as any,
     });
-    const result = await projectStatusBriefTool.handler({ project_ids: [100002] }, api);
+    const result = await projectStatusBriefTool.handler({ project_ids: [100002], include: ["rfis", "tasks", "purchase_orders", "change_orders", "draws"] }, api);
     const text = textOf(result);
     expect(text).toContain("Change orders**: 4 total");
     expect(text).toContain("_Approved_: 2 ($3,500)");
@@ -636,11 +639,207 @@ describe("project_status_brief — PR #72 richer summary", () => {
       getChangeOrders: stubEmpty as any,
       getFinancialStatements: getFinancialStatements as any,
     });
-    const result = await projectStatusBriefTool.handler({ project_ids: [100002] }, api);
+    const result = await projectStatusBriefTool.handler({ project_ids: [100002], include: ["rfis", "tasks", "purchase_orders", "change_orders", "draws"] }, api);
     const text = textOf(result);
     expect(text).toContain("billed $5,000.00");
     expect(text).not.toContain("Infinity");
     expect(text).not.toContain("NaN");
     expect(text).not.toContain("of contract");
+  });
+});
+
+describe("project_status_brief — PR #73 Moss-actual semantics", () => {
+  it("schedule section: groups Sent/Paid as billed; lists Draft FS as pending milestones", async () => {
+    const getProject = vi.fn().mockResolvedValue({
+      id: 100002, name: "Project Alpha", status_id: 6,
+      budget_revised: "$ 500,000.00",
+    });
+    const getFinancialStatements = vi.fn().mockResolvedValue({
+      statusCount: {},
+      statements: [
+        { id: "1", name: "Deposit", status: "Paid", amount: 50000, paid: 50000, balance: 0, date: "2025-01-01" },
+        { id: "2", name: "PP1 - Foundation", status: "Paid", amount: 100000, paid: 100000, balance: 0, date: "2025-03-15" },
+        { id: "3", name: "PP2 - Framing", status: "Sent", amount: 75000, paid: 0, balance: 75000, date: "2025-06-01" },
+        { id: "4", name: "PP3 - Drywall", status: "Draft", amount: 60000, paid: 0, balance: 60000, date: "2025-09-01" },
+        { id: "5", name: "PP4 - Punchlist", status: "Draft", amount: 30000, paid: 0, balance: 30000, date: "2025-12-01" },
+      ],
+    });
+    const stubEmpty = vi.fn().mockResolvedValue({ data: [] });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: getFinancialStatements as any,
+      getChangeOrders: stubEmpty as any,
+    });
+    const result = await projectStatusBriefTool.handler(
+      { project_ids: [100002], include: ["schedule"] },
+      api,
+    );
+    const text = textOf(result);
+    expect(text).toContain("### Schedule / billing progress");
+    expect(text).toContain("Billed (Sent + Paid): $225,000.00 (**45.0%** of contract)");
+    expect(text).toContain("received $150,000.00");
+    expect(text).toContain("Last billed milestone: **PP2 - Framing**");
+    expect(text).toContain("PP3 - Drywall");
+    expect(text).toContain("PP4 - Punchlist");
+    expect(text).toContain("verify each against the schedule before billing");
+  });
+
+  it("change orders: lists approved + pending with totals (HIGH-fix: no invented `invoiced_amount` check)", async () => {
+    const getProject = vi.fn().mockResolvedValue({ id: 100002, name: "Test", status_id: 6 });
+    const getChangeOrders = vi.fn().mockResolvedValue({
+      data: [
+        { info: 1, name: "Skylight upgrade", total: "$ 2,000.00", status: "Approved", project: "Test" },
+        { info: 2, name: "Window addition", total: "$ 3,500.00", status: "Approved", project: "Test" },
+        { info: 3, name: "Tile change", total: "$ 800.00", status: "Pending", project: "Test" },
+      ],
+    });
+    const stubEmpty = vi.fn().mockResolvedValue({ data: [] });
+    const stubEmptyFs = vi.fn().mockResolvedValue({ statusCount: {}, statements: [] });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getChangeOrders: getChangeOrders as any,
+      getRFIs: stubEmpty as any,
+      getTasks: stubEmpty as any,
+      getPurchaseOrders: stubEmpty as any,
+      getFinancialStatements: stubEmptyFs as any,
+    });
+    const result = await projectStatusBriefTool.handler(
+      { project_ids: [100002], include: ["unbilled_cos"] },
+      api,
+    );
+    const text = textOf(result);
+    expect(text).toContain("### Change orders");
+    // Both approved COs are listed — we don't try to infer which is unbilled
+    // from the list endpoint (PR #73 review HIGH fix).
+    expect(text).toContain("**2 approved CO(s)**, total $5,500.00");
+    expect(text).toContain("verify each appears on a current or upcoming financial statement");
+    expect(text).toContain("1 pending CO(s) totalling $800.00");
+    expect(text).toContain("Skylight upgrade");
+    expect(text).toContain("Window addition");
+    expect(text).toContain("Tile change");
+  });
+
+  it("selections vs allowances: flags over-budget allowance categories", async () => {
+    const getProject = vi.fn().mockResolvedValue({ id: 100002, name: "Test", status_id: 6 });
+    const getBudget = vi.fn().mockResolvedValue({
+      columns: [],
+      items: [
+        {
+          id: "1", categoryId: "100", name: "5300 - Wood Flooring",
+          isAllowance: true, publishedBudget: 12000, workingBudget: 12000,
+          approvedCOs: 0, publishedRevised: 12000, workingRevised: 12000, cells: [],
+        },
+        {
+          id: "2", categoryId: "101", name: "7051 - Countertops Allowance",
+          isAllowance: true, publishedBudget: 10000, workingBudget: 10000,
+          approvedCOs: 0, publishedRevised: 10000, workingRevised: 10000, cells: [],
+        },
+        {
+          id: "3", categoryId: "102", name: "1010 - Design",
+          isAllowance: false, publishedBudget: 3600, workingBudget: 3600,
+          approvedCOs: 0, publishedRevised: 3600, workingRevised: 3600, cells: [],
+        },
+      ],
+    });
+    const getSelections = vi.fn().mockResolvedValue({
+      statusCount: {},
+      selections: [
+        { id: "1", statusCode: 2, status: "Approved", category: "5300 - Wood Flooring", location: "", item: "Oak", price: "$ 14,500.00", dueDate: "", selection: "Oak", notes: "", createdAt: null, updatedAt: null, approvedDate: null, rejectedDate: null },
+        { id: "2", statusCode: 2, status: "Approved", category: "5300 - Wood Flooring", location: "", item: "Stair nosing", price: "$ 0.00", dueDate: "", selection: "", notes: "", createdAt: null, updatedAt: null, approvedDate: null, rejectedDate: null },
+      ],
+    });
+    const stubEmpty = vi.fn().mockResolvedValue({ data: [] });
+    const stubEmptyFs = vi.fn().mockResolvedValue({ statusCount: {}, statements: [] });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getBudget: getBudget as any,
+      getSelections: getSelections as any,
+      getChangeOrders: stubEmpty as any,
+      getFinancialStatements: stubEmptyFs as any,
+    });
+    const result = await projectStatusBriefTool.handler(
+      { project_ids: [100002], include: ["selections_vs_allowances"] },
+      api,
+    );
+    const text = textOf(result);
+    expect(text).toContain("### Selections vs allowance budgets");
+    expect(text).toContain("⚠️ **5300 - Wood Flooring**");
+    expect(text).toContain("over by $2,500.00");
+    expect(text).toContain("_no selections yet_ **7051 - Countertops Allowance**");
+    expect(text).not.toContain("1010 - Design");
+  });
+
+  it("budget vs POs: flags over-budget categories with a Sent PO; skips no-PO categories", async () => {
+    const getProject = vi.fn().mockResolvedValue({ id: 100002, name: "Test", status_id: 6 });
+    const getBudget = vi.fn().mockResolvedValue({
+      columns: [],
+      items: [
+        {
+          id: "1", categoryId: "100", name: "1515 - Demolition Labor",
+          isAllowance: false, publishedBudget: 6750, workingBudget: 6750,
+          approvedCOs: 0, publishedRevised: 6750, workingRevised: 6750,
+          cells: ["", "1515 - Demolition Labor", "-", "-", "", "", "$ 6,750.00", "$ 0.00", "$ 6,750.00", "$ 10,330.00", "", "", "", "", "", ""],
+        },
+        {
+          id: "2", categoryId: "101", name: "1010 - Design",
+          isAllowance: false, publishedBudget: 3600, workingBudget: 3600,
+          approvedCOs: 0, publishedRevised: 3600, workingRevised: 3600,
+          cells: ["", "1010 - Design", "-", "-", "", "", "$ 3,600.00", "$ 0.00", "$ 3,600.00", "$ 2,000.00", "", "", "", "", "", ""],
+        },
+        {
+          id: "3", categoryId: "102", name: "9999 - Skipped",
+          isAllowance: false, publishedBudget: 5000, workingBudget: 5000,
+          approvedCOs: 0, publishedRevised: 5000, workingRevised: 5000,
+          cells: ["", "9999 - Skipped", "-", "-", "", "", "$ 5,000.00", "$ 0.00", "$ 5,000.00", "$ 0.00", "", "", "", "", "", ""],
+        },
+      ],
+    });
+    const stubEmpty = vi.fn().mockResolvedValue({ data: [] });
+    const stubEmptyFs = vi.fn().mockResolvedValue({ statusCount: {}, statements: [] });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getBudget: getBudget as any,
+      getSelections: vi.fn().mockResolvedValue({ statusCount: {}, selections: [] }) as any,
+      getChangeOrders: stubEmpty as any,
+      getFinancialStatements: stubEmptyFs as any,
+    });
+    const result = await projectStatusBriefTool.handler(
+      { project_ids: [100002], include: ["budget_vs_pos"] },
+      api,
+    );
+    const text = textOf(result);
+    expect(text).toContain("### Categories with POs — budget vs sent POs (2 bought-out categories)");
+    expect(text).toContain("⚠️ **1515 - Demolition Labor**");
+    expect(text).toContain("over by $3,580.00");
+    expect(text).toContain("(153%)");
+    expect(text).toContain("1010 - Design");
+    expect(text).not.toContain("9999");
+  });
+
+  it("default include set: only the 4 new sections render (no RFIs/tasks/POs)", async () => {
+    const getProject = vi.fn().mockResolvedValue({ id: 100002, name: "Test", status_id: 6 });
+    const stubEmpty = vi.fn().mockResolvedValue({ data: [] });
+    const stubEmptyFs = vi.fn().mockResolvedValue({ statusCount: {}, statements: [] });
+    const getBudget = vi.fn().mockResolvedValue({ columns: [], items: [] });
+    const getSelections = vi.fn().mockResolvedValue({ statusCount: {}, selections: [] });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: stubEmptyFs as any,
+      getChangeOrders: stubEmpty as any,
+      getBudget: getBudget as any,
+      getSelections: getSelections as any,
+      getRFIs: stubEmpty as any,
+      getTasks: stubEmpty as any,
+      getPurchaseOrders: stubEmpty as any,
+    });
+    const result = await projectStatusBriefTool.handler({ project_ids: [100002] }, api);
+    const text = textOf(result);
+    expect(text).toContain("### Schedule / billing progress");
+    expect(text).toContain("### Change orders");
+    expect(text).toContain("### Selections vs allowance budgets");
+    expect(text).toContain("### Categories with POs");
+    expect(text).not.toContain("Open RFIs");
+    expect(text).not.toContain("Open tasks");
+    expect(text).not.toContain("Open POs");
   });
 });
