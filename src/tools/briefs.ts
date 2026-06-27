@@ -584,14 +584,19 @@ async function fetchUnbilledCos(
       const rowProject = stripHtml((r.project as string | undefined) ?? "").toLowerCase();
       return !rowProject || rowProject === targetProjectKey;
     });
-    // Each CO row exposes both `status` (label like "Approved") and an
-    // unbilled marker. Without a structured "billed" field we use a
-    // heuristic: status contains "approved" AND `invoice_related` /
-    // `pending` indicates not yet billed. The widely-used BT convention:
-    // approved + balance > 0 (where balance = total - invoiced) = unbilled.
-    // We approximate via the `total` and `invoiced_amount` (or similar)
-    // columns when present. Safest fallback: count anything Approved
-    // without a Paid marker.
+    // PR #73 review HIGH fix: the CO datatable row does NOT expose an
+    // `invoiced_amount` field — that lives on the single-CO detail and
+    // on PO rows. Per docs/API_REFERENCE.md the CO row carries only
+    // status, info, name, total, dates, relations, created_at. The
+    // original `total > invoiced + 0.005` heuristic compared total
+    // against undefined → 0, marking EVERY approved CO as unbilled.
+    // Detected only because the test mock supplied the invented field.
+    //
+    // Honest replacement: list all Approved + Pending COs with totals
+    // and label the section as "approved COs to verify against the next
+    // financial statement". The PM is the one who can confirm whether
+    // each approved CO has actually been billed yet — we don't have
+    // that join from the list endpoint alone.
     const round = (n: number) => Math.round(n * 100) / 100;
     const approved = projectRows.filter((r) =>
       stripHtml((r.status as string | undefined) ?? "").toLowerCase().includes("approved"),
@@ -599,29 +604,23 @@ async function fetchUnbilledCos(
     const pending = projectRows.filter((r) =>
       stripHtml((r.status as string | undefined) ?? "").toLowerCase().includes("pending"),
     );
-    const pendingApproved = approved.filter((r) => {
-      const total = parseDollarAmount(r.total);
-      const invoiced = parseDollarAmount(r.invoiced_amount ?? r.invoiced ?? "0");
-      // "Unbilled" when total > invoiced — meaning some of the CO has yet to be billed.
-      return total > invoiced + 0.005;
-    });
     const approvedTotal = round(approved.reduce((a, r) => a + parseDollarAmount(r.total), 0));
-    const pendingApprovedTotal = round(
-      pendingApproved.reduce((a, r) => a + (parseDollarAmount(r.total) - parseDollarAmount(r.invoiced_amount ?? r.invoiced ?? "0")), 0),
-    );
     const pendingTotal = round(pending.reduce((a, r) => a + parseDollarAmount(r.total), 0));
     const fmtRow = (r: Record<string, unknown>) => ({
       name: stripHtml((r.name as string | undefined) ?? "(unnamed CO)"),
       status: stripHtml((r.status as string | undefined) ?? ""),
       total: parseDollarAmount(r.total),
     });
+    // Field names retained for back-compat; semantics shift from
+    // "unbilled" to "approved, needs verification". The renderer is
+    // updated to label this honestly.
     return {
-      pendingApprovedCount: pendingApproved.length,
-      pendingApprovedTotal,
+      pendingApprovedCount: approved.length,
+      pendingApprovedTotal: approvedTotal,
       pendingCount: pending.length,
       pendingTotal,
       approvedTotal,
-      rows: [...pendingApproved, ...pending].map(fmtRow),
+      rows: [...approved, ...pending].map(fmtRow),
     };
   } catch (err) {
     process.stderr.write(
@@ -642,10 +641,19 @@ async function fetchSelectionsVsAllowances(
     ]);
     const allowances = (budget?.items ?? []).filter((i) => i.isAllowance);
     const round = (n: number) => Math.round(n * 100) / 100;
+    // PR #73 review MEDIUM fix: only count selections that have actually
+    // been priced or marked as selected. Open/Unselected rows with no
+    // price would otherwise inflate the count to non-zero with $0 total,
+    // flipping the status from "no-selections" to "under" and misleading
+    // the PM into thinking selections are in progress when nothing is
+    // priced yet. A selection counts if it has a non-zero price OR its
+    // statusCode is >= 2 (Selected / Approved / Purchased).
     const selectionsByCategory = new Map<string, { total: number; count: number }>();
     for (const s of sel?.selections ?? []) {
       const cat = s.category ?? "";
       const price = parseDollarAmount(s.price);
+      const hasMeaningfulStatus = (s.statusCode ?? 0) >= 2;
+      if (price <= 0 && !hasMeaningfulStatus) continue;
       const cur = selectionsByCategory.get(cat) ?? { total: 0, count: 0 };
       cur.total += price;
       cur.count += 1;
@@ -689,11 +697,18 @@ async function fetchBudgetVsPos(
   try {
     const budget = await api.getBudget(projectId);
     const round = (n: number) => Math.round(n * 100) / 100;
-    // cells[9] is SENT POs per the column header order
-    // ["", "BUDGET CATEGORY", "SUBCONTRACTORS", "INFO", "", "", "BUDGET",
-    //  "APPROVED CO'S", "REVISED BUDGET", "SENT PO'S", ...]
-    // Probe verified live 2026-06-27.
-    const SENT_POS_CELL_INDEX = 9;
+    // PR #73 review MEDIUM fix: look up the SENT PO'S column index from
+    // the columns header dynamically rather than hardcoding cells[9].
+    // If BT reorders columns the prior hardcode silently mismeasures.
+    // Falls back to index 9 (verified live 2026-06-27) when the header
+    // is absent or doesn't match.
+    const FALLBACK_INDEX = 9;
+    const SENT_POS_CELL_INDEX = (() => {
+      const idx = (budget?.columns ?? []).findIndex(
+        (c) => c.toUpperCase().replace(/[’']/g, "'") === "SENT PO'S",
+      );
+      return idx >= 0 ? idx : FALLBACK_INDEX;
+    })();
     const items: NonNullable<ProjectDigest["budgetVsPos"]>["items"] = [];
     for (const row of budget?.items ?? []) {
       const sentPoTotal = parseDollarAmount(row.cells[SENT_POS_CELL_INDEX] ?? "0");
@@ -828,7 +843,11 @@ function renderDigest(d: ProjectDigest): string {
 
   // === Project header metadata (PR #72) ===
   if (d.contractValueRaw || (d.contractValue && d.contractValue > 0)) {
-    lines.push(`- **Contract value**: ${d.contractValueRaw ?? fmtUsd(d.contractValue ?? 0)}`);
+    // PR #73 review LOW fix: contractValueRaw stripped HTML but didn't
+    // escape markdown metacharacters — every other BT-sourced string in
+    // this renderer goes through escapeMarkdownInline. Bring this in line.
+    const rendered = d.contractValueRaw ? escapeMarkdownInline(d.contractValueRaw) : fmtUsd(d.contractValue ?? 0);
+    lines.push(`- **Contract value**: ${rendered}`);
   }
   const addressParts = [d.address, [d.city, d.state].filter(Boolean).join(", ")].filter(Boolean);
   if (addressParts.length > 0) {
@@ -865,18 +884,22 @@ function renderDigest(d: ProjectDigest): string {
     }
   }
 
-  // === Unbilled change orders ===
+  // === Change orders ===
+  // PR #73 review HIGH fix: the original copy claimed "unbilled" status,
+  // which the list endpoint can't determine — the row schema doesn't
+  // include an invoiced amount. Honest wording: list approved + pending
+  // COs and ask the PM to confirm each lands on a future FS.
   if (d.unbilledCos) {
     const u = d.unbilledCos;
     lines.push("");
     lines.push(`### Change orders`);
     if (u.pendingApprovedCount === 0 && u.pendingCount === 0) {
-      lines.push(`- No approved-unbilled or pending COs ✓`);
+      lines.push(`- No approved or pending COs ✓`);
     } else {
       if (u.pendingApprovedCount > 0) {
-        lines.push(`- **${u.pendingApprovedCount} approved CO(s) unbilled**, total ${fmtUsd(u.pendingApprovedTotal)} — should be added to an upcoming financial statement.`);
-      } else {
-        lines.push(`- All approved COs billed ✓ (approved total to date: ${fmtUsd(u.approvedTotal)})`);
+        lines.push(
+          `- **${u.pendingApprovedCount} approved CO(s)**, total ${fmtUsd(u.approvedTotal)} — verify each appears on a current or upcoming financial statement.`,
+        );
       }
       if (u.pendingCount > 0) {
         lines.push(`- ${u.pendingCount} pending CO(s) totalling ${fmtUsd(u.pendingTotal)} — awaiting client approval.`);

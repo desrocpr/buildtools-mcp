@@ -684,13 +684,13 @@ describe("project_status_brief — PR #73 Moss-actual semantics", () => {
     expect(text).toContain("verify each against the schedule before billing");
   });
 
-  it("unbilled COs: flags approved-not-billed (total > invoiced) with $ total", async () => {
+  it("change orders: lists approved + pending with totals (HIGH-fix: no invented `invoiced_amount` check)", async () => {
     const getProject = vi.fn().mockResolvedValue({ id: 100002, name: "Test", status_id: 6 });
     const getChangeOrders = vi.fn().mockResolvedValue({
       data: [
-        { info: 1, name: "Skylight upgrade", total: "$ 2,000.00", invoiced_amount: "$ 0.00", status: "Approved", project: "Test" },
-        { info: 2, name: "Window addition", total: "$ 3,500.00", invoiced_amount: "$ 3,500.00", status: "Approved", project: "Test" },
-        { info: 3, name: "Tile change", total: "$ 800.00", invoiced_amount: "$ 0.00", status: "Pending", project: "Test" },
+        { info: 1, name: "Skylight upgrade", total: "$ 2,000.00", status: "Approved", project: "Test" },
+        { info: 2, name: "Window addition", total: "$ 3,500.00", status: "Approved", project: "Test" },
+        { info: 3, name: "Tile change", total: "$ 800.00", status: "Pending", project: "Test" },
       ],
     });
     const stubEmpty = vi.fn().mockResolvedValue({ data: [] });
@@ -709,11 +709,14 @@ describe("project_status_brief — PR #73 Moss-actual semantics", () => {
     );
     const text = textOf(result);
     expect(text).toContain("### Change orders");
-    expect(text).toContain("**1 approved CO(s) unbilled**, total $2,000.00");
+    // Both approved COs are listed — we don't try to infer which is unbilled
+    // from the list endpoint (PR #73 review HIGH fix).
+    expect(text).toContain("**2 approved CO(s)**, total $5,500.00");
+    expect(text).toContain("verify each appears on a current or upcoming financial statement");
     expect(text).toContain("1 pending CO(s) totalling $800.00");
     expect(text).toContain("Skylight upgrade");
+    expect(text).toContain("Window addition");
     expect(text).toContain("Tile change");
-    expect(text).not.toContain("Window addition");
   });
 
   it("selections vs allowances: flags over-budget allowance categories", async () => {
