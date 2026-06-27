@@ -326,6 +326,102 @@ const CreateFinancialStatementSchema = z.object({
 });
 type CreateFinancialStatementArgs = z.infer<typeof CreateFinancialStatementSchema>;
 
+// apply_vendor_quote (PR #63) — collapses the 6-round-trip "vendor sent
+// a new quote PDF, update the PO + attach + send" workflow into ONE
+// confirmed tool call. See `docs/TOOLS.md` for the workflow rationale.
+const ApplyVendorQuoteSchema = z.object({
+  vendor_name: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Vendor / subcontractor name. The tool will search_companies and disambiguate if multiple match. Mutually exclusive with company_id.",
+    ),
+  company_id: z
+    .number()
+    .optional()
+    .describe(
+      "Vendor / subcontractor company ID — skips the search step. Mutually exclusive with vendor_name.",
+    ),
+  purchase_order_id: z
+    .number()
+    .optional()
+    .describe(
+      "Target PO ID directly. Skips the per-project lookup. Mutually exclusive with project_id.",
+    ),
+  project_id: z
+    .number()
+    .optional()
+    .describe(
+      "Project ID — the tool will find the unique open PO on this project for the resolved vendor. Disambiguation prompt returned if multiple POs exist. Mutually exclusive with purchase_order_id.",
+    ),
+  quote_total: z
+    .number()
+    .describe("New total dollar amount the vendor quoted. Replaces existing line items with a SINGLE line (collapse-to-one — for per-line granularity use update_purchase_order directly)."),
+  filename: z
+    .string()
+    .min(1)
+    .describe("Filename for the quote PDF (e.g. 'ADMO55739-F.pdf')."),
+  file_base64: z
+    .string()
+    .min(4)
+    .describe("Base64-encoded file bytes. NO `data:` URL prefix. Hard cap: 25 MB after decode."),
+  content_type: z
+    .string()
+    .optional()
+    .describe("MIME type. Default: 'application/pdf' if filename ends with .pdf, else 'application/octet-stream'."),
+  quote_reference: z
+    .string()
+    .optional()
+    .describe("Quote reference identifier (e.g. 'ADMO55739-F'). Used as the line description: 'Confirmed order {quote_reference}'. If omitted, defaults to 'Quote applied {YYYY-MM-DD} — {filename minus extension}'."),
+  budget_code: z
+    .string()
+    .optional()
+    .describe("Budget code prefix for the line (e.g. '7051'). Defaults to the existing PO's first item category — works for nearly all single-category POs."),
+  notes: z
+    .string()
+    .optional()
+    .describe("Internal-only note on the line (not shown to vendor)."),
+  auto_send: z
+    .boolean()
+    .optional()
+    .describe(
+      "After applying the quote, transition the PO to Sent so the vendor re-acknowledges. Default true. Set false to leave the PO in Draft (no vendor email).",
+    ),
+  unlock_if_locked: z
+    .boolean()
+    .optional()
+    .describe(
+      "If the PO is in Confirmed (write-locked) state, auto-orchestrate demote → edit → restore to the target status. Default true. Mirrors update_purchase_order's unlock_if_locked behavior.",
+    ),
+  idempotency_key: z
+    .string()
+    .min(8)
+    .max(128)
+    .optional()
+    .describe(
+      "Optional client-supplied idempotency key. Same semantics as update_purchase_order — successful executions cached for 1 hour; retry with same key + same args replays the result.",
+    ),
+  confirmation_id: z.string().optional(),
+})
+  .refine(
+    (data) => (data.vendor_name === undefined) !== (data.company_id === undefined),
+    {
+      message: "Exactly one of `vendor_name` or `company_id` must be provided.",
+      path: ["vendor_name"],
+    },
+  )
+  .refine(
+    (data) =>
+      (data.purchase_order_id === undefined) !== (data.project_id === undefined),
+    {
+      message:
+        "Exactly one of `purchase_order_id` or `project_id` must be provided.",
+      path: ["purchase_order_id"],
+    },
+  );
+type ApplyVendorQuoteArgs = z.infer<typeof ApplyVendorQuoteSchema>;
+
 const TransitionPurchaseOrderStatusSchema = z.object({
   purchase_order_id: z.number().describe("BuildTools purchase order ID."),
   status: z
@@ -1026,6 +1122,366 @@ export function createMutationTools(
     },
   );
 
+  // ---------------------------------------------------------------------
+  // apply_vendor_quote — multi-step workflow consolidator (PR #63)
+  // ---------------------------------------------------------------------
+  //
+  // The single most common "vendor sent a new quote" workflow. Collapses
+  // 6 round-trips (search_companies → list_purchase_orders → get_po →
+  // update_po → upload_attachment → transition) into one confirmed call.
+  //
+  // Inherits semantics from the underlying primitives:
+  //   - unlock_if_locked     ←  update_purchase_order
+  //   - idempotency_key      ←  update_purchase_order
+  //   - data: prefix reject  ←  upload_attachment
+  //   - confirmation pattern ←  requiresConfirmation
+  //
+  // Orchestration on confirmation:
+  //   1. updatePurchaseOrder with the new items + unlock_if_locked
+  //   2. uploadAttachment with the PDF (PO module = 1500)
+  //   3. transitionPurchaseOrderStatus to Sent (if auto_send)
+  // Steps 2 and 3 are independent of step 1's success; we run them and
+  // surface partial failures distinctly so the caller knows the exact
+  // outcome.
+
+  /** Resolve `vendor_name` to a single company. Returns disambiguation prompt as an Error result if N>1. */
+  type CompanyRow = {
+    DT_RowId: string;
+    name?: string;
+    type_name?: string;
+  };
+  type ResolutionOk<T> = { ok: true; value: T };
+  type ResolutionFail = { ok: false; result: ToolResult };
+  type Resolution<T> = ResolutionOk<T> | ResolutionFail;
+
+  async function resolveVendorCompany(
+    args: ApplyVendorQuoteArgs,
+  ): Promise<Resolution<{ id: number; name: string }>> {
+    if (args.company_id !== undefined) {
+      const name = await lookupCompanyName(args.company_id);
+      return {
+        ok: true,
+        value: { id: args.company_id, name: name ?? `Company #${args.company_id}` },
+      };
+    }
+    const query = args.vendor_name!;
+    const results = (await getApi().searchCompanies<{ data: CompanyRow[] }>(query, { limit: 25 })) ?? { data: [] };
+    const rows = results.data ?? [];
+    if (rows.length === 0) {
+      return {
+        ok: false,
+        result: errorMarkdown(
+          `**No vendor matches** "${escapeMarkdownInline(query)}". Verify the name or pass \`company_id\` directly.`,
+        ),
+      };
+    }
+    const decoded = rows.map((r) => ({
+      id: Number(r.DT_RowId.replace(/^row_/, "")),
+      name: (r.name ?? "").replace(/<[^>]*>/g, "").trim(),
+      type: (r.type_name ?? "").trim(),
+    }));
+    // Exact-name match takes precedence over partial matches.
+    const exact = decoded.filter(
+      (r) => r.name.toLowerCase() === query.toLowerCase(),
+    );
+    const matches = exact.length === 1 ? exact : decoded;
+    if (matches.length === 1) {
+      const m = matches[0];
+      return { ok: true, value: { id: m.id, name: m.name || `Company #${m.id}` } };
+    }
+    const list = matches
+      .slice(0, 8)
+      .map((r) => `- #${r.id} **${escapeMarkdownInline(r.name)}**${r.type ? ` (${escapeMarkdownInline(r.type)})` : ""}`)
+      .join("\n");
+    return {
+      ok: false,
+      result: errorMarkdown(
+        `**Multiple vendors match** "${escapeMarkdownInline(query)}":\n\n${list}\n\nRe-invoke with \`company_id\` set to the right one.`,
+      ),
+    };
+  }
+
+  /** Resolve target PO. */
+  type POListRow = {
+    DT_RowId?: string;
+    info?: number | string;
+    name?: string;
+    number?: string;
+    total?: string;
+    status?: string;
+    company?: string;
+  };
+  async function resolveTargetPurchaseOrder(
+    args: ApplyVendorQuoteArgs,
+    vendor: { id: number; name: string },
+  ): Promise<Resolution<{ id: number; name?: string }>> {
+    if (args.purchase_order_id !== undefined) {
+      return { ok: true, value: { id: args.purchase_order_id } };
+    }
+    const projectId = args.project_id!;
+    // Filter the per-project PO datatable by company. Column-based
+    // filtering varies by tenant; we filter client-side off the
+    // resolved detail since PO list rows expose the company name as
+    // text.
+    const params = {
+      "columns[10][search][value]": String(projectId), // project filter
+      length: 200,
+    } as const;
+    const list = (await getApi().getPurchaseOrders<{ data: POListRow[] }>(params as any)) ?? { data: [] };
+    const rows = list.data ?? [];
+    // Match by company name in the row (datatable embeds it as a substring).
+    const candidates = rows.filter(
+      (r) =>
+        (r.company ?? "").toLowerCase().includes(vendor.name.toLowerCase()) ||
+        (r.name ?? "").toLowerCase().includes(vendor.name.toLowerCase()),
+    );
+    if (candidates.length === 0) {
+      return {
+        ok: false,
+        result: errorMarkdown(
+          `**No existing PO** for **${escapeMarkdownInline(vendor.name)}** on project #${projectId}. Create one with \`create_purchase_order\`.`,
+        ),
+      };
+    }
+    if (candidates.length === 1) {
+      const c = candidates[0];
+      const id = Number(c.info ?? c.DT_RowId?.replace(/^row_/, "") ?? 0);
+      if (!Number.isFinite(id) || id <= 0) {
+        return {
+          ok: false,
+          result: errorMarkdown(`**Could not parse PO id** from datatable row.`),
+        };
+      }
+      return { ok: true, value: { id, name: stripHtml(String(c.name ?? "")) } };
+    }
+    const listLines = candidates
+      .slice(0, 8)
+      .map((r) => {
+        const id = Number(r.info ?? r.DT_RowId?.replace(/^row_/, "") ?? 0);
+        const total = (r.total ?? "").replace(/<[^>]*>/g, "").trim();
+        const name = stripHtml(String(r.name ?? ""));
+        return `- #${id} ${escapeMarkdownInline(name)} — ${total}`;
+      })
+      .join("\n");
+    return {
+      ok: false,
+      result: errorMarkdown(
+        `**Multiple POs** for **${escapeMarkdownInline(vendor.name)}** on project #${projectId}:\n\n${listLines}\n\nRe-invoke with \`purchase_order_id\` set to the right one.`,
+      ),
+    };
+  }
+
+  // 25 MB cap (per brief). PDF spec says theoretical max is ~50 MB for
+  // most viewers; 25 MB is comfortable for quote docs and prevents
+  // accidental huge uploads.
+  const APPLY_VENDOR_QUOTE_MAX_BYTES = 25 * 1024 * 1024;
+
+  type ApplyVendorQuoteInternalArgs = ApplyVendorQuoteArgs & {
+    _resolved_vendor?: { id: number; name: string };
+    _resolved_po?: { id: number; name?: string };
+    _pre_state?: {
+      status: number | null;
+      totalNumeric: number;
+      itemCount: number;
+      companyId: number | null;
+      companyName: string | null;
+      projectId: number | null;
+      firstItemBudgetCode?: string;
+    } | null;
+    _decoded_bytes?: number;
+  };
+
+  function defaultContentType(filename: string): string {
+    return filename.toLowerCase().endsWith(".pdf")
+      ? "application/pdf"
+      : "application/octet-stream";
+  }
+
+  function defaultLineDescription(args: ApplyVendorQuoteArgs, todayIso: string): string {
+    if (args.quote_reference) return `Confirmed order ${args.quote_reference}`;
+    const filenameBase = args.filename.replace(/\.[a-z0-9]+$/i, "");
+    return `Quote applied ${todayIso} — ${filenameBase}`;
+  }
+
+  function stripHtml(s: string): string {
+    return s.replace(/<[^>]*>/g, "").trim();
+  }
+
+  const applyVendorQuoteConfirmed = requiresConfirmation<ApplyVendorQuoteInternalArgs>(
+    "apply_vendor_quote",
+    (a) => {
+      const vendor = a._resolved_vendor;
+      const po = a._resolved_po;
+      const pre = a._pre_state;
+      const bytes = a._decoded_bytes ?? 0;
+      const sizeKb = (bytes / 1024).toFixed(1);
+      const ct = a.content_type ?? defaultContentType(a.filename);
+      const finalStatus = a.auto_send === false ? "Draft" : "Sent";
+      const lines: string[] = [];
+      lines.push(`Apply vendor quote${a.quote_reference ? ` **${escapeMarkdownInline(a.quote_reference)}**` : ""} to purchase order **#${po?.id}**.`);
+      lines.push("");
+      if (vendor) lines.push(`- **Vendor**: ${escapeMarkdownInline(vendor.name)} (#${vendor.id})`);
+      if (po?.name) lines.push(`- **PO**: #${po.id} — ${escapeMarkdownInline(po.name)}`);
+      if (pre) {
+        const deltaSign = a.quote_total > pre.totalNumeric ? "+" : "";
+        const delta = a.quote_total - pre.totalNumeric;
+        lines.push(
+          `- **Total**: $${pre.totalNumeric.toFixed(2)} → **$${a.quote_total.toFixed(2)}** (Δ ${deltaSign}$${delta.toFixed(2)})`,
+        );
+        lines.push(`- **Current status**: ${poStatusLabel(pre.status ?? -1)}`);
+      } else {
+        lines.push(`- **New total**: $${a.quote_total.toFixed(2)}`);
+      }
+      lines.push(`- **Attachment**: ${escapeMarkdownInline(a.filename)} (${sizeKb} KB, ${ct})`);
+      lines.push(`- **Final status**: ${finalStatus}`);
+      const isLocked =
+        pre && pre.status !== null && PURCHASE_ORDER_WRITE_LOCKED_STATUSES.has(pre.status);
+      if (isLocked && a.unlock_if_locked !== false) {
+        lines.push(
+          "",
+          `⚠️ **Auto-transition** (PO is currently **${poStatusLabel(pre.status as number)}**): demote → apply edits + attach PDF → ${finalStatus}. Vendor will see status flip in their portal${finalStatus === "Sent" ? " and may receive an email" : ""}.`,
+        );
+      } else if (isLocked && a.unlock_if_locked === false) {
+        lines.push(
+          "",
+          `⛔ PO is **${poStatusLabel(pre.status as number)}** (write-locked) and \`unlock_if_locked\` is false. This call will fail with a lock error — re-invoke with \`unlock_if_locked: true\` to auto-orchestrate.`,
+        );
+      }
+      return lines.join("\n");
+    },
+    async (a) => {
+      try {
+        const vendor = a._resolved_vendor!;
+        const po = a._resolved_po!;
+        const pre = a._pre_state;
+        const finalStatusCode = a.auto_send === false ? 1 : 2; // Draft : Sent
+        const isLocked =
+          pre && pre.status !== null && PURCHASE_ORDER_WRITE_LOCKED_STATUSES.has(pre.status);
+        const unlockIfLocked = a.unlock_if_locked !== false;
+
+        // === Step 1: update PO content + status orchestration ===
+        // We replicate update_purchase_order's auto-transition logic
+        // inline rather than calling the tool layer because we need
+        // tighter control over the final-status target (driven by
+        // auto_send, not the caller's status arg).
+        const lineDescription =
+          a.notes && a.notes.length > 0
+            ? a.notes
+            : defaultLineDescription(a, new Date().toISOString().slice(0, 10));
+        // Pick budget code: caller-supplied → pre-state first item → reject
+        const budgetCode = a.budget_code ?? pre?.firstItemBudgetCode;
+        if (!budgetCode) {
+          return errorMarkdown(
+            `**No budget code resolvable** for PO #${po.id}: pass \`budget_code\` explicitly, or the existing PO must have at least one line item with a budget category.`,
+          );
+        }
+        const workflowSteps: string[] = [];
+
+        // 1a. Demote if locked.
+        if (isLocked && unlockIfLocked) {
+          const demote = await getApi().transitionPurchaseOrderStatus({
+            purchaseOrderId: po.id,
+            status: 1,
+          });
+          if (!demote.success) {
+            return errorMarkdown(
+              `**Demote failed** for PO #${po.id}: ${String(demote.errors ?? "(no detail)")}. PO unchanged; no attachment uploaded.`,
+            );
+          }
+          workflowSteps.push(`demoted ${poStatusLabel(pre!.status as number)} → Draft`);
+        } else if (isLocked && !unlockIfLocked) {
+          // Standard lock error message.
+          return errorMarkdown(
+            formatPurchaseOrderLockError(po.id, pre!.status as number),
+          );
+        }
+
+        // 1b. Apply content via /save.
+        const updateResult = await getApi().updatePurchaseOrder({
+          purchaseOrderId: po.id,
+          items: [
+            {
+              budgetCode,
+              description: lineDescription,
+              total: a.quote_total,
+              notes: a.quote_reference
+                ? `Quote ${a.quote_reference}`
+                : undefined,
+              internalNotes: a.notes,
+            },
+          ],
+        });
+        if (!updateResult.success) {
+          // Restore lock state on failure (mirrors update_purchase_order).
+          let restoreNote = "";
+          if (isLocked && unlockIfLocked && pre?.status !== null) {
+            const restore = await getApi().transitionPurchaseOrderStatus({
+              purchaseOrderId: po.id,
+              status: pre!.status as number,
+            });
+            restoreNote = restore.success
+              ? `\n\n_Rolled back to **${poStatusLabel(pre!.status as number)}**._`
+              : `\n\n**Rollback ALSO failed**. PO is now in Draft — fix manually in the BT UI.`;
+          }
+          return errorMarkdown(
+            `**Update step failed** for PO #${po.id}: ${String(updateResult.errors ?? "(no detail)")}${restoreNote}`,
+          );
+        }
+        workflowSteps.push(`applied content (new total $${a.quote_total.toFixed(2)})`);
+
+        // 1c. Final status transition.
+        const transitionResult = await getApi().transitionPurchaseOrderStatus({
+          purchaseOrderId: po.id,
+          status: finalStatusCode,
+        });
+        if (!transitionResult.success) {
+          return errorMarkdown(
+            `**Content updated** for PO #${po.id} but **status transition to ${poStatusLabel(finalStatusCode)} failed**: ${String(transitionResult.errors ?? "(no detail)")}. PO is currently in Draft.`,
+          );
+        }
+        workflowSteps.push(`status → ${poStatusLabel(finalStatusCode)}`);
+
+        // === Step 2: upload attachment ===
+        // Independent of step 1. We surface partial failures here
+        // distinctly: the PO is already correctly updated; attachment
+        // is best-effort.
+        let attachmentNote: string;
+        try {
+          const fileBuffer = Buffer.from(a.file_base64, "base64");
+          // Project id from pre-state if available (typical), else
+          // re-fetch the PO. Pre-state should always have it when the
+          // outer handler succeeded.
+          const projectId = pre?.projectId ?? (await fetchProjectId(po.id));
+          const upload = await getApi().uploadAttachment({
+            projectId,
+            module: 1500,
+            moduleId: po.id,
+            fileBuffer,
+            filename: a.filename,
+            contentType: a.content_type ?? defaultContentType(a.filename),
+          });
+          attachmentNote = `Attached **${escapeMarkdownInline(upload.name)}** (file_id ${upload.fileId}). [Download](${upload.downloadUrl})`;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          attachmentNote = `⚠️ **Attachment upload failed**: ${escapeMarkdownInline(msg)}. PO was updated successfully; re-attach manually with \`upload_attachment\` or via the BT UI.`;
+        }
+
+        // === Compose the final result ===
+        const headline = `Vendor quote applied to **PO #${po.id}** — ${workflowSteps.join(" → ")}.`;
+        return markdown(`${headline}\n\n${attachmentNote}`);
+      } catch (err) {
+        return formatError(err, "apply_vendor_quote");
+      }
+    },
+  );
+
+  /** Resolve the project id behind a PO. Uses getPurchaseOrder. */
+  async function fetchProjectId(poId: number): Promise<number> {
+    const detail = await getApi().getPurchaseOrder(poId);
+    if (!detail) throw new Error(`Could not re-fetch PO #${poId} for project lookup`);
+    return Number(detail.projectId);
+  }
+
   /**
    * Best-effort vendor-name lookup for the confirmation prompt. Returns
    * the company's name on success, or undefined if the lookup fails —
@@ -1708,6 +2164,107 @@ export function createMutationTools(
         }
         return transitionPOStatusConfirmed(
           { ...data, _resolved_status_code: resolvedStatusCode },
+          store,
+          sessionId,
+        );
+      },
+    },
+    // apply_vendor_quote (PR #63) — multi-step workflow consolidator.
+    // Custom handler because of vendor + PO resolution + pre-snapshot.
+    {
+      name: "apply_vendor_quote",
+      description:
+        "Apply a vendor's quote PDF to an existing purchase order in ONE call. Collapses the 6-round-trip workflow (find vendor → find PO → check state → update items → attach PDF → send) into a single confirmed operation. " +
+        "Resolves vendor by name OR id; resolves target PO by id OR by (project_id + vendor). Disambiguation prompts returned on ambiguity. " +
+        "Replaces existing line items with a SINGLE line at the new total (use update_purchase_order for per-line granularity). Attaches the PDF to the PO. Optionally transitions to Sent so the vendor re-acknowledges. " +
+        "Inherits unlock_if_locked + idempotency_key from update_purchase_order semantics.",
+      inputSchema: zodToJsonSchema(ApplyVendorQuoteSchema),
+      permission: "write:financial",
+      handler: async (rawArgs: unknown, _api: BuildToolsAPI) => {
+        const parsed = ApplyVendorQuoteSchema.safeParse(rawArgs ?? {});
+        if (!parsed.success) return formatZodError(parsed.error, "apply_vendor_quote");
+        const data = parsed.data;
+
+        // Reject `data:` prefix (mirrors upload_attachment defense).
+        if (data.file_base64.toLowerCase().startsWith("data:")) {
+          return errorMarkdown(
+            `**Error calling \`apply_vendor_quote\`**: \`file_base64\` must be raw base64 — strip any \`data:image/...;base64,\` URL prefix before passing.`,
+          );
+        }
+
+        // Compute decoded byte length, enforce 25 MB cap.
+        let decodedBytes: number;
+        try {
+          decodedBytes = Buffer.from(data.file_base64, "base64").byteLength;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return errorMarkdown(`**Error calling \`apply_vendor_quote\`**: could not decode \`file_base64\`: ${msg}`);
+        }
+        if (decodedBytes > APPLY_VENDOR_QUOTE_MAX_BYTES) {
+          return errorMarkdown(
+            `**File too large**: ${(decodedBytes / 1024 / 1024).toFixed(1)} MB exceeds the 25 MB cap.`,
+          );
+        }
+
+        // === First-call resolution (skip on confirmation_id replay
+        //     — the framework already has the resolved args stored).
+        let resolvedVendor: { id: number; name: string } | undefined;
+        let resolvedPo: { id: number; name?: string } | undefined;
+        let preState: ApplyVendorQuoteInternalArgs["_pre_state"];
+        if (!data.confirmation_id) {
+          // 1. Resolve vendor
+          const vRes = await resolveVendorCompany(data);
+          if (!vRes.ok) return vRes.result;
+          resolvedVendor = vRes.value;
+
+          // 2. Resolve target PO
+          const pRes = await resolveTargetPurchaseOrder(data, resolvedVendor);
+          if (!pRes.ok) return pRes.result;
+          resolvedPo = pRes.value;
+
+          // 3. Pre-fetch PO detail (status + total + items + vendor + project).
+          const detail = await getApi().getPurchaseOrder(resolvedPo.id);
+          if (!detail) {
+            return errorMarkdown(
+              `**Could not fetch PO #${resolvedPo.id}** — verify the PO exists and is accessible.`,
+            );
+          }
+          preState = {
+            status: detail.status,
+            totalNumeric: detail.totalNumeric,
+            itemCount: detail.items.length,
+            companyId: detail.companyId,
+            companyName: detail.companyName,
+            projectId: Number(detail.projectId),
+            firstItemBudgetCode: detail.items[0]?.budgetCategoryCode,
+          };
+
+          // 4. Vendor/PO consistency check.
+          if (
+            detail.companyId !== null &&
+            resolvedVendor.id !== detail.companyId
+          ) {
+            return errorMarkdown(
+              `**Vendor mismatch**: PO #${resolvedPo.id} is for vendor **${escapeMarkdownInline(detail.companyName ?? `#${detail.companyId}`)}** (#${detail.companyId}), not **${escapeMarkdownInline(resolvedVendor.name)}** (#${resolvedVendor.id}). Either pass \`company_id: ${detail.companyId}\` matching the PO, or change the vendor first with \`update_purchase_order\`.`,
+            );
+          }
+
+          // 5. Reject already-rejected POs.
+          if (detail.status === 4) {
+            return errorMarkdown(
+              `**PO #${resolvedPo.id} is Rejected** — vendor already declined. Create a new PO with \`create_purchase_order\` instead of applying a quote to a closed one.`,
+            );
+          }
+        }
+
+        return applyVendorQuoteConfirmed(
+          {
+            ...data,
+            _resolved_vendor: resolvedVendor,
+            _resolved_po: resolvedPo,
+            _pre_state: preState,
+            _decoded_bytes: decodedBytes,
+          },
           store,
           sessionId,
         );

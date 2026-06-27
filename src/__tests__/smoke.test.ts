@@ -39,13 +39,14 @@ describe("buildtools-mcp", () => {
     const store = new ConfirmationStore();
     const tools = createMutationTools(() => api, store);
 
-    expect(tools.length).toBe(16);
+    expect(tools.length).toBe(17);
     const names = tools.map((t) => t.name);
     expect(names).toContain("create_project");
     expect(names).toContain("create_change_order");
     expect(names).toContain("create_purchase_order");
     expect(names).toContain("update_purchase_order");
     expect(names).toContain("transition_purchase_order_status");
+    expect(names).toContain("apply_vendor_quote");
     expect(names).toContain("create_task");
     expect(names).toContain("create_rfi");
     expect(names).toContain("create_invoice");

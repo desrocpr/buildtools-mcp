@@ -35,6 +35,8 @@ interface FakeApiOverrides {
   transitionPurchaseOrderStatus?: BuildToolsAPI["transitionPurchaseOrderStatus"];
   getCompany?: BuildToolsAPI["getCompany"];
   getPurchaseOrder?: BuildToolsAPI["getPurchaseOrder"];
+  getPurchaseOrders?: BuildToolsAPI["getPurchaseOrders"];
+  uploadAttachment?: BuildToolsAPI["uploadAttachment"];
 }
 
 function fakeApi(overrides: FakeApiOverrides = {}): BuildToolsAPI {
@@ -1624,5 +1626,293 @@ describe("transition_purchase_order_status — standalone tool (PR #62)", () => 
     );
     expect(result.isError).toBe(true);
     expect(textOf(result).toLowerCase()).toContain("status");
+  });
+});
+
+describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
+  function findTool(api: BuildToolsAPI, store: ConfirmationStore) {
+    const tools = createMutationTools(() => api, store);
+    const tool = tools.find((t) => t.name === "apply_vendor_quote");
+    if (!tool) throw new Error("apply_vendor_quote not registered");
+    return tool;
+  }
+
+  const poSnapshot = {
+    id: 39201, projectId: 185936, name: "DesRoches Countertops", number: "", prefix: "PO",
+    status: 3, // Confirmed
+    description: "",
+    companyId: 15, companyName: "Euro Stone Craft",
+    items: [{ id: 1, budgetCategoryId: 1680, budgetCategoryCode: "7051", budgetCategoryName: "Countertops Allowance", total: "17380.47", notes: "", internalNotes: "", invoiceRelated: "0.00", amounts: [], companyId: 15, companyName: "Euro Stone Craft" }],
+    totalNumeric: 17380.47,
+  };
+
+  const tinyPdfBase64 = Buffer.from("%PDF-1.4\n%test\n").toString("base64");
+
+  const baseArgs = {
+    company_id: 15,
+    purchase_order_id: 39201,
+    quote_total: 19533.81,
+    quote_reference: "ADMO55739-F",
+    filename: "ADMO55739-F.pdf",
+    file_base64: tinyPdfBase64,
+  };
+
+  it("end-to-end happy path on Confirmed PO: demote → update → upload → transition to Sent", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue(poSnapshot);
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39201, message: "saved",
+    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      success: true, message: "Status updated.",
+    });
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      fileId: 146061,
+      name: "ADMO55739-F.pdf",
+      downloadUrl: "https://file.buildtools.app/o/0ye79w/file/hash/abc?download=1",
+      size: 32,
+      module: 1500,
+      moduleId: 39201,
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      uploadAttachment: uploadAttachment as any,
+    });
+    const tool = findTool(api, mkStore());
+
+    const prompt = await tool.handler(baseArgs, api);
+    const promptText = textOf(prompt);
+    expect(promptText).toContain("Euro Stone Craft");
+    expect(promptText).toContain("$17380.47 → **$19533.81**");
+    expect(promptText).toContain("ADMO55739-F.pdf");
+    expect(promptText).toContain("Auto-transition");
+    expect(promptText).toContain("Confirmed");
+
+    const confirmationId = promptText.match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...baseArgs, confirmation_id: confirmationId }, api);
+    expect(exec.isError).toBeFalsy();
+    const execText = textOf(exec);
+    expect(execText).toContain("demoted Confirmed → Draft");
+    expect(execText).toContain("applied content (new total $19533.81)");
+    expect(execText).toContain("status → Sent");
+    expect(execText).toContain("file_id 146061");
+
+    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({ purchaseOrderId: 39201, status: 1 });
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
+    const updateCall = updatePurchaseOrder.mock.calls[0][0];
+    expect(updateCall.items[0].total).toBe(19533.81);
+    expect(updateCall.items[0].description).toBe("Confirmed order ADMO55739-F");
+    expect(updateCall.items[0].budgetCode).toBe("7051");
+    expect(transitionPurchaseOrderStatus.mock.calls[1][0]).toEqual({ purchaseOrderId: 39201, status: 2 });
+    expect(uploadAttachment).toHaveBeenCalledTimes(1);
+    expect(uploadAttachment.mock.calls[0][0].module).toBe(1500);
+    expect(uploadAttachment.mock.calls[0][0].moduleId).toBe(39201);
+    expect(uploadAttachment.mock.calls[0][0].projectId).toBe(185936);
+  });
+
+  it("vendor disambiguation: multiple companies match vendor_name → returns disambiguation prompt, no writes", async () => {
+    const searchCompanies = vi.fn().mockResolvedValue({
+      data: [
+        { DT_RowId: "row_15", name: "Euro Stone Craft", type_name: "Vendor" },
+        { DT_RowId: "row_99", name: "Euro Stone & Tile LLC", type_name: "Vendor" },
+      ],
+    });
+    const updatePurchaseOrder = vi.fn();
+    const api = fakeApi({
+      searchCompanies: searchCompanies as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+    });
+    const tool = findTool(api, mkStore());
+
+    const result = await tool.handler(
+      { ...baseArgs, vendor_name: "Euro Stone", company_id: undefined } as any,
+      api,
+    );
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toContain("Multiple vendors match");
+    expect(text).toContain("#15");
+    expect(text).toContain("#99");
+    expect(updatePurchaseOrder).not.toHaveBeenCalled();
+  });
+
+  it("vendor disambiguation: zero matches → clean error", async () => {
+    const searchCompanies = vi.fn().mockResolvedValue({ data: [] });
+    const api = fakeApi({ searchCompanies: searchCompanies as any });
+    const tool = findTool(api, mkStore());
+
+    const result = await tool.handler(
+      { ...baseArgs, vendor_name: "Nonexistent Vendor", company_id: undefined } as any,
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("No vendor matches");
+  });
+
+  it("vendor/PO mismatch: resolved PO is for a different company → clean error, no writes", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue({
+      ...poSnapshot, companyId: 999, companyName: "Wrong Vendor LLC",
+    });
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const updatePurchaseOrder = vi.fn();
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+    });
+    const tool = findTool(api, mkStore());
+
+    const result = await tool.handler(baseArgs, api);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Vendor mismatch");
+    expect(textOf(result)).toContain("Wrong Vendor LLC");
+    expect(updatePurchaseOrder).not.toHaveBeenCalled();
+  });
+
+  it("Rejected PO (status=4) → clean error, suggests create_purchase_order", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue({ ...poSnapshot, status: 4 });
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+    });
+    const tool = findTool(api, mkStore());
+
+    const result = await tool.handler(baseArgs, api);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Rejected");
+    expect(textOf(result)).toContain("create_purchase_order");
+  });
+
+  it("rejects `data:` URL prefix on file_base64 (case-insensitive)", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    for (const prefix of ["data:", "Data:", "DATA:"]) {
+      const result = await tool.handler(
+        { ...baseArgs, file_base64: `${prefix}application/pdf;base64,SGVsbG8=` },
+        api,
+      );
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain("data:");
+    }
+  });
+
+  it("rejects files larger than 25 MB hard cap", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    const huge = Buffer.alloc(30 * 1024 * 1024).toString("base64");
+    const result = await tool.handler({ ...baseArgs, file_base64: huge }, api);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("25 MB");
+  });
+
+  it("Zod refines: both vendor_name AND company_id set → error", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler(
+      { ...baseArgs, vendor_name: "X", company_id: 15 },
+      api,
+    );
+    expect(result.isError).toBe(true);
+  });
+
+  it("Zod refines: both purchase_order_id AND project_id set → error", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler(
+      { ...baseArgs, purchase_order_id: 39201, project_id: 185936 },
+      api,
+    );
+    expect(result.isError).toBe(true);
+  });
+
+  it("attachment failure after successful PO update: surfaces partial success, no rollback", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue({ ...poSnapshot, status: 1 });
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39201, message: "saved",
+    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      success: true, message: "ok",
+    });
+    const uploadAttachment = vi.fn().mockRejectedValue(new Error("Upload failed (HTTP 500): server error"));
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      uploadAttachment: uploadAttachment as any,
+    });
+    const tool = findTool(api, mkStore());
+
+    const prompt = await tool.handler(baseArgs, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...baseArgs, confirmation_id: confirmationId }, api);
+
+    expect(exec.isError).toBeFalsy();
+    const execText = textOf(exec);
+    expect(execText).toContain("status → Sent");
+    expect(execText).toContain("Attachment upload failed");
+    expect(execText).toContain("upload_attachment");
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it("project_id + vendor_name disambiguation: 0 POs on project for vendor → suggests create_purchase_order", async () => {
+    const searchCompanies = vi.fn().mockResolvedValue({
+      data: [{ DT_RowId: "row_15", name: "Euro Stone Craft", type_name: "Vendor" }],
+    });
+    const getPurchaseOrders = vi.fn().mockResolvedValue({ data: [] });
+    const api = fakeApi({
+      searchCompanies: searchCompanies as any,
+      getPurchaseOrders: getPurchaseOrders as any,
+    });
+    const tool = findTool(api, mkStore());
+
+    const result = await tool.handler(
+      {
+        ...baseArgs,
+        vendor_name: "Euro Stone Craft",
+        company_id: undefined,
+        project_id: 185936,
+        purchase_order_id: undefined,
+      } as any,
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("No existing PO");
+    expect(textOf(result)).toContain("create_purchase_order");
+  });
+
+  it("auto_send: false → final status is Draft, no vendor email", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue({ ...poSnapshot, status: 1 });
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39201,
+    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({ success: true });
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      fileId: 1, name: "x.pdf", downloadUrl: "x", size: 1, module: 1500, moduleId: 39201,
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      uploadAttachment: uploadAttachment as any,
+    });
+    const tool = findTool(api, mkStore());
+
+    const args = { ...baseArgs, auto_send: false };
+    const prompt = await tool.handler(args, api);
+    // Prompt renders "**Final status**: Draft" (markdown bold around the
+    // label, then `: Draft`). Match the label + value separately.
+    expect(textOf(prompt)).toMatch(/Final status\*\*:\s*Draft/);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(exec.isError).toBeFalsy();
+    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({ purchaseOrderId: 39201, status: 1 });
   });
 });
