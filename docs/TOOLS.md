@@ -983,6 +983,87 @@ If `items` is omitted, BuildTools generates a single item from the total.
 Purchase order **#37999** created.
 ```
 
+### `update_purchase_order`
+
+**Purpose**: update an existing purchase order — rename, change vendor or status, replace or append items.
+
+**Inputs**:
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `purchase_order_id` | number | yes | Target PO. |
+| `name` | string | no | New PO name. |
+| `prefix` | string | no | PO number prefix (usually `"PO"`). |
+| `description` | string | no | PO-level rich-text body. |
+| `company_id` | number | no | Change the vendor. |
+| `status` | number \| string | no | Numeric (`1`–`4`) or label (`"Draft"`/`"Sent"`/`"Confirmed"`/`"Rejected"`). |
+| `items` | array | no | **Full replacement** of line items. Mutually exclusive with `items_append`. Each item identifies its budget via ONE of `budget_category_id`, `budget_item_id`, or `budget_code`. |
+| `items_append` | array | no | Items to APPEND (preserves originals). Mutually exclusive with `items`. |
+| `verify` | boolean | no | Default `true`. Re-fetches the PO after save and asserts every changed field. Set `false` for high-throughput batches. |
+| `unlock_if_locked` | boolean | no | When `true` and the PO is in a write-locked status (Confirmed), auto-orchestrate demote → /save → restore via `/purchase-orders/status/update`. Restore target defaults to Sent so the vendor re-acknowledges. **Side effect**: vendor sees status flip in their portal. |
+| `idempotency_key` | string (8–128 chars) | no | When set, the successful result is cached for 1 hour. Retry with same key + same args returns the cached result (no second BT call). Retry with same key + different args returns an error. |
+| `confirmation_id` | string | no | Token from the first call. |
+
+**Status note**: in PR #62, all status changes route through `/purchase-orders/status/update` regardless of whether they're combined with content changes. `/save` no longer touches the status field. This means a `status: "Confirmed"` ask on a Draft PO will fail with "Signature field is required" — BT requires a canvas-drawn signature for that hop. Use the BT web UI to confirm.
+
+**Sample prompt**: "Use update_purchase_order on #39752 to rename to 'Plumber rough-in' and set total to $2,500."
+
+**Sample output (step 2 — auto-transition path)**:
+
+```markdown
+Purchase order **#39201** updated — demoted Confirmed → Draft → applied content changes → set status → Sent. Purchase Order saved successfully
+
+Verified: name="…", 1 item(s), total $19533.81, status=Sent (2).
+```
+
+### `transition_purchase_order_status`
+
+**Purpose**: change a PO's status via the workflow endpoint (`/purchase-orders/status/update`) — distinct from `update_purchase_order`'s `status` field. Accepts ALL transitions including Confirmed → Draft (which `/save` refuses).
+
+**Inputs**:
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `purchase_order_id` | number | yes | Target PO. |
+| `status` | number \| string | yes | Target status code or label. |
+| `confirmation_id` | string | no | Token from the first call. |
+
+**When to use this instead of `update_purchase_order`**: pure status workflow steps — sending a Draft to a vendor, cancelling a Sent PO, demoting a Confirmed PO for editing. For content edits with status changes, just use `update_purchase_order`.
+
+**WARNING**: Promotion TO Confirmed (3) requires a canvas-drawn signature this tool doesn't supply. That transition fails with "Signature field is required". The vendor advances the PO to Confirmed on their side.
+
+**Sample prompt**: "Use transition_purchase_order_status to set #39752 to Sent."
+
+**Sample output (step 2)**:
+
+```markdown
+Purchase order **#39752** status → **Sent** (2). Status updated.
+```
+
+### `upload_attachment`
+
+**Purpose**: upload a file (PDF, image, document) to a project's documents tab or a purchase order's attachments.
+
+**Inputs**:
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `entity_type` | `"project"` \| `"purchase_order"` | yes | What to attach to. |
+| `entity_id` | number | yes | The project or PO ID. |
+| `project_id` | number | yes if `entity_type=="purchase_order"` | Parent project of the PO. |
+| `filename` | string | yes | Filename including extension. |
+| `content_type` | string | no | MIME type. Default `application/octet-stream`. |
+| `file_base64` | string | yes | Base64-encoded file bytes. NO `data:` URL prefix. |
+| `confirmation_id` | string | no | Token from the first call. |
+
+**Sample prompt**: "Upload ADMO55739-F.pdf to PO #39201 (project 185936)."
+
+**Sample output (step 2)**:
+
+```markdown
+Attached **ADMO55739-F.pdf** to purchase order #39201 (file_id 146061). [Download](https://file.buildtools.app/o/.../file/hash/...?download=1)
+```
+
 ### `create_task`
 
 **Purpose**: create a task on a project.

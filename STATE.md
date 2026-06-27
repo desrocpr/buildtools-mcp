@@ -1,5 +1,34 @@
 # State
 
+## 🟢 2026-06-27 — `update_purchase_order` brief overhaul complete
+
+The brief that kicked off PRs #57–#62 is **fully shipped and deployed**.
+
+| Brief item | PR | Status |
+|---|---|---|
+| 1. Full-object reconstruction | #57 | ✅ |
+| 2. Append mode for items | #58 | ✅ |
+| 3. Internal budget ID resolution | #58 | ✅ |
+| 4. Status by label | #57 | ✅ |
+| 5. Lock handling, atomic | #61 | ✅ |
+| 6. Verify-after-write | #57 + #61 | ✅ |
+| 7. Real errors (no `Failed: ""`) | #57 | ✅ |
+| 8. Idempotency guard | #60 | ✅ |
+| 9. Attachment upload | #59 | ✅ |
+| + Standalone status transition + CSRF cache | #62 | ✅ |
+
+**Key discovery**: BT exposes `POST /purchase-orders/status/update` as a workflow endpoint distinct from `/save`. It accepts transitions /save 403s for (notably Confirmed → Draft). This enabled the auto-transition path documented as item 5 above — which the original brief had assumed was impossible.
+
+**Brief's golden test case (PO #39201)**: shipped on 2026-06-27 with all four targets met (vendor preserved, items updated to $19,533.81, attachment ADMO55739-F.pdf attached, status moved to Sent). See `~/code/buildtools/STATE.md` for the final state record.
+
+**Tool surface**: 16 mutation tools + 13 read tools deployed via stdio AND HTTP/SSE at `https://buildtools-mcp.mossbuildinganddesign.com`. See `docs/TOOLS.md` for the full inventory including the three additions from this overhaul (`update_purchase_order` with new args, `transition_purchase_order_status`, `upload_attachment`).
+
+**Tests**: 884 / 884 pass. Live verified end-to-end against `moss.buildtools.app` PO #39752.
+
+**What's left**: optional polish only — multi-id batch status workflows, signature support for promote-to-Confirmed (deferred — programmatic eSig has audit-trail implications).
+
+---
+
 ## Phase 1-3 (Read-only MVP) — DONE
 
 All read tools implemented. Server runs over stdio, ready for Claude Desktop.
