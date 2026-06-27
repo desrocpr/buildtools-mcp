@@ -16,6 +16,8 @@ import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import {
   PURCHASE_ORDER_STATUS_CODES,
   PURCHASE_ORDER_STATUS_LABELS,
+  PURCHASE_ORDER_WRITE_LOCKED_STATUSES,
+  formatPurchaseOrderLockError,
 } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 import { requiresConfirmation, type ConfirmationStore } from "../confirm/index.js";
@@ -254,6 +256,14 @@ const UpdatePurchaseOrderSchema = z.object({
     .describe(
       "After the save succeeds, re-fetch the PO and confirm the result matches intent. Default true. Set false to skip the verification fetch (saves one HTTP call; useful for high-throughput batch updates).",
     ),
+  unlock_if_locked: z
+    .boolean()
+    .optional()
+    .describe(
+      "If the PO is in a write-locked status (currently: Confirmed), automatically demote to Draft via /purchase-orders/status/update, apply your changes via /save, then transition forward — to your `status` arg if set, otherwise to Sent (so the vendor re-acknowledges your change). " +
+        "Default false; on a locked PO with this off, the call returns the standard lock-detection error. " +
+        "**Side effects when this fires**: vendor sees status flip in their portal; BT may send a vendor email when status moves back to Sent. Use only when you actually want to change a confirmed PO.",
+    ),
   idempotency_key: z
     .string()
     .min(8)
@@ -468,6 +478,20 @@ export function createMutationTools(
      * (the handler throws/Zod-fails earlier on an unresolvable label).
      */
     _resolved_status_code?: number;
+    /**
+     * Snapshot from a pre-confirmation `getPurchaseOrder` call. The
+     * outer handler does this fetch ONCE on the first (no-confirmation_id)
+     * call so the prompt can show the auto-transition plan when
+     * `unlock_if_locked` is set against a locked PO. The executor reuses
+     * it for routing decisions on the second call. Null when the
+     * pre-fetch failed (network or 404) — both prompt and executor
+     * degrade gracefully.
+     */
+    _pre_snapshot?: {
+      status: number | null;
+      totalNumeric: number;
+      itemCount: number;
+    } | null;
   };
   const updatePOConfirmed = requiresConfirmation<UpdatePOInternalArgs>(
     "update_purchase_order",
@@ -507,45 +531,143 @@ export function createMutationTools(
         );
       }
       const summary = parts.length > 0 ? parts.join("; ") : "_(no changes specified)_";
-      return `Update purchase order #${a.purchase_order_id}: ${summary}.`;
+      const base = `Update purchase order #${a.purchase_order_id}: ${summary}.`;
+
+      // Auto-transition banner — surfaced when the pre-snapshot says
+      // the PO is in a write-locked status AND the caller opted in via
+      // unlock_if_locked. We render the FULL transition plan so the
+      // user can see the side effects (vendor status flip + likely
+      // re-acknowledgement email) before confirming.
+      const snap = a._pre_snapshot;
+      if (
+        a.unlock_if_locked &&
+        snap &&
+        snap.status !== null &&
+        PURCHASE_ORDER_WRITE_LOCKED_STATUSES.has(snap.status)
+      ) {
+        const fromLabel = poStatusLabel(snap.status);
+        const restoreCode = a._resolved_status_code ?? 2;
+        const restoreLabel = poStatusLabel(restoreCode);
+        // PR #61 review MEDIUM-1: if the requested restore target is
+        // ITSELF a write-locked status (Confirmed is the only one in
+        // practice), surface that BT will refuse the restore step
+        // because it requires a signature we don't supply. Caller can
+        // then choose Sent instead — far better than silently applying
+        // the content edit and stranding the PO in Draft.
+        const restoreIsLocked = PURCHASE_ORDER_WRITE_LOCKED_STATUSES.has(restoreCode);
+        const restoreWarning = restoreIsLocked
+          ? `\n\n⛔ **The restore step is likely to fail**: promoting to **${restoreLabel}** requires a canvas-drawn signature (\`PurchaseOrder[signature]\`) that this tool doesn't supply. The plan above will roll back to **${fromLabel}** if the restore fails. Consider using \`status: "Sent"\` instead — the vendor can advance to ${restoreLabel} on their side.`
+          : "";
+        return (
+          `${base}\n\n⚠️ **Auto-transition** (\`unlock_if_locked\`): PO is currently **${fromLabel}**. ` +
+          `Plan: ${fromLabel} → Draft → apply edits → ${restoreLabel}. ` +
+          `_The vendor will see the status flip in their portal; BT may send a vendor email when status moves back to ${restoreLabel}._` +
+          restoreWarning
+        );
+      }
+      return base;
     },
     async (a) => {
       try {
-        // Status was resolved once in the outer handler; reuse.
-        const statusCode = a._resolved_status_code;
+        // Status code (resolved once in the outer handler).
+        const targetStatusCode = a._resolved_status_code;
 
-        // For items_append we snapshot the PRE-save count/total here so
-        // verify-after-write can make a strict assertion on the post-save
-        // delta (pre + appended = post). Without this snapshot the verify
-        // line could claim "appended N lines" when BT silently dropped
-        // them — defeating the whole point. Skip the pre-fetch when
-        // append isn't in play (zero extra HTTP calls on the common path).
-        let preSaveItemCount: number | undefined;
-        let preSaveTotal: number | undefined;
-        if (a.items_append !== undefined && a.items_append.length > 0 && (a.verify ?? true)) {
+        // Workflow steps to surface in the success message — populated
+        // as we go through the orchestration so the caller can see
+        // exactly what happened (especially important for the
+        // auto-transition path).
+        const workflowSteps: string[] = [];
+
+        // === Determine current state when we actually need it ===
+        // Reuse the outer-handler's pre-snapshot when present. Else
+        // fetch only when we genuinely need currentStatus or the
+        // items_append delta numbers — every other code path can
+        // operate without (status-only changes route through
+        // /status/update which accepts transitions /save refuses,
+        // and the API method does its own lock check for /save calls).
+        // PR #61 review HIGH-1 race fix: for `unlock_if_locked` we
+        // ALWAYS re-fetch live in the executor — never trust the
+        // outer-handler's snapshot for the demote decision. The
+        // snapshot was captured during the prompt phase (potentially
+        // minutes ago given the confirmation TTL) and a concurrent
+        // user could have moved the PO out of Confirmed in the
+        // meantime. Issuing a demote against a stale-Confirmed PO
+        // that's now in Sent would silently regress the vendor-facing
+        // state. The outer snapshot is fine for prompt rendering;
+        // routing decisions need ground truth.
+        let preSnapshot = a._pre_snapshot;
+        const needLiveStatus = !!a.unlock_if_locked;
+        const needAppendSnapshot =
+          a.items_append !== undefined &&
+          a.items_append.length > 0 &&
+          (a.verify ?? true);
+        if (needLiveStatus || (preSnapshot === undefined && needAppendSnapshot)) {
           try {
             const pre = await getApi().getPurchaseOrder(a.purchase_order_id);
-            if (pre) {
-              preSaveItemCount = pre.items.length;
-              preSaveTotal = pre.totalNumeric;
-            }
+            preSnapshot = pre
+              ? {
+                  status: pre.status,
+                  totalNumeric: pre.totalNumeric,
+                  itemCount: pre.items.length,
+                }
+              : null;
           } catch {
-            // Pre-fetch is best-effort. If it fails the verify will
-            // degrade to a post-state-only report rather than a strict
-            // delta assertion.
+            preSnapshot = null;
           }
         }
+        const currentStatus = preSnapshot?.status ?? null;
+        const isLocked =
+          currentStatus !== null &&
+          PURCHASE_ORDER_WRITE_LOCKED_STATUSES.has(currentStatus);
+        const preSaveItemCount = preSnapshot?.itemCount;
+        const preSaveTotal = preSnapshot?.totalNumeric;
 
-        // Forward both `items` (full replace) and `items_append` (delta
-        // add) to the API layer. The schema enforces mutual exclusion at
-        // the Zod refine, but a hand-crafted SECOND (confirmation_id)
-        // call could replay with both set if a caller is determined —
-        // the API layer's parallel guard catches that case. Both
-        // safeguards earn their keep because they fire in different
-        // phases of the two-step handshake.
-        // Each item's budget identifier (any of category_id, item_id,
-        // code) is resolved server-side in updatePurchaseOrder.
-        const mapItem = (i: z.infer<typeof UpdatePurchaseOrderItemSchema>) => ({
+        // === Locked PO without unlock opt-in: refuse cleanly ===
+        if (isLocked && !a.unlock_if_locked) {
+          return errorMarkdown(
+            formatPurchaseOrderLockError(
+              a.purchase_order_id,
+              currentStatus as number,
+            ),
+          );
+        }
+
+        // === Has content changes? ===
+        // /save echoes status; we never CHANGE status via /save. So
+        // when there's no content change, we skip /save entirely and
+        // only do the status transition (if any).
+        const hasContentChange =
+          a.name !== undefined ||
+          a.prefix !== undefined ||
+          a.description !== undefined ||
+          a.company_id !== undefined ||
+          a.items !== undefined ||
+          a.items_append !== undefined;
+
+        // === Auto-transition: demote first if needed ===
+        if (isLocked && a.unlock_if_locked) {
+          const demote = await getApi().transitionPurchaseOrderStatus({
+            purchaseOrderId: a.purchase_order_id,
+            status: 1, // Draft / Cancel
+          });
+          if (!demote.success) {
+            return errorMarkdown(
+              `**Auto-transition: demote failed** for PO #${a.purchase_order_id}: ${String(demote.errors ?? "(no detail)")}. PO unchanged.`,
+            );
+          }
+          workflowSteps.push(
+            `demoted ${poStatusLabel(currentStatus as number)} → Draft`,
+          );
+        }
+
+        // === Apply content changes via /save ===
+        // CRITICAL: we deliberately DO NOT pass `status` to /save. /save's
+        // status field is unreliable (BT refuses certain transitions
+        // there) — all status changes route through /status/update
+        // instead, in the dedicated section below.
+        const mapItem = (
+          i: z.infer<typeof UpdatePurchaseOrderItemSchema>,
+        ) => ({
           budgetCategoryId: i.budget_category_id,
           budgetItemId: i.budget_item_id,
           budgetCode: i.budget_code,
@@ -557,23 +679,100 @@ export function createMutationTools(
           internalNotes: i.internal_notes,
           companyId: i.company_id,
         });
-        const result = await getApi().updatePurchaseOrder({
-          purchaseOrderId: a.purchase_order_id,
-          name: a.name,
-          prefix: a.prefix,
-          description: a.description,
-          companyId: a.company_id,
-          status: statusCode,
-          items: a.items?.map(mapItem),
-          itemsAppend: a.items_append?.map(mapItem),
-        });
-        if (!result.success) {
-          // `errors` is already a human-readable string from the API
-          // layer (HTTP status + BT message + body preview). Don't
-          // JSON.stringify it — that wraps the helpful text in quotes
-          // and was the source of the `Failed: ""` we hit on locked POs.
-          const errorBody = String(result.errors ?? "(no detail)");
-          return errorMarkdown(`**Failed to update PO #${a.purchase_order_id}**: ${errorBody}`);
+        // Default: nothing to save (status-only / no-op case). The
+        // headline below reads off result.message which we leave
+        // undefined; workflowSteps drives the user-visible summary.
+        let result: {
+          success: boolean;
+          purchaseOrderId?: string | number;
+          message?: unknown;
+          errors?: unknown;
+        } = { success: true, purchaseOrderId: a.purchase_order_id };
+        if (hasContentChange) {
+          result = await getApi().updatePurchaseOrder({
+            purchaseOrderId: a.purchase_order_id,
+            name: a.name,
+            prefix: a.prefix,
+            description: a.description,
+            companyId: a.company_id,
+            items: a.items?.map(mapItem),
+            itemsAppend: a.items_append?.map(mapItem),
+          });
+          if (!result.success) {
+            const errorBody = String(result.errors ?? "(no detail)");
+            // If we demoted earlier, attempt to restore the original
+            // status so the PO doesn't get stranded in Draft.
+            let restoreNote = "";
+            if (isLocked && a.unlock_if_locked && currentStatus !== null) {
+              const restore = await getApi().transitionPurchaseOrderStatus({
+                purchaseOrderId: a.purchase_order_id,
+                status: currentStatus,
+              });
+              restoreNote = restore.success
+                ? `\n\n_Restored to original **${poStatusLabel(currentStatus)}** state._`
+                : `\n\n**Could not restore to ${poStatusLabel(currentStatus)}** (${String(restore.errors)}). **PO is now in Draft — fix manually in the BT UI.**`;
+            }
+            return errorMarkdown(
+              `**Failed to update PO #${a.purchase_order_id}**: ${errorBody}${restoreNote}`,
+            );
+          }
+          workflowSteps.push("applied content changes");
+        }
+
+        // === Final status transition ===
+        // Compute the FINAL target status:
+        //   - Auto-transition path: caller's target if set, else 2 (Sent
+        //     — the vendor re-acknowledges the change).
+        //   - Normal path: caller's target (if it differs from current).
+        //   - Otherwise: no transition.
+        let finalTarget: number | undefined;
+        if (isLocked && a.unlock_if_locked) {
+          finalTarget = targetStatusCode ?? 2;
+        } else if (
+          targetStatusCode !== undefined &&
+          targetStatusCode !== currentStatus
+        ) {
+          finalTarget = targetStatusCode;
+        }
+        if (finalTarget !== undefined) {
+          const transition = await getApi().transitionPurchaseOrderStatus({
+            purchaseOrderId: a.purchase_order_id,
+            status: finalTarget,
+          });
+          if (!transition.success) {
+            // PR #61 review HIGH-2: if we entered via the auto-transition
+            // path, the PO is now in Draft with the user's content
+            // applied — silently leaving it there strands the PO in a
+            // state the caller never asked for. Mirror the /save
+            // failure path: attempt to restore the original status, and
+            // report concretely (Draft / original) — never "intermediate".
+            const headlineVerb = hasContentChange
+              ? "Content updated"
+              : "No content change requested";
+            if (isLocked && a.unlock_if_locked && currentStatus !== null) {
+              const rollback = await getApi().transitionPurchaseOrderStatus({
+                purchaseOrderId: a.purchase_order_id,
+                status: currentStatus,
+              });
+              const rollbackNote = rollback.success
+                ? `\n\n_Rolled back to original **${poStatusLabel(currentStatus)}** state — your content edits remain applied but the status didn't move forward._`
+                : `\n\n**Rollback to ${poStatusLabel(currentStatus)} ALSO failed** (${String(rollback.errors ?? "(no detail)")}). **PO is now in Draft with your content edits applied — fix manually in the BT UI.**`;
+              return errorMarkdown(
+                `**${headlineVerb}** for PO #${a.purchase_order_id} but **status transition to ${poStatusLabel(finalTarget)} failed**: ${String(transition.errors ?? "(no detail)")}.${rollbackNote}`,
+              );
+            }
+            // Non-auto-transition path: nothing to rollback (caller is
+            // making a deliberate status change against a non-locked PO
+            // and BT refused). The PO's status is unchanged from
+            // currentStatus — be concrete about that.
+            const stateNote = currentStatus !== null
+              ? `\n\n_PO status is unchanged at **${poStatusLabel(currentStatus)}**._`
+              : "";
+            return errorMarkdown(
+              `**${headlineVerb}** for PO #${a.purchase_order_id} but **status transition to ${poStatusLabel(finalTarget)} failed**: ${String(transition.errors ?? "(no detail)")}.${stateNote}`,
+            );
+          }
+          workflowSteps.push(`set status → ${poStatusLabel(finalTarget)}`);
         }
 
         // Verify-after-write (default on). Re-fetch the PO and confirm
@@ -625,21 +824,33 @@ export function createMutationTools(
                   verified.push(`description (${detail.description.length} chars)`);
                 }
               }
-              if (a.status !== undefined) {
-                // Reuse the single resolved code from the outer handler;
-                // skip the assertion if BT's re-fetch couldn't parse the
-                // current status (same null-safety pattern as company_id).
-                const expectedStatus = a._resolved_status_code;
+              // Status verify: check whenever the orchestration moved
+              // the status (either because the caller asked for it OR
+              // because the auto-transition path defaulted to Sent).
+              // `finalTarget` is the orchestrator's final intended
+              // status — undefined when no transition was issued.
+              // Null-safety on detail.status mirrors the company_id pattern.
+              if (finalTarget !== undefined) {
                 if (
-                  expectedStatus !== undefined &&
                   detail.status !== null &&
-                  detail.status !== expectedStatus
+                  detail.status !== finalTarget
                 ) {
                   mismatches.push(
-                    `status: expected ${expectedStatus} (${poStatusLabel(expectedStatus)}), got ${detail.status} (${poStatusLabel(detail.status)})`,
+                    `status: expected ${finalTarget} (${poStatusLabel(finalTarget)}), got ${detail.status} (${poStatusLabel(detail.status)})`,
                   );
-                } else if (expectedStatus !== undefined && detail.status !== null) {
-                  verified.push(`status=${poStatusLabel(detail.status)} (${detail.status})`);
+                } else if (detail.status !== null) {
+                  // PR #61 review LOW-2: qualify when the target was
+                  // auto-chosen by the unlock path rather than asked
+                  // for explicitly, so the verify line doesn't read as
+                  // "user wanted Sent" when they didn't say that.
+                  const autoDefaulted =
+                    targetStatusCode === undefined &&
+                    isLocked &&
+                    a.unlock_if_locked;
+                  const qualifier = autoDefaulted ? " (auto-transition default)" : "";
+                  verified.push(
+                    `status=${poStatusLabel(detail.status)} (${detail.status})${qualifier}`,
+                  );
                 }
               }
               // Vendor: skip the mismatch check if the re-fetch couldn't
@@ -732,8 +943,15 @@ export function createMutationTools(
           }
         }
 
+        // Compose the headline with a workflow trail (especially
+        // useful for the auto-transition case — caller sees exactly
+        // what happened).
+        const headline = workflowSteps.length > 0
+          ? `Purchase order **#${a.purchase_order_id}** updated — ${workflowSteps.join(" → ")}.`
+          : `Purchase order **#${a.purchase_order_id}** updated.`;
         return markdown(
-          `Purchase order **#${result.purchaseOrderId}** updated. ${result.message ?? ""}` +
+          headline +
+            (result.message ? ` ${result.message}` : "") +
             (verifyLines.length > 0 ? `\n\n${verifyLines.join("\n")}` : ""),
         );
       } catch (err) { return formatError(err, "update_purchase_order"); }
@@ -1334,11 +1552,35 @@ export function createMutationTools(
           resolvedCompanyName = await lookupCompanyName(data.company_id);
         }
 
+        // Pre-snapshot: one PO fetch on the FIRST call so the prompt
+        // can show the auto-transition plan. Gated on `unlock_if_locked`
+        // because every other code path either doesn't need it
+        // (status-only changes route blindly through /status/update,
+        // the API method does its own lock check for /save calls) or
+        // needs it later in the executor (items_append delta verify).
+        // Skipping it on the common path keeps the prompt phase fast.
+        let preSnapshot: UpdatePOInternalArgs["_pre_snapshot"];
+        if (!data.confirmation_id && data.unlock_if_locked) {
+          try {
+            const pre = await getApi().getPurchaseOrder(data.purchase_order_id);
+            preSnapshot = pre
+              ? {
+                  status: pre.status,
+                  totalNumeric: pre.totalNumeric,
+                  itemCount: pre.items.length,
+                }
+              : null;
+          } catch {
+            preSnapshot = null;
+          }
+        }
+
         const result = await updatePOConfirmed(
           {
             ...data,
             _resolved_company_name: resolvedCompanyName,
             _resolved_status_code: resolvedStatusCode,
+            _pre_snapshot: preSnapshot,
           },
           store,
           sessionId,
