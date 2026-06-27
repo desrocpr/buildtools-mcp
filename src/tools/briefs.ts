@@ -204,18 +204,27 @@ function parseDollarAmount(s: unknown): number {
 
 async function fetchRfis(api: BuildToolsAPI, projectName: string): Promise<{ count: number; lines: string[] } | null> {
   try {
-    // BT lists are tenant-wide; we filter client-side by project name
-    // appearing in the row. The list endpoint doesn't natively expose a
-    // project-id filter for RFIs; the workaround is consistent with how
-    // existing list_rfis works.
-    const result = await api.getRFIs<{ data: RfiRow[] }>({
+    // BT lists are tenant-wide; the search query gets us NEAR the right
+    // rows but substring search means a project named "Smith" matches
+    // RFIs from "Smith Plumbing", "Johnsmith Master Bath", etc.
+    // (PR #66 review HIGH 3). We filter post-fetch by exact project
+    // name match.
+    const result = await api.getRFIs<{ data: (RfiRow & { project?: string })[] }>({
       "search[value]": projectName,
       length: 50,
     });
     const rows = result?.data ?? [];
+    const targetProjectKey = projectName.toLowerCase();
     const open = rows.filter((r) => {
+      // Cross-project contamination filter — drop rows whose own
+      // project field doesn't match exactly.
+      const rowProject = stripHtml(r.project ?? "").toLowerCase();
+      if (rowProject && rowProject !== targetProjectKey) return false;
       const status = stripHtml(r.status ?? "").toLowerCase();
-      return status === "open" || status === "in progress" || status.startsWith("1") || status.startsWith("2");
+      // PR #66 review MEDIUM: dropped speculative startsWith("1")
+      // arms — RFI status column returns text labels, not numeric
+      // codes; the arms were dead code that could silently over-include.
+      return status.includes("open") || status.includes("in progress");
     });
     // Sort by priority (Urgent > High > Normal)
     const priorityRank = (p: string) => {
@@ -234,21 +243,30 @@ async function fetchRfis(api: BuildToolsAPI, projectName: string): Promise<{ cou
       return `  - ${escapeMarkdownInline(num)} [${escapeMarkdownInline(priority)}] ${escapeMarkdownInline(subject.slice(0, 80))}`;
     });
     return { count: open.length, lines };
-  } catch {
+  } catch (err) {
+    // PR #66 review HIGH 5: log silently-degraded sections so a
+    // persistent backend outage doesn't read as "permanently 0"
+    // without any alerting signal.
+    process.stderr.write(
+      `[project_status_brief] section fetch failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
     return null;
   }
 }
 
 async function fetchTasks(api: BuildToolsAPI, projectName: string): Promise<{ count: number; lines: string[] } | null> {
   try {
-    const result = await api.getTasks<{ data: TaskRow[] }>({
+    const result = await api.getTasks<{ data: (TaskRow & { project?: string })[] }>({
       "search[value]": projectName,
       length: 50,
     });
     const rows = result?.data ?? [];
+    const targetProjectKey = projectName.toLowerCase();
     const open = rows.filter((r) => {
+      const rowProject = stripHtml(r.project ?? "").toLowerCase();
+      if (rowProject && rowProject !== targetProjectKey) return false;
       const status = stripHtml(r.status ?? "").toLowerCase();
-      return status === "open" || status === "in progress" || status.startsWith("1") || status.startsWith("2");
+      return status.includes("open") || status.includes("in progress");
     });
     // Sort: past-due first, then high priority
     const today = new Date().toISOString().slice(0, 10);
@@ -262,66 +280,91 @@ async function fetchTasks(api: BuildToolsAPI, projectName: string): Promise<{ co
     });
     const lines = sorted.slice(0, 3).map((r) => {
       const name = stripHtml(r.name ?? "(unnamed task)");
-      const due = r.due_date ? ` (due ${r.due_date})` : "";
+      // PR #66 review MEDIUM (security): due_date escaped before
+      // markdown interpolation. BT can store user-supplied values
+      // here and a `]( injection would otherwise create active links.
+      const due = r.due_date ? ` (due ${escapeMarkdownInline(stripHtml(r.due_date))})` : "";
       const priority = stripHtml(r.priority ?? "");
       const pp = priority && !priority.toLowerCase().includes("normal") ? ` [${escapeMarkdownInline(priority)}]` : "";
       return `  - ${escapeMarkdownInline(name.slice(0, 80))}${pp}${due}`;
     });
     return { count: open.length, lines };
-  } catch {
+  } catch (err) {
+    // PR #66 review HIGH 5: log silently-degraded sections so a
+    // persistent backend outage doesn't read as "permanently 0"
+    // without any alerting signal.
+    process.stderr.write(
+      `[project_status_brief] section fetch failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
     return null;
   }
 }
 
 async function fetchPOs(api: BuildToolsAPI, projectName: string): Promise<{ count: number; totalApprox: number; lines: string[] } | null> {
   try {
-    const result = await api.getPurchaseOrders<{ data: PoRow[] }>({
+    const result = await api.getPurchaseOrders<{ data: (PoRow & { project?: string })[] }>({
       "search[value]": projectName,
       length: 30,
     });
     const rows = result?.data ?? [];
-    // "Open" = not in Confirmed/Rejected (so Draft + Sent). Status text
-    // varies; conservative match.
+    const targetProjectKey = projectName.toLowerCase();
+    // PR #66 review HIGH 1: "Open" = Draft + Sent. Original filter
+    // missed Confirmed (which contains neither "rejected" nor
+    // "complete") — Confirmed POs are LOCKED, not open. Add the
+    // explicit exclusion.
     const open = rows.filter((r) => {
+      const rowProject = stripHtml(r.project ?? "").toLowerCase();
+      if (rowProject && rowProject !== targetProjectKey) return false;
       const status = stripHtml(r.status ?? "").toLowerCase();
-      return !status.includes("rejected") && !status.includes("complete");
+      return !status.includes("rejected") && !status.includes("complete") && !status.includes("confirmed");
     });
     const totalApprox = open.reduce((acc, r) => acc + parseDollarAmount(r.total), 0);
     const lines = open.slice(0, 3).map((r) => {
       const name = stripHtml(r.name ?? "(unnamed PO)");
-      const total = stripHtml(r.total ?? "$0");
-      const status = stripHtml(r.status ?? "");
-      const company = stripHtml(r.company ?? "");
-      return `  - ${escapeMarkdownInline(name.slice(0, 60))} — ${total}${company ? ` (${escapeMarkdownInline(company)})` : ""}${status ? ` — _${escapeMarkdownInline(status)}_` : ""}`;
+      // PR #66 review MEDIUM (security): escape BT-sourced total +
+      // status + company strings before markdown interpolation —
+      // stripHtml alone doesn't neutralize markdown specials, and a
+      // vendor-supplied name with `](evil)` syntax could inject
+      // links into the LLM context.
+      const total = escapeMarkdownInline(stripHtml(r.total ?? "$0"));
+      const status = escapeMarkdownInline(stripHtml(r.status ?? ""));
+      const company = escapeMarkdownInline(stripHtml(r.company ?? ""));
+      return `  - ${escapeMarkdownInline(name.slice(0, 60))} — ${total}${company ? ` (${company})` : ""}${status ? ` — _${status}_` : ""}`;
     });
     return { count: open.length, totalApprox, lines };
-  } catch {
+  } catch (err) {
+    process.stderr.write(
+      `[project_status_brief] PO section fetch failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
     return null;
   }
 }
 
 async function fetchCOs(api: BuildToolsAPI, projectName: string): Promise<{ count: number; totalApprox: number; lines: string[] } | null> {
   try {
-    const result = await api.getChangeOrders<{ data: CoRow[] }>({
+    const result = await api.getChangeOrders<{ data: (CoRow & { project?: string })[] }>({
       "search[value]": projectName,
       length: 30,
     });
     const rows = result?.data ?? [];
-    // Approved-and-not-yet-billed is the high-attention bucket. Without
-    // a structured "billed" field we approximate: any CO with status
-    // text "approved" counts.
+    const targetProjectKey = projectName.toLowerCase();
     const approved = rows.filter((r) => {
+      const rowProject = stripHtml(r.project ?? "").toLowerCase();
+      if (rowProject && rowProject !== targetProjectKey) return false;
       const status = stripHtml(r.status ?? "").toLowerCase();
       return status.includes("approved");
     });
     const totalApprox = approved.reduce((acc, r) => acc + parseDollarAmount(r.total), 0);
     const lines = approved.slice(0, 3).map((r) => {
       const name = stripHtml(r.name ?? "(unnamed CO)");
-      const total = stripHtml(r.total ?? "$0");
+      const total = escapeMarkdownInline(stripHtml(r.total ?? "$0"));
       return `  - ${escapeMarkdownInline(name.slice(0, 70))} — ${total}`;
     });
     return { count: approved.length, totalApprox, lines };
-  } catch {
+  } catch (err) {
+    process.stderr.write(
+      `[project_status_brief] CO section fetch failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
     return null;
   }
 }
@@ -337,13 +380,21 @@ async function fetchDraws(api: BuildToolsAPI, projectId: number): Promise<{ coun
     );
     const lastTwo = sorted.slice(0, 2).map((s) => {
       const name = stripHtml(s.name ?? "(unnamed)");
-      const amount = typeof s.amount === "number" ? `$${s.amount.toFixed(2)}` : `$${stripHtml(String(s.amount ?? "0"))}`;
-      const status = stripHtml(s.status ?? "");
-      const date = s.date ? ` on ${s.date}` : "";
-      return `  - ${escapeMarkdownInline(name)} — ${amount} — _${escapeMarkdownInline(status)}_${date}`;
+      // PR #66 review MEDIUM (security): all BT-sourced fields
+      // routed through escapeMarkdownInline to neutralize markdown
+      // injection vectors.
+      const amount = typeof s.amount === "number"
+        ? `$${s.amount.toFixed(2)}`
+        : `$${escapeMarkdownInline(stripHtml(String(s.amount ?? "0")))}`;
+      const status = escapeMarkdownInline(stripHtml(s.status ?? ""));
+      const date = s.date ? ` on ${escapeMarkdownInline(stripHtml(s.date))}` : "";
+      return `  - ${escapeMarkdownInline(name)} — ${amount} — _${status}_${date}`;
     });
     return { count: statements.length, lastTwo };
-  } catch {
+  } catch (err) {
+    process.stderr.write(
+      `[project_status_brief] draws section fetch failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
     return null;
   }
 }
@@ -359,25 +410,40 @@ async function buildProjectDigest(
 ): Promise<ProjectDigest> {
   const digest: ProjectDigest = { id: projectId, name: `#${projectId}`, errors: [] };
 
-  // Project header
+  // Project header — REQUIRED for name-based section fetches.
+  // PR #66 review HIGH 2: if getProject fails, digest.name remains
+  // "#100002" which BT's datatable text search will not match against
+  // ANY real entity — all sections would return 0 rows, rendering as
+  // a misleading "all clean" digest. Track success here and skip the
+  // name-based fetches on failure (only `draws` uses projectId
+  // directly and is safe).
+  let projectLookupOk = false;
+  // PR #66 review LOW (info-leak): normalized error string instead of
+  // surfacing the underlying message — eliminates the differential
+  // between "404 vs 403 vs timeout" that could leak project existence.
   try {
     const project = await api.getProject<ProjectRow>(projectId);
     if (project) {
       digest.name = stripHtml(String(project.name ?? `#${projectId}`));
       const statusCode = Number(project.status_id ?? project.status);
       digest.status = Number.isFinite(statusCode) ? statusCode : undefined;
+      projectLookupOk = true;
+    } else {
+      digest.errors.push(`project ${projectId} unavailable`);
     }
-  } catch (err) {
-    digest.errors.push(`project lookup failed (${err instanceof Error ? err.message : String(err)})`);
+  } catch {
+    digest.errors.push(`project ${projectId} unavailable`);
   }
 
-  // Parallel per-section fetches with the project name as the BT
-  // datatable search query.
+  // Parallel per-section fetches. Name-based sections (rfis/tasks/
+  // pos/cos) are SKIPPED when the project lookup failed — they'd
+  // produce misleading zeros otherwise. `draws` uses the project id
+  // directly so it can still run.
   const [rfis, tasks, pos, cos, draws] = await Promise.all([
-    include.has("rfis") ? fetchRfis(api, digest.name) : Promise.resolve(undefined),
-    include.has("tasks") ? fetchTasks(api, digest.name) : Promise.resolve(undefined),
-    include.has("purchase_orders") ? fetchPOs(api, digest.name) : Promise.resolve(undefined),
-    include.has("change_orders") ? fetchCOs(api, digest.name) : Promise.resolve(undefined),
+    include.has("rfis") && projectLookupOk ? fetchRfis(api, digest.name) : Promise.resolve(undefined),
+    include.has("tasks") && projectLookupOk ? fetchTasks(api, digest.name) : Promise.resolve(undefined),
+    include.has("purchase_orders") && projectLookupOk ? fetchPOs(api, digest.name) : Promise.resolve(undefined),
+    include.has("change_orders") && projectLookupOk ? fetchCOs(api, digest.name) : Promise.resolve(undefined),
     include.has("draws") ? fetchDraws(api, projectId) : Promise.resolve(undefined),
   ]);
   if (rfis === null) digest.errors.push("RFIs unavailable");
@@ -491,10 +557,23 @@ export const projectStatusBriefTool: ToolDefinition = {
       }
     }
 
-    // === Fan out per project (bounded — request schema caps at 30) ===
-    const digests = await Promise.all(
-      targetIds.map((id) => buildProjectDigest(api, id, include)),
-    );
+    // === Fan out per project with bounded concurrency ===
+    // PR #66 review HIGH 4: schema caps input at 30 projects, but
+    // without an outer-loop limit each project then spawns 5 parallel
+    // section fetches → up to 150 concurrent HTTPS connections to BT.
+    // Laravel session-state servers race on session+cookie writes
+    // under high fanout; rate limits / bot-detection also possible.
+    // Cap outer concurrency at 5 (inner per-project 5-way fanout
+    // unchanged → peak ~25 in-flight).
+    const PROJECT_CONCURRENCY = 5;
+    const digests: ProjectDigest[] = [];
+    for (let i = 0; i < targetIds.length; i += PROJECT_CONCURRENCY) {
+      const batch = targetIds.slice(i, i + PROJECT_CONCURRENCY);
+      const batchResults = await Promise.all(
+        batch.map((id) => buildProjectDigest(api, id, include)),
+      );
+      digests.push(...batchResults);
+    }
 
     // === Compose ===
     const today = new Date().toISOString().slice(0, 10);
