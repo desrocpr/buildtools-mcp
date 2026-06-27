@@ -31,7 +31,6 @@ import {
   listServicesTool,
   listUsersTool,
   operationTools,
-  searchUsersTool,
 } from "../operations.js";
 import { type ToolResult } from "../projects.js";
 
@@ -118,7 +117,6 @@ describe("operationTools registry", () => {
       "list_rfis",
       "list_services",
       "list_users",
-      "search_users",
     ]);
   });
 
@@ -419,54 +417,3 @@ describe("list_users", () => {
 // search_users
 // ---------------------------------------------------------------------------
 
-describe("search_users", () => {
-  it("returns Markdown list rows on the happy path", async () => {
-    const searchUsers = vi.fn().mockResolvedValue({ data: [sampleUserRow] });
-    const api = fakeApi({
-      searchUsers: searchUsers as BuildToolsAPI["searchUsers"],
-    });
-
-    const result = await searchUsersTool.handler({ query: "Aaron" }, api);
-
-    expect(result.isError).toBeFalsy();
-    const text = textOf(result);
-    expect(text).toContain('**1 match** for "Aaron"');
-    expect(text).toContain("#1939");
-    expect(text).toContain("Aaron Mullen");
-    expect(searchUsers).toHaveBeenCalledWith("Aaron", 20);
-  });
-
-  it("returns a Markdown 'no users' message when result is empty (no isError)", async () => {
-    const searchUsers = vi.fn().mockResolvedValue({ data: [] });
-    const api = fakeApi({
-      searchUsers: searchUsers as BuildToolsAPI["searchUsers"],
-    });
-
-    const result = await searchUsersTool.handler({ query: "xx" }, api);
-    expect(result.isError).toBeFalsy();
-    expect(textOf(result)).toMatch(/No users matched query "xx"/);
-  });
-
-  it("rejects a 1-character query as Zod-invalid input", async () => {
-    const result = await searchUsersTool.handler({ query: "a" }, fakeApi({}));
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain("Invalid input for `search_users`");
-    expect(textOf(result)).toContain("query");
-  });
-
-  it("returns Markdown error content (isError: true) on BuildToolsError", async () => {
-    const searchUsers = vi
-      .fn()
-      .mockRejectedValue(
-        new BuildToolsServerError("Bad gateway", { status: 502 }),
-      );
-    const api = fakeApi({
-      searchUsers: searchUsers as BuildToolsAPI["searchUsers"],
-    });
-
-    const result = await searchUsersTool.handler({ query: "Aaron" }, api);
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain("Bad gateway");
-    expect(textOf(result)).toContain("BuildToolsServerError");
-  });
-});

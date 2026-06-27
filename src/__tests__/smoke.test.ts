@@ -18,7 +18,6 @@ describe("buildtools-mcp", () => {
 
     expect(allNames).toContain("list_projects");
     expect(allNames).toContain("get_project");
-    expect(allNames).toContain("search_projects");
     expect(allNames).toContain("list_change_orders");
     expect(allNames).toContain("get_change_order");
     expect(allNames).toContain("find_unbilled_change_orders");
@@ -30,7 +29,7 @@ describe("buildtools-mcp", () => {
     expect(allNames).toContain("upload_attachment");
     expect(allNames).toContain("list_financial_statements");
     expect(allNames).toContain("project_status_brief");
-    expect(allNames.length).toBe(14);
+    expect(allNames.length).toBe(13);
   });
 
   it("mutation tool factory produces all confirmed tools", async () => {

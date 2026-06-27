@@ -157,11 +157,12 @@ interface TasksDatatable {
 // ---------------------------------------------------------------------------
 
 const ListTasksInputSchema = z.object({
-  project_name: z
+  query: z
     .string()
+    .min(2)
     .optional()
     .describe(
-      "Substring match against the task's project (free-text search across all columns).",
+      "Free-text substring search across task name, project, assignee, and location. Min 2 chars. PR #71 unified the previous list_tasks (project filter) + search_tasks tools.",
     ),
   status: z
     .enum(["Open", "In Progress", "Complete", "All"])
@@ -203,8 +204,8 @@ async function listTasksHandler(
     }
   }
 
-  if (input.project_name) {
-    params["search[value]"] = input.project_name;
+  if (input.query) {
+    params["search[value]"] = input.query;
   }
 
   try {
@@ -212,8 +213,8 @@ async function listTasksHandler(
     const rows = result?.data ?? [];
     if (rows.length === 0) {
       const filterDesc: string[] = [`status: ${status}`];
-      if (input.project_name) {
-        filterDesc.push(`project_name: "${input.project_name}"`);
+      if (input.query) {
+        filterDesc.push(`query: "${input.query}"`);
       }
       return markdown(`No tasks matched the filter (${filterDesc.join(", ")}).`);
     }
@@ -229,61 +230,17 @@ async function listTasksHandler(
 export const listTasksTool: ToolDefinition = {
   name: "list_tasks",
   description:
-    "List BuildTools tasks with optional filters (project substring, status). Returns up to 50 tasks by default.",
+    "List or search BuildTools tasks. " +
+    "Pass `query` for free-text search across task name, project, assignee, and location. " +
+    "Combine `status` + `query` to filter Open/In Progress + match text. " +
+    "Returns up to 50 by default. PR #71 unified the previous `list_tasks` + `search_tasks` tools.",
   inputSchema: zodToJsonSchema(ListTasksInputSchema),
   permission: "read",
   handler: listTasksHandler,
 };
 
 // ---------------------------------------------------------------------------
-// search_tasks
-// ---------------------------------------------------------------------------
-
-const SearchTasksInputSchema = z.object({
-  query: z.string().min(2).describe("Search query."),
-});
-
-export type SearchTasksInput = z.infer<typeof SearchTasksInputSchema>;
-
-/** Maximum results surfaced by `search_tasks` (matches `searchProjects`). */
-const SEARCH_TASKS_LIMIT = 20;
-
-async function searchTasksHandler(
-  args: unknown,
-  api: BuildToolsAPI,
-): Promise<ToolResult> {
-  const parsed = SearchTasksInputSchema.safeParse(args ?? {});
-  if (!parsed.success) return formatZodError(parsed.error, "search_tasks");
-  const { query } = parsed.data;
-
-  try {
-    const result = await api.searchTasks<TasksDatatable>(
-      query,
-      SEARCH_TASKS_LIMIT,
-    );
-    const rows = result?.data ?? [];
-    if (rows.length === 0) {
-      return markdown(`No tasks matched query "${query}".`);
-    }
-    const header = `**${rows.length} match${rows.length === 1 ? "" : "es"}** for "${query}":`;
-    const body = rows.slice(0, SEARCH_TASKS_LIMIT).map(formatTaskRow).join("\n");
-    return markdown(`${header}\n\n${body}`);
-  } catch (err) {
-    return formatError(err, "search_tasks");
-  }
-}
-
-export const searchTasksTool: ToolDefinition = {
-  name: "search_tasks",
-  description:
-    "Free-text search across BuildTools tasks (matches name, project, assignee, location).",
-  inputSchema: zodToJsonSchema(SearchTasksInputSchema),
-  permission: "read",
-  handler: searchTasksHandler,
-};
-
-// ---------------------------------------------------------------------------
 // Exported registry
 // ---------------------------------------------------------------------------
 
-export const taskTools: ToolDefinition[] = [listTasksTool, searchTasksTool];
+export const taskTools: ToolDefinition[] = [listTasksTool];

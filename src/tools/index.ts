@@ -11,7 +11,6 @@
 export {
   listProjectsTool,
   getProjectTool,
-  searchProjectsTool,
   projectTools,
   type ToolDefinition,
   type ToolResult,
@@ -41,13 +40,11 @@ export {
 
 export {
   listTasksTool,
-  searchTasksTool,
   taskTools,
 } from "./tasks.js";
 
 export {
   listPurchaseOrdersTool,
-  searchPurchaseOrdersTool,
   getPurchaseOrderTool,
   purchaseOrderTools,
 } from "./purchase-orders.js";
@@ -70,7 +67,6 @@ export {
   listRfisTool,
   listServicesTool,
   listUsersTool,
-  searchUsersTool,
   operationTools,
 } from "./operations.js";
 

@@ -29,7 +29,6 @@ import {
   getPurchaseOrderTool,
   listPurchaseOrdersTool,
   purchaseOrderTools,
-  searchPurchaseOrdersTool,
 } from "../purchase-orders.js";
 import { type ToolResult } from "../projects.js";
 
@@ -112,7 +111,6 @@ describe("purchaseOrderTools registry", () => {
     const names = purchaseOrderTools.map((t) => t.name);
     expect(names).toEqual([
       "list_purchase_orders",
-      "search_purchase_orders",
       "get_purchase_order",
     ]);
   });
@@ -184,7 +182,7 @@ describe("list_purchase_orders", () => {
     expect(callArg.length).toBe(50);
   });
 
-  it("forwards project_name as the datatable global search and respects limit", async () => {
+  it("forwards query as the datatable global search and respects limit", async () => {
     const getPurchaseOrders = vi.fn().mockResolvedValue({
       data: [samplePurchaseOrderRow],
       recordsTotal: 37644,
@@ -196,7 +194,7 @@ describe("list_purchase_orders", () => {
     });
 
     const result = await listPurchaseOrdersTool.handler(
-      { project_name: "Cabero", limit: 25 },
+      { query: "Cabero", limit: 25 },
       api,
     );
 
@@ -215,7 +213,7 @@ describe("list_purchase_orders", () => {
     });
 
     const result = await listPurchaseOrdersTool.handler(
-      { project_name: "Nonesuch" },
+      { query: "Nonesuch" },
       api,
     );
 
@@ -296,156 +294,3 @@ describe("list_purchase_orders", () => {
 // search_purchase_orders
 // ---------------------------------------------------------------------------
 
-describe("search_purchase_orders", () => {
-  it("returns Markdown list rows on the happy path", async () => {
-    const searchPurchaseOrders = vi.fn().mockResolvedValue({
-      data: [samplePurchaseOrderRow],
-      recordsTotal: 1,
-      recordsFiltered: 1,
-    });
-    const api = fakeApi({
-      searchPurchaseOrders:
-        searchPurchaseOrders as BuildToolsAPI["searchPurchaseOrders"],
-    });
-
-    const result = await searchPurchaseOrdersTool.handler(
-      { query: "Cabero" },
-      api,
-    );
-
-    expect(result.isError).toBeFalsy();
-    const text = textOf(result);
-    expect(text).toContain('**1 match** for "Cabero"');
-    expect(text).toContain("PO 333121488");
-    expect(text).toContain("Cabero - Wedi materials");
-    expect(text).toContain("Best Tile");
-    // Search delegates to client with the fixed limit of 20.
-    expect(searchPurchaseOrders).toHaveBeenCalledWith("Cabero", 20);
-  });
-
-  it("returns a Markdown 'no purchase orders' message when result is empty", async () => {
-    const searchPurchaseOrders = vi.fn().mockResolvedValue({ data: [] });
-    const api = fakeApi({
-      searchPurchaseOrders:
-        searchPurchaseOrders as BuildToolsAPI["searchPurchaseOrders"],
-    });
-
-    const result = await searchPurchaseOrdersTool.handler(
-      { query: "zzzzzz" },
-      api,
-    );
-
-    expect(result.isError).toBeFalsy();
-    expect(textOf(result)).toContain('No purchase orders matched query "zzzzzz"');
-  });
-
-  it("returns Markdown error content (isError: true) on BuildToolsError", async () => {
-    const searchPurchaseOrders = vi
-      .fn()
-      .mockRejectedValue(new BuildToolsServerError("Bad gateway", { status: 502 }));
-    const api = fakeApi({
-      searchPurchaseOrders:
-        searchPurchaseOrders as BuildToolsAPI["searchPurchaseOrders"],
-    });
-
-    const result = await searchPurchaseOrdersTool.handler(
-      { query: "Cabero" },
-      api,
-    );
-
-    expect(result.isError).toBe(true);
-    const text = textOf(result);
-    expect(text).toContain("Bad gateway");
-    expect(text).toContain("BuildToolsServerError");
-    expect(text).toContain("search_purchase_orders");
-  });
-
-  it("returns Markdown error content (isError: true) when query is too short", async () => {
-    const result = await searchPurchaseOrdersTool.handler(
-      { query: "a" },
-      fakeApi({}),
-    );
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain("Invalid input for `search_purchase_orders`");
-    expect(textOf(result)).toContain("query");
-  });
-
-  it("returns Markdown error content (isError: true) when query is missing", async () => {
-    const result = await searchPurchaseOrdersTool.handler({}, fakeApi({}));
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain("query");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// get_purchase_order
-// ---------------------------------------------------------------------------
-
-describe("get_purchase_order", () => {
-  it("renders vendor (with id) + line items + invoiced/unpaid summary", async () => {
-    const getPurchaseOrder = vi.fn().mockResolvedValue({
-      id: 39741,
-      projectId: 185936,
-      name: "Roof repair for remote blower",
-      number: "333123304",
-      prefix: "PO",
-      companyId: 62,
-      companyName: "Charles Home",
-      items: [
-        {
-          id: 45824,
-          budgetCategoryId: 1609,
-          budgetCategoryCode: "3510",
-          budgetCategoryName: "Roofing Sub",
-          total: "300.00",
-          notes: "",
-          internalNotes: "",
-          invoiceRelated: "0.00",
-          amounts: [{ a: "300", q: "1", d: "Roof repair", u: "1" }],
-          companyId: 62,
-          companyName: "Charles Home",
-        },
-      ],
-      totalNumeric: 300,
-    });
-    const api = fakeApi({
-      getPurchaseOrder: getPurchaseOrder as BuildToolsAPI["getPurchaseOrder"],
-    });
-
-    const result = await getPurchaseOrderTool.handler(
-      { purchase_order_id: 39741 },
-      api,
-    );
-    expect(result.isError).toBeFalsy();
-    const text = textOf(result);
-    expect(text).toContain("## Purchase Order #39741 — Roof repair for remote blower (project #185936)");
-    expect(text).toContain("**PO number**: PO 333123304");
-    expect(text).toContain("**Vendor**: Charles Home (company #62)");
-    expect(text).toContain("**Total** (sum of items): $300.00");
-    expect(text).toContain("**Invoiced**: $0.00 — **unpaid**: $300.00");
-    expect(text).toContain("| 1 | 3510 | Roofing Sub | 1 | 300 | $300.00 |");
-  });
-
-  it("handles 'PO not found' cleanly", async () => {
-    const getPurchaseOrder = vi.fn().mockResolvedValue(null);
-    const api = fakeApi({
-      getPurchaseOrder: getPurchaseOrder as BuildToolsAPI["getPurchaseOrder"],
-    });
-    const result = await getPurchaseOrderTool.handler(
-      { purchase_order_id: 99999 },
-      api,
-    );
-    expect(textOf(result)).toContain(
-      "No detail found for purchase order #99999",
-    );
-  });
-
-  it("rejects non-number input via Zod", async () => {
-    const result = await getPurchaseOrderTool.handler(
-      { purchase_order_id: "not-a-number" } as unknown as Record<string, unknown>,
-      fakeApi({}),
-    );
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain("Invalid input for `get_purchase_order`");
-  });
-});

@@ -25,7 +25,6 @@ import {
   getProjectTool,
   listProjectsTool,
   projectTools,
-  searchProjectsTool,
   type ToolResult,
 } from "../projects.js";
 
@@ -87,7 +86,7 @@ const sampleDetail = {
 describe("projectTools registry", () => {
   it("exports exactly three tools with the contract-mandated names", () => {
     const names = projectTools.map((t) => t.name).sort();
-    expect(names).toEqual(["get_project", "list_projects", "search_projects"]);
+    expect(names).toEqual(["get_project", "list_projects"]);
   });
 
   it("each tool exposes a JSON Schema for its input", () => {
@@ -133,12 +132,12 @@ describe("list_projects", () => {
     });
   });
 
-  it("passes customer_name via search[value] and respects custom limit", async () => {
+  it("passes query via search[value] and respects custom limit", async () => {
     const getProjects = vi.fn().mockResolvedValue({ data: [sampleListRow] });
     const api = fakeApi({ getProjects: getProjects as BuildToolsAPI["getProjects"] });
 
     await listProjectsTool.handler(
-      { status: "All", customer_name: "Jones", limit: 10 },
+      { status: "All", query: "Jones", limit: 10 },
       api,
     );
 
@@ -284,75 +283,3 @@ describe("get_project", () => {
 // search_projects
 // ---------------------------------------------------------------------------
 
-describe("search_projects", () => {
-  it("returns Markdown match list (capped at 20) on the happy path", async () => {
-    const searchProjects = vi
-      .fn()
-      .mockResolvedValue({ data: [sampleListRow] });
-    const api = fakeApi({
-      searchProjects: searchProjects as BuildToolsAPI["searchProjects"],
-    });
-
-    const result = await searchProjectsTool.handler({ query: "Jones" }, api);
-
-    expect(result.isError).toBeFalsy();
-    const text = textOf(result);
-    expect(text).toContain('**1 match** for "Jones"');
-    expect(text).toContain("#100002");
-    expect(text).toContain("Jones Addition");
-    // Verify the limit-of-20 was passed to the client.
-    expect(searchProjects).toHaveBeenCalledWith("Jones", 20);
-  });
-
-  it("returns a Markdown 'no matches' message when the result is empty", async () => {
-    const searchProjects = vi.fn().mockResolvedValue({ data: [] });
-    const api = fakeApi({
-      searchProjects: searchProjects as BuildToolsAPI["searchProjects"],
-    });
-
-    const result = await searchProjectsTool.handler({ query: "zzz" }, api);
-
-    expect(result.isError).toBeFalsy();
-    expect(textOf(result)).toContain('No projects matched query "zzz"');
-  });
-
-  it("returns Markdown error content (isError: true) on BuildToolsError", async () => {
-    const searchProjects = vi
-      .fn()
-      .mockRejectedValue(new BuildToolsServerError("Bad gateway", { status: 502 }));
-    const api = fakeApi({
-      searchProjects: searchProjects as BuildToolsAPI["searchProjects"],
-    });
-
-    const result = await searchProjectsTool.handler({ query: "anything" }, api);
-
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain("Bad gateway");
-  });
-
-  it("returns Markdown error content (isError: true) on Zod-invalid input", async () => {
-    // query has a min-length of 2; a single character should fail.
-    const result = await searchProjectsTool.handler({ query: "a" }, fakeApi({}));
-    expect(result.isError).toBe(true);
-    expect(textOf(result)).toContain("Invalid input for `search_projects`");
-    expect(textOf(result)).toContain("query");
-  });
-
-  it("caps rendered results at 20 even if the client returns more", async () => {
-    const manyRows = Array.from({ length: 30 }, (_, i) => ({
-      ...sampleListRow,
-      id: 100000 + i,
-      name: `Project ${i}`,
-    }));
-    const searchProjects = vi.fn().mockResolvedValue({ data: manyRows });
-    const api = fakeApi({
-      searchProjects: searchProjects as BuildToolsAPI["searchProjects"],
-    });
-
-    const result = await searchProjectsTool.handler({ query: "Project" }, api);
-
-    expect(result.isError).toBeFalsy();
-    const lines = textOf(result).split("\n").filter((l) => l.startsWith("- #"));
-    expect(lines).toHaveLength(20);
-  });
-});

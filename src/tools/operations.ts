@@ -314,6 +314,13 @@ const ListUsersInputSchema = z.object({
     .describe(
       'Filter by user role. "All" (default) returns all roles. "Employee" routes through the employees endpoint.',
     ),
+  query: z
+    .string()
+    .min(2)
+    .optional()
+    .describe(
+      "Free-text substring search across user name, email, phone, and company. Min 2 chars. PR #71 unified the previous list_users + search_users tools.",
+    ),
   limit: z
     .number()
     .min(1)
@@ -357,7 +364,7 @@ async function listUsersHandler(
 ): Promise<ToolResult> {
   const parsed = ListUsersInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_users");
-  const { role, limit } = parsed.data;
+  const { role, query, limit } = parsed.data;
 
   const targetLimit = limit ?? 100;
   const effectiveRole = role ?? "All";
@@ -370,7 +377,13 @@ async function listUsersHandler(
   const fetchLength = effectiveRole === "All" ? targetLimit : 10000;
 
   try {
-    const result = await api.getUsers<Datatable>({ length: fetchLength });
+    const params: Record<string, string | number> = { length: fetchLength };
+    // PR #71: query forwarded as global free-text search (was the
+    // entire job of the standalone search_users tool).
+    if (query) {
+      params["search[value]"] = query;
+    }
+    const result = await api.getUsers<Datatable>(params);
     const allRows = result?.data ?? [];
     const filtered =
       effectiveRole === "All"
@@ -400,58 +413,15 @@ async function listUsersHandler(
 export const listUsersTool: ToolDefinition = {
   name: "list_users",
   description:
-    "List BuildTools users with optional role filter (Core Admin, Employee, Client, Company Rep, All).",
+    "List or search BuildTools users. " +
+    "Pass `role` to filter by Core Admin / Employee / Client / Company Rep. " +
+    "Pass `query` for free-text search across name, email, phone, company. " +
+    "PR #71 unified the previous `list_users` + `search_users` tools.",
   inputSchema: zodToJsonSchema(ListUsersInputSchema),
   permission: "read",
   handler: listUsersHandler,
 };
 
-// ---------------------------------------------------------------------------
-// search_users
-// ---------------------------------------------------------------------------
-
-const SearchUsersInputSchema = z.object({
-  query: z.string().min(2).describe("Search query (min 2 characters)."),
-});
-
-export type SearchUsersInput = z.infer<typeof SearchUsersInputSchema>;
-
-/** Maximum results surfaced by `search_users`. */
-const SEARCH_USERS_LIMIT = 20;
-
-async function searchUsersHandler(
-  args: unknown,
-  api: BuildToolsAPI,
-): Promise<ToolResult> {
-  const parsed = SearchUsersInputSchema.safeParse(args ?? {});
-  if (!parsed.success) return formatZodError(parsed.error, "search_users");
-  const { query } = parsed.data;
-
-  try {
-    const result = await api.searchUsers<Datatable>(query, SEARCH_USERS_LIMIT);
-    const rows = result?.data ?? [];
-    if (rows.length === 0) {
-      return markdown(`No users matched query "${query}".`);
-    }
-    const header = `**${rows.length} match${rows.length === 1 ? "" : "es"}** for "${query}":`;
-    const body = rows
-      .slice(0, SEARCH_USERS_LIMIT)
-      .map(formatUserRow)
-      .join("\n");
-    return markdown(`${header}\n\n${body}`);
-  } catch (err) {
-    return formatError(err, "search_users");
-  }
-}
-
-export const searchUsersTool: ToolDefinition = {
-  name: "search_users",
-  description:
-    "Free-text search across BuildTools users (matches name, email, phone, company).",
-  inputSchema: zodToJsonSchema(SearchUsersInputSchema),
-  permission: "read",
-  handler: searchUsersHandler,
-};
 
 // ---------------------------------------------------------------------------
 // Exported registry
@@ -461,5 +431,4 @@ export const operationTools: ToolDefinition[] = [
   listRfisTool,
   listServicesTool,
   listUsersTool,
-  searchUsersTool,
 ];
