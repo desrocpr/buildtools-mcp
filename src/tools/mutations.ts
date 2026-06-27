@@ -378,7 +378,10 @@ const CreateDrawRequestSchema = z.object({
     .max(10_000_000)
     .optional()
     .describe(
-      "Cumulative work-completed dollar value to date. Tool computes the draw amount as `(work_completed_to_date × (1 - retainage_percent/100)) − sum(prior draws)`. Mutually exclusive with `amount`.",
+      "Cumulative work-completed dollar value to date. Tool computes the draw amount as `(work_completed_to_date × (1 - retainage_percent/100)) − sum(prior draws)`. " +
+        "**This is the standard cumulative-work-completed method. NOT AIA G702/G703** (which separates retainage on completed work vs stored materials). " +
+        "If your draw schedule uses a different methodology, pass `amount` directly. " +
+        "Mutually exclusive with `amount`.",
     ),
   retainage_percent: z
     .number()
@@ -386,7 +389,7 @@ const CreateDrawRequestSchema = z.object({
     .max(50)
     .optional()
     .describe(
-      "Percentage retainage held back from this draw (typical: 5-10%). Default 0. Only applied when `work_completed_to_date` is used — when `amount` is set, the caller is presumed to have already applied retainage.",
+      "Percentage retainage held back from this draw (typical: 5-10%). Default 0. ONLY meaningful when `work_completed_to_date` is used — passing this with `amount` is rejected (caller is presumed to have already applied retainage to the direct amount).",
     ),
   draw_number: z
     .number()
@@ -398,21 +401,30 @@ const CreateDrawRequestSchema = z.object({
     ),
   name: z
     .string()
+    .max(200)
+    .regex(/^[\x20-\x7E]*$/, "name must be ASCII printable characters only — BT HTML-encodes non-ASCII and the list view doesn't decode")
     .optional()
     .describe(
-      "Override the auto-generated statement name. Default: `\"Draw #N — YYYY-MM-DD\"`. Use ASCII only (BT encodes non-ASCII as HTML entities which the list view doesn't decode).",
+      "Override the auto-generated statement name. Default: `\"Draw #N - YYYY-MM-DD\"` (ASCII hyphen). Max 200 chars; ASCII printable only.",
     ),
-  due_date: z
+  // PR #65 review HIGH 1: due_date was accepted in the schema but
+  // `createFinancialStatementWithAmount` has no due_date field — the
+  // value was shown in the prompt and silently dropped on commit.
+  // Removed entirely until the BT API method gains support.
+  notes: z
     .string()
-    .regex(/^\d{4}-\d{2}-\d{2}$/, "due_date must be ISO YYYY-MM-DD")
+    .max(2000)
     .optional()
-    .describe("Due date in ISO format (YYYY-MM-DD). Optional."),
-  notes: z.string().optional().describe("Internal notes on the statement."),
+    .describe("Internal notes on the statement. Max 2000 chars."),
   status: z
     .number()
+    .int()
+    .refine((v) => [1, 2, 4, 5, 6].includes(v), {
+      message: "status must be one of: 1 (Draft), 2 (Pending), 4 (Partial), 5 (Sent), 6 (Paid)",
+    })
     .optional()
     .describe(
-      "FS status code. Default 1 (Draft) so PM can review in the BT UI before sending. 1=Draft, 2=Pending, 4=Partial, 5=Sent, 6=Paid.",
+      "FS status code. Default 1 (Draft) so PM can review in the BT UI before sending. 1=Draft, 2=Pending, 4=Partial, 5=Sent, 6=Paid. Note: 3 is intentionally absent from the FS enum.",
     ),
   idempotency_key: z
     .string()
@@ -429,6 +441,13 @@ const CreateDrawRequestSchema = z.object({
     {
       message: "Exactly one of `amount` or `work_completed_to_date` must be provided.",
       path: ["amount"],
+    },
+  )
+  .refine(
+    (data) => !(data.amount !== undefined && data.retainage_percent !== undefined),
+    {
+      message: "`retainage_percent` only applies to the `work_completed_to_date` path; when `amount` is set, the caller is presumed to have already applied retainage.",
+      path: ["retainage_percent"],
     },
   );
 type CreateDrawRequestArgs = z.infer<typeof CreateDrawRequestSchema>;
@@ -1952,7 +1971,13 @@ export function createMutationTools(
       lines.push(`Create draw request on project ${projectLabel}.`);
       lines.push("");
       lines.push(`- **Draw name**: ${a._resolved_name ? escapeMarkdownInline(a._resolved_name) : "_(unresolved)_"}`);
-      if (a._resolved_draw_number !== undefined) {
+      // PR #65 review MEDIUM 5: BT FS records have no standalone
+      // "draw number" column — the # only lives inside the name
+      // string. Showing a separate "Draw #: N" line when the caller
+      // overrode `name` would imply BT will store the number
+      // separately, which it won't. Only render when the auto-name
+      // is being used (i.e. caller didn't override `name`).
+      if (a._resolved_draw_number !== undefined && a.name === undefined) {
         lines.push(`- **Draw #**: ${a._resolved_draw_number}`);
       }
       if (a._prior_draws_count !== undefined && a._prior_draws_sum !== undefined) {
@@ -1973,7 +1998,6 @@ export function createMutationTools(
       lines.push(`- **Cumulative after**: $${cumulative.toFixed(2)}`);
       const statusLabel = a.status === undefined ? "Draft (default)" : `status code ${a.status}`;
       lines.push(`- **Statement status**: ${statusLabel}`);
-      if (a.due_date) lines.push(`- **Due date**: ${a.due_date}`);
       return lines.join("\n");
     },
     async (a) => {
@@ -2896,11 +2920,18 @@ export function createMutationTools(
           }
           const priorStatements = fsResult?.statements ?? [];
           priorDrawsCount = priorStatements.length;
-          priorDrawsSum = priorStatements.reduce(
+          // PR #65 review LOW 7: round the accumulated sum to cents
+          // before downstream subtraction. A 12-statement project
+          // each at $33,333.33 accumulates to $399,999.96 raw due to
+          // IEEE 754 — and the prompt rendered the raw sum, while
+          // the executor's amount used post-subtraction Math.round.
+          // Round here so prompt and executor agree on display.
+          const rawSum = priorStatements.reduce(
             (acc: number, s: { amount: number }) =>
               acc + (typeof s.amount === "number" && Number.isFinite(s.amount) ? s.amount : 0),
             0,
           );
+          priorDrawsSum = Math.round(rawSum * 100) / 100;
 
           // Next draw number. Caller can override; otherwise auto.
           if (data.draw_number !== undefined) {
@@ -2933,6 +2964,17 @@ export function createMutationTools(
           } else {
             const todayIso = new Date().toISOString().slice(0, 10);
             resolvedName = `Draw #${resolvedDrawNumber} - ${todayIso}`;
+          }
+
+          // PR #65 review MEDIUM 4: non-positive amount check fires
+          // BEFORE the confirmation prompt — saves the user a wasted
+          // confirm round on impossible math.
+          if (resolvedAmount !== undefined && resolvedAmount <= 0) {
+            return errorMarkdown(
+              `**Computed draw amount is non-positive** ($${resolvedAmount.toFixed(2)}) for project #${data.project_id}. ` +
+                `This typically means prior draws ($${(priorDrawsSum ?? 0).toFixed(2)}) already cover (or exceed) the cumulative work-completed ($${(data.work_completed_to_date ?? 0).toFixed(2)}). ` +
+                `Verify \`work_completed_to_date\` or pass \`amount\` directly.`,
+            );
           }
         }
 

@@ -2408,7 +2408,7 @@ describe("create_draw_request — workflow consolidator (PR #65)", () => {
     expect(result.isError).toBe(true);
   });
 
-  it("non-positive computed amount: surfaces clean error before BT call", async () => {
+  it("non-positive computed amount: surfaces clean error BEFORE the confirmation prompt (PR #65 review MEDIUM 4)", async () => {
     const getProject = vi.fn().mockResolvedValue(projectRow);
     const getFinancialStatements = vi.fn().mockResolvedValue(priorFs); // prior = 55000
     const createFinancialStatementWithAmount = vi.fn();
@@ -2420,11 +2420,15 @@ describe("create_draw_request — workflow consolidator (PR #65)", () => {
     const tool = findTool(api, mkStore());
     // work_completed = 50k, retainage = 0, prior = 55k → -5k
     const args = { project_id: 100002, work_completed_to_date: 50000 };
-    const prompt = await tool.handler(args, api);
-    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
-    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
-    expect(exec.isError).toBe(true);
-    expect(textOf(exec)).toContain("non-positive");
+    // FIRST call returns the error directly — no confirmation prompt
+    // for an impossible amount.
+    const result = await tool.handler(args, api);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("non-positive");
+    expect(textOf(result)).toContain("$55000.00"); // prior shown
+    expect(textOf(result)).toContain("$50000.00"); // work shown
+    // No confirmation prompt was returned (no confirmation_id to consume).
+    expect(textOf(result)).not.toContain("confirmation_id");
     expect(createFinancialStatementWithAmount).not.toHaveBeenCalled();
   });
 
@@ -2470,7 +2474,11 @@ describe("create_draw_request — workflow consolidator (PR #65)", () => {
     const prompt = await tool.handler(args, api);
     const promptText = textOf(prompt);
     expect(promptText).toContain("Custom Draw Name");
-    expect(promptText).toContain("Draw #**: 99");
+    // PR #65 review MEDIUM 5: when `name` is overridden, the
+    // "Draw #N" line is suppressed (BT FS has no separate draw#
+    // column). Caller's draw_number is now used internally only —
+    // not shown in the prompt because BT won't store it.
+    expect(promptText).not.toContain("Draw #**: 99");
     expect(promptText).toContain("status code 5");
 
     const cid = promptText.match(/confirmation_id:\s*"([^"]+)"/)![1];
@@ -2529,6 +2537,102 @@ describe("create_draw_request — workflow consolidator (PR #65)", () => {
     const retry = await tool.handler(args, api);
     expect(textOf(retry)).toContain("Idempotency replay");
     expect(createFinancialStatementWithAmount).toHaveBeenCalledTimes(1);
+  });
+
+  // ---------- PR #65 review round-2 fixes ----------
+
+  it("review HIGH 1: `due_date` is no longer in the schema — silently stripped, NOT shown in prompt (was: shown but silently dropped on commit)", async () => {
+    const getProject = vi.fn().mockResolvedValue(projectRow);
+    const getFinancialStatements = vi.fn().mockResolvedValue(priorFs);
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: getFinancialStatements as any,
+    });
+    const tool = findTool(api, mkStore());
+    const prompt = await tool.handler(
+      { project_id: 100002, amount: 5000, due_date: "2026-07-15" } as any,
+      api,
+    );
+    expect(prompt.isError).toBeFalsy();
+    // CRITICAL: due_date does NOT appear in the prompt because the
+    // schema strips it. Pre-fix, it WAS shown in the prompt and then
+    // silently dropped at the BT call layer — a data-loss bug.
+    expect(textOf(prompt)).not.toContain("Due date");
+    expect(textOf(prompt)).not.toContain("2026-07-15");
+    expect(textOf(prompt)).not.toContain("due_date");
+    // The schema definition itself doesn't list due_date as an input.
+    const properties = (tool.inputSchema as any).properties;
+    expect(properties.due_date).toBeUndefined();
+  });
+
+  it("review HIGH 2: prompt description mentions the formula assumption (not AIA G702)", async () => {
+    // Verify the schema description names the methodology explicitly.
+    const tool = findTool(fakeApi({}), mkStore());
+    const desc = (tool.inputSchema as any).properties.work_completed_to_date.description;
+    expect(desc).toContain("cumulative");
+    expect(desc).toContain("NOT AIA G702");
+  });
+
+  it("review MEDIUM (status): Zod rejects unknown status codes like 3, 99, 1.5", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    for (const bad of [3, 99, 1.5, 0, -1]) {
+      const result = await tool.handler(
+        { project_id: 100002, amount: 1000, status: bad },
+        api,
+      );
+      expect(result.isError).toBe(true);
+    }
+  });
+
+  it("review LOW: retainage_percent + amount → refine error (silent ignore would mis-bill)", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler(
+      { project_id: 100002, amount: 1000, retainage_percent: 10 },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("retainage_percent");
+  });
+
+  it("review LOW: name field rejects non-ASCII (BT HTML-encoding without decoding)", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler(
+      { project_id: 100002, amount: 1000, name: "Café Draw" },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result).toLowerCase()).toContain("ascii");
+  });
+
+  it("review LOW (rounding): priorDrawsSum rounded before display so prompt matches executor", async () => {
+    // 3 statements at $33333.33 → raw sum $99999.99 (float drift would
+    // make it 99999.99000000001). Test that rounding produces clean display.
+    const getProject = vi.fn().mockResolvedValue(projectRow);
+    const getFinancialStatements = vi.fn().mockResolvedValue({
+      statusCount: {},
+      statements: [
+        { id: "1", name: "Draw #1", status: "Paid", amount: 33333.33, paid: 0, balance: 0, date: "" },
+        { id: "2", name: "Draw #2", status: "Paid", amount: 33333.33, paid: 0, balance: 0, date: "" },
+        { id: "3", name: "Draw #3", status: "Paid", amount: 33333.33, paid: 0, balance: 0, date: "" },
+      ],
+    });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: getFinancialStatements as any,
+    });
+    const tool = findTool(api, mkStore());
+    const prompt = await tool.handler(
+      { project_id: 100002, work_completed_to_date: 200000, retainage_percent: 10 },
+      api,
+    );
+    const text = textOf(prompt);
+    // $99999.99 (rounded), not $99999.99000000001
+    expect(text).toContain("Prior draws**: 3 statement(s) totalling $99999.99");
+    // billable = 200000 × 0.9 = 180000; minus 99999.99 = 80000.01
+    expect(text).toContain("This draw amount**: **$80000.01**");
   });
 
   it("BT create failure: surfaces the API error verbatim", async () => {
