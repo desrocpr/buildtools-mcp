@@ -33,6 +33,7 @@ interface FakeApiOverrides {
   createPurchaseOrder?: BuildToolsAPI["createPurchaseOrder"];
   updatePurchaseOrder?: BuildToolsAPI["updatePurchaseOrder"];
   transitionPurchaseOrderStatus?: BuildToolsAPI["transitionPurchaseOrderStatus"];
+  bulkTransitionPurchaseOrderStatuses?: BuildToolsAPI["bulkTransitionPurchaseOrderStatuses"];
   getCompany?: BuildToolsAPI["getCompany"];
   getPurchaseOrder?: BuildToolsAPI["getPurchaseOrder"];
   getPurchaseOrders?: BuildToolsAPI["getPurchaseOrders"];
@@ -2655,5 +2656,250 @@ describe("create_draw_request — workflow consolidator (PR #65)", () => {
     expect(exec.isError).toBe(true);
     expect(textOf(exec)).toContain("Failed to create draw request");
     expect(textOf(exec)).toContain("Amount validation failed at BT");
+  });
+});
+
+describe("bulk_transition_purchase_orders — PR #69", () => {
+  function findTool(api: BuildToolsAPI, store: ConfirmationStore) {
+    const tools = createMutationTools(() => api, store);
+    const tool = tools.find((t) => t.name === "bulk_transition_purchase_orders");
+    if (!tool) throw new Error("bulk_transition_purchase_orders not registered");
+    return tool;
+  }
+
+  it("happy path: all 3 POs transition successfully", async () => {
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
+      success: true,
+      message: "Status updated.",
+      successCount: 3,
+      failureCount: 0,
+    });
+    const api = fakeApi({
+      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+    });
+    const tool = findTool(api, mkStore());
+    const args = { purchase_order_ids: [39201, 39202, 39203], status: "Sent" as const };
+    const prompt = await tool.handler(args, api);
+    expect(textOf(prompt)).toContain("Bulk-transition **3** purchase order(s) to **Sent (2)**");
+    // PR #69 review HIGH 2: all IDs shown verbatim in code block (no truncation)
+    expect(textOf(prompt)).toContain("39201, 39202, 39203");
+    expect(textOf(prompt)).toContain("review carefully");
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(exec.isError).toBeFalsy();
+    expect(textOf(exec)).toContain("All **3** purchase order(s) transitioned");
+    expect(bulkTransitionPurchaseOrderStatuses).toHaveBeenCalledWith({
+      purchaseOrderIds: [39201, 39202, 39203],
+      status: 2,
+    });
+  });
+
+  it("partial failure: 7 succeed, 3 fail — NOT an error, surfaces breakdown", async () => {
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
+      success: true, // wire-level OK
+      message: "Partial: 7 succeeded, 3 failed.",
+      successCount: 7,
+      failureCount: 3,
+    });
+    const api = fakeApi({
+      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+    });
+    const tool = findTool(api, mkStore());
+    const args = {
+      purchase_order_ids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      status: "Confirmed" as const,
+    };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(exec.isError).toBeFalsy(); // partial success is NOT an error
+    expect(textOf(exec)).toContain("Partial bulk transition");
+    expect(textOf(exec)).toContain("7 of 10");
+    expect(textOf(exec)).toContain("3 failed");
+    expect(textOf(exec)).toContain("get_purchase_order");
+  });
+
+  it("wire-level failure: surfaces BT's error verbatim", async () => {
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
+      success: false,
+      errors: "HTTP 500 — BT internal error",
+    });
+    const api = fakeApi({
+      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+    });
+    const tool = findTool(api, mkStore());
+    const args = { purchase_order_ids: [1, 2], status: "Sent" as const };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(exec.isError).toBe(true);
+    expect(textOf(exec)).toContain("Bulk transition failed at the wire");
+    expect(textOf(exec)).toContain("HTTP 500");
+  });
+
+  it("Zod: max 50 ids per call", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler(
+      { purchase_order_ids: Array.from({ length: 60 }, (_, i) => i + 1), status: 1 },
+      api,
+    );
+    expect(result.isError).toBe(true);
+  });
+
+  it("Zod: requires non-empty ids array", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler({ purchase_order_ids: [], status: 1 }, api);
+    expect(result.isError).toBe(true);
+  });
+
+  it("Zod: rejects unknown numeric status codes (999) at the schema layer", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler(
+      { purchase_order_ids: [1], status: 999 },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    // PR #69 round-2 fix: rejection now at Zod, not resolver
+    expect(textOf(result).toLowerCase()).toMatch(/invalid|status must be a valid/);
+  });
+
+  it("PR #69 review HIGH 2: prompt shows ALL ids (no truncation) so adversarial expansion is visible", async () => {
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
+      success: true, successCount: 8, failureCount: 0,
+    });
+    const api = fakeApi({
+      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+    });
+    const tool = findTool(api, mkStore());
+    const args = {
+      purchase_order_ids: [1, 2, 3, 4, 5, 6, 7, 8],
+      status: "Sent" as const,
+    };
+    const prompt = await tool.handler(args, api);
+    const text = textOf(prompt);
+    // ALL 8 ids must appear — no truncation that hides adversarial appendices
+    expect(text).toContain("1, 2, 3, 4, 5, 6, 7, 8");
+    expect(text).not.toContain("…");
+    expect(text).not.toContain("+3 more");
+  });
+
+  it("idempotency: order-insensitive — {3,1,2} and {1,2,3} hit the same cache entry", async () => {
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
+      success: true, successCount: 3, failureCount: 0,
+    });
+    const api = fakeApi({
+      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+    });
+    const { IdempotencyStore } = await import("../../idempotency/index.js");
+    const idem = new IdempotencyStore();
+    const tools = createMutationTools(() => api, mkStore(), undefined, idem);
+    const tool = tools.find((t) => t.name === "bulk_transition_purchase_orders")!;
+
+    const args1 = {
+      purchase_order_ids: [1, 2, 3],
+      status: "Sent" as const,
+      idempotency_key: "bulk-replay-test",
+    };
+    const prompt = await tool.handler(args1, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args1, confirmation_id: cid }, api);
+    expect(bulkTransitionPurchaseOrderStatuses).toHaveBeenCalledTimes(1);
+
+    // Retry with REORDERED ids — should hit cache (sorted before fingerprint).
+    const args2 = { ...args1, purchase_order_ids: [3, 1, 2] };
+    const retry = await tool.handler(args2, api);
+    expect(textOf(retry)).toContain("Idempotency replay");
+    expect(bulkTransitionPurchaseOrderStatuses).toHaveBeenCalledTimes(1); // STILL 1
+  });
+
+  it("PR #69 review HIGH 1: partial-failure surfaces BT's actual error message (not '(no detail)')", async () => {
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
+      success: true,
+      successCount: 0,
+      failureCount: 1,
+      message: "Partial: 0 succeeded, 1 failed.",
+      errors: "The Signature field is required.", // BT's actual reason
+    });
+    const api = fakeApi({
+      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+    });
+    const tool = findTool(api, mkStore());
+    const args = { purchase_order_ids: [1], status: "Confirmed" as const };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
+    // The actual BT reason should appear in the result, not '(no detail)'
+    expect(textOf(exec)).toContain("BT message: The Signature field is required.");
+    expect(textOf(exec)).not.toContain("(no detail)");
+  });
+
+  it("PR #69 review MEDIUM 7: partial-failure includes enumeration warning", async () => {
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
+      success: true, successCount: 5, failureCount: 5,
+    });
+    const api = fakeApi({
+      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+    });
+    const tool = findTool(api, mkStore());
+    const args = {
+      purchase_order_ids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      status: "Sent" as const,
+    };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(textOf(exec)).toContain("If you did not expect any failures");
+    expect(textOf(exec)).toContain("write access");
+  });
+
+  it("PR #69 review MEDIUM 4: Zod rejects unknown numeric status codes at schema layer (not just resolver)", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    for (const bad of [1.5, 0, -1, 5, 99]) {
+      const result = await tool.handler(
+        { purchase_order_ids: [1], status: bad },
+        api,
+      );
+      expect(result.isError).toBe(true);
+      // Error path should be the Zod refine, not the resolver throw
+      expect(textOf(result).toLowerCase()).toMatch(/invalid|status must be/);
+    }
+  });
+
+  it("partial-failure result is CACHED (so retries replay the report, not re-execute)", async () => {
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
+      success: true,
+      successCount: 5,
+      failureCount: 5,
+      message: "Partial",
+    });
+    const api = fakeApi({
+      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+    });
+    const { IdempotencyStore } = await import("../../idempotency/index.js");
+    const idem = new IdempotencyStore();
+    const tools = createMutationTools(() => api, mkStore(), undefined, idem);
+    const tool = tools.find((t) => t.name === "bulk_transition_purchase_orders")!;
+
+    const args = {
+      purchase_order_ids: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      status: "Confirmed" as const,
+      idempotency_key: "partial-success-cache",
+    };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(textOf(exec)).toContain("Partial bulk transition");
+    expect(bulkTransitionPurchaseOrderStatuses).toHaveBeenCalledTimes(1);
+
+    // Retry — partial success should still cache and replay (NOT
+    // re-execute, even though some failed). Caller can retry by
+    // passing only the failing ids with a fresh key.
+    const retry = await tool.handler(args, api);
+    expect(textOf(retry)).toContain("Idempotency replay");
+    expect(bulkTransitionPurchaseOrderStatuses).toHaveBeenCalledTimes(1);
   });
 });

@@ -3713,12 +3713,60 @@ export class BuildToolsAPI {
     message?: unknown;
     errors?: unknown;
   }> {
-    await this.ensureAuthenticated();
-
     const poId = Number(opts.purchaseOrderId);
     if (!Number.isFinite(poId)) {
       return { success: false, errors: "purchase_order_id is not a number" };
     }
+    // Delegate to the bulk method with a single-id batch.
+    const result = await this.bulkTransitionPurchaseOrderStatuses({
+      purchaseOrderIds: [poId],
+      status: opts.status,
+    });
+    return {
+      success: result.success && (result.failureCount ?? 0) === 0,
+      message: result.message,
+      errors: result.errors,
+    };
+  }
+
+  /**
+   * Bulk variant of `transitionPurchaseOrderStatus` (PR #69). The
+   * underlying `/purchase-orders/status/update` endpoint accepts
+   * `ids[]` natively — this method exposes that capability for ops
+   * workflows like "send all my draft POs on project X" or "cancel
+   * all rejected POs."
+   *
+   * Returns `{success, successCount, failureCount, ...}` so callers
+   * can act on partial-success scenarios (some ids transitioned, some
+   * didn't). BT's response is `{r:1, msg, s, f, l}` — `s` is the
+   * count that succeeded, `f` is the count that failed. We surface
+   * both as `successCount` / `failureCount`.
+   *
+   * `success` is true only when BT acknowledged the wire-level call
+   * (`r:1`); individual per-id failures are tracked in
+   * `failureCount` separately. A caller checking `success` alone
+   * misses partial-failure scenarios — they should check
+   * `failureCount === 0` for "all succeeded."
+   */
+  async bulkTransitionPurchaseOrderStatuses(opts: {
+    purchaseOrderIds: Array<string | number>;
+    status: number;
+  }): Promise<{
+    success: boolean;
+    message?: unknown;
+    errors?: unknown;
+    successCount?: number;
+    failureCount?: number;
+  }> {
+    await this.ensureAuthenticated();
+
+    const ids = opts.purchaseOrderIds.map((id) => Number(id)).filter((n) => Number.isFinite(n));
+    if (ids.length === 0) {
+      return { success: false, errors: "purchase_order_ids contained no valid numeric ids" };
+    }
+    // Pick the first id for CSRF form fetch — any PO id works for
+    // CSRF since the token is session-wide.
+    const poId = ids[0];
 
     // CSRF token: use the class-level cache when populated (saves a
     // form fetch in the auto-transition path which calls this method
@@ -3749,7 +3797,10 @@ export class BuildToolsAPI {
     const buildBody = (token: string) => {
       const form = new URLSearchParams();
       form.append("_token", token);
-      form.append("ids[]", String(poId));
+      // PR #69: emit one `ids[]` per id. URLSearchParams encodes
+      // repeated keys as separate query params, matching BT's
+      // expected payload shape.
+      for (const id of ids) form.append("ids[]", String(id));
       form.append("status", String(opts.status));
       return form.toString();
     };
@@ -3828,19 +3879,59 @@ export class BuildToolsAPI {
         errors: `Non-JSON response from /status/update (HTTP ${resp.status}): ${resp.body.slice(0, 200)}`,
       };
     }
-    if (parsed.r !== 1 || (parsed.f ?? 0) > 0) {
+    // PR #69 (bulk-aware response handling): a wire-level failure
+    // (r:0) is a hard error. A wire-level success (r:1) with partial
+    // per-id failures (f > 0) is NOT a top-level error — bulk
+    // callers expect to see the per-id breakdown so they can act
+    // on it. Surface successCount + failureCount for both single
+    // and bulk callers (single callers just check success boolean).
+    const successCount = parsed.s ?? 0;
+    const failureCount = parsed.f ?? 0;
+    if (parsed.r !== 1) {
       const msg = Array.isArray(parsed.msg)
         ? (parsed.msg as unknown[]).join("; ")
         : String(parsed.msg ?? "");
+      // PR #69 review MEDIUM 6: log count + sample, not the full list.
       process.stderr.write(
-        `[transitionPurchaseOrderStatus] po=${poId} status=${opts.status} FAILED body=${JSON.stringify(resp.body.slice(0, 300))}\n`,
+        `[bulkTransitionPurchaseOrderStatuses] ids_count=${ids.length} ids_sample=${ids.slice(0, 3).join(",")} status=${opts.status} WIRE_FAILED body=${JSON.stringify(resp.body.slice(0, 300))}\n`,
       );
       return {
         success: false,
         errors: msg || `HTTP ${resp.status} — ${resp.body.slice(0, 200)}`,
+        successCount,
+        failureCount,
       };
     }
-    return { success: true, message: "Status updated." };
+    // r:1 — wire succeeded. Report per-id breakdown.
+    if (failureCount > 0) {
+      const msg = Array.isArray(parsed.msg)
+        ? (parsed.msg as unknown[]).join("; ")
+        : String(parsed.msg ?? "");
+      // PR #69 review MEDIUM 6: don't dump the full ids list to
+      // stderr — under log aggregation that creates a durable
+      // (ids → failure) record. Log count + a 3-id sample only.
+      const sampleIds = ids.slice(0, 3).join(",");
+      process.stderr.write(
+        `[bulkTransitionPurchaseOrderStatuses] ids_count=${ids.length} ids_sample=${sampleIds} status=${opts.status} PARTIAL success=${successCount} failed=${failureCount} msg=${JSON.stringify(msg)}\n`,
+      );
+      // PR #69 review HIGH 1: preserve BT's actual message in the
+      // `errors` field so downstream callers (the 8 sites that fall
+      // back to `result.errors ?? "(no detail)"`) keep getting the
+      // human-readable reason instead of degrading silently.
+      return {
+        success: true,
+        message: `Partial: ${successCount} succeeded, ${failureCount} failed.`,
+        errors: msg || undefined,
+        successCount,
+        failureCount,
+      };
+    }
+    return {
+      success: true,
+      message: "Status updated.",
+      successCount,
+      failureCount,
+    };
   }
 
   // ========================================================================
