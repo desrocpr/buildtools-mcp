@@ -81,7 +81,11 @@ function orDash(value: unknown): string {
  */
 function escapeMarkdownInline(s: unknown): string {
   if (s === undefined || s === null) return "";
-  return String(s).replace(/[\\`*_[\]<>]/g, (c) => `\\${c}`);
+  // PR #63 security: newlines in BT-sourced data can break markdown
+  // rows and inject LLM instructions. Replace before backslash-escaping.
+  return String(s)
+    .replace(/[\r\n]+/g, " ")
+    .replace(/[\\`*_[\]<>]/g, (c) => `\\${c}`);
 }
 
 /** Markdown response shorthand. */
