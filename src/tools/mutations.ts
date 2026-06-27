@@ -585,6 +585,48 @@ const TransitionPurchaseOrderStatusSchema = z.object({
 });
 type TransitionPurchaseOrderStatusArgs = z.infer<typeof TransitionPurchaseOrderStatusSchema>;
 
+// bulk_transition_purchase_orders (PR #69) — multi-id workflow tool.
+// Exposes the /purchase-orders/status/update endpoint's native ids[]
+// capability for ops workflows like "send all my Draft POs on
+// project X" or "cancel all my Rejected POs."
+//
+// Why a separate tool (not collapsed into transition_purchase_order_status):
+//   - Cache semantics differ: single-id caches a boolean
+//     succeed/fail; bulk caches per-id breakdown
+//   - Partial-failure UX is fundamentally different (must surface
+//     successCount + failureCount; the single-id tool's prompt is
+//     "from X → Y" which doesn't generalize to N POs)
+//   - LLM tool selection benefits from the explicit name signal
+const BulkTransitionPurchaseOrdersSchema = z.object({
+  purchase_order_ids: z
+    .array(z.number().int().positive())
+    .min(1)
+    .max(50)
+    .describe(
+      "Array of BuildTools purchase order IDs to transition. 1-50 per call. " +
+        "All ids are sent to BT in a single /purchase-orders/status/update request via the endpoint's native `ids[]` support.",
+    ),
+  status: z
+    .union([
+      z.number(),
+      z.enum(["Draft", "Sent", "Confirmed", "Rejected"]),
+    ])
+    .describe(
+      "Target status for ALL listed POs. Numeric code (1-4) or label string. " +
+        "NOTE: Promoting TO Confirmed (3) requires a per-PO canvas-drawn signature this tool doesn't supply — that transition will fail for each PO with 'Signature field is required'.",
+    ),
+  idempotency_key: z
+    .string()
+    .min(8)
+    .max(128)
+    .optional()
+    .describe(
+      "Optional idempotency key. Cache stores the entire batch result (including per-id success/failure breakdown). Retry with same key + same args returns the cached report — no second BT call.",
+    ),
+  confirmation_id: z.string().optional(),
+});
+type BulkTransitionPurchaseOrdersArgs = z.infer<typeof BulkTransitionPurchaseOrdersSchema>;
+
 const DeleteFinancialStatementSchema = z.object({
   statement_ids: z.array(z.number()).min(1).describe("Array of financial statement IDs to delete."),
   project_id: z.number().describe("BuildTools project ID (required for session scoping)."),
@@ -1278,6 +1320,65 @@ export function createMutationTools(
         );
       } catch (err) {
         return formatError(err, "transition_purchase_order_status");
+      }
+    },
+  );
+
+  // bulk_transition_purchase_orders (PR #69) — see schema above
+  const bulkTransitionPOConfirmed = requiresConfirmation<
+    BulkTransitionPurchaseOrdersArgs & { _resolved_status_code?: number }
+  >(
+    "bulk_transition_purchase_orders",
+    (a) => {
+      const code = a._resolved_status_code;
+      const targetLabel = code !== undefined
+        ? `${poStatusLabel(code)} (${code})`
+        : String(a.status);
+      const sampleIds = a.purchase_order_ids.slice(0, 5).join(", ");
+      const suffix = a.purchase_order_ids.length > 5
+        ? `, … (+${a.purchase_order_ids.length - 5} more)`
+        : "";
+      return `Bulk-transition **${a.purchase_order_ids.length}** purchase order(s) to **${targetLabel}**: ${sampleIds}${suffix}.`;
+    },
+    async (a) => {
+      try {
+        const code = a._resolved_status_code;
+        if (code === undefined) {
+          return errorMarkdown(
+            `**Error calling \`bulk_transition_purchase_orders\`**: status code was not resolved`,
+          );
+        }
+        const result = await getApi().bulkTransitionPurchaseOrderStatuses({
+          purchaseOrderIds: a.purchase_order_ids,
+          status: code,
+        });
+        if (!result.success) {
+          // Wire-level failure (BT returned r:0). Report the BT message
+          // verbatim — there's no per-id breakdown to share.
+          return errorMarkdown(
+            `**Bulk transition failed at the wire**: ${String(result.errors ?? "(no detail)")}`,
+          );
+        }
+        // Wire-level success. Surface per-id breakdown.
+        const total = a.purchase_order_ids.length;
+        const succ = result.successCount ?? 0;
+        const fail = result.failureCount ?? 0;
+        if (fail === 0) {
+          return markdown(
+            `All **${total}** purchase order(s) transitioned to **${poStatusLabel(code)}** (${code}).`,
+          );
+        }
+        // Partial success — the bulk result is NOT an error (some
+        // succeeded), but caller needs to act on the failures. Note:
+        // BT doesn't give us per-id results back, only counts. The
+        // caller needs to refetch individual POs to identify which
+        // ones failed; surface this caveat.
+        return markdown(
+          `**Partial bulk transition**: ${succ} of ${total} purchase orders transitioned to **${poStatusLabel(code)}** (${code}); ${fail} failed.\n\n` +
+            `_BT doesn't return per-id results — refetch the POs via \`get_purchase_order\` to identify which ${fail} didn't transition. Common cause: promotion to Confirmed requires a per-PO signature; demote-to-Draft and Sent transitions usually succeed in bulk._`,
+        );
+      } catch (err) {
+        return formatError(err, "bulk_transition_purchase_orders");
       }
     },
   );
@@ -2541,6 +2642,69 @@ export function createMutationTools(
           sessionId,
         );
 
+        storeIdempotencyResult({
+          context: idemContext,
+          result,
+          isExecuteCall: !!data.confirmation_id,
+        });
+        return result;
+      },
+    },
+    // bulk_transition_purchase_orders (PR #69) — multi-id status workflow tool
+    {
+      name: "bulk_transition_purchase_orders",
+      description:
+        "Transition MULTIPLE purchase orders' status in one call via BuildTools' workflow endpoint (`/purchase-orders/status/update` with `ids[]`). " +
+        "Use for ops workflows like 'send all my Draft POs on project X' or 'cancel all my Rejected POs'. " +
+        "Accepts 1-50 PO IDs per call. ALL transition to the same target status. " +
+        "Reports per-id breakdown: total / succeeded / failed. Partial failures are NOT a top-level error — surfaces success count + failure count so you can refetch failing POs individually. " +
+        "WARNING: Promoting TO Confirmed (3) requires a per-PO signature this tool doesn't supply — that transition will fail for every PO. Demote-to-Draft and Sent transitions usually succeed in bulk.",
+      inputSchema: zodToJsonSchema(BulkTransitionPurchaseOrdersSchema),
+      permission: "write:financial",
+      handler: async (rawArgs: unknown, _api: BuildToolsAPI) => {
+        const parsed = BulkTransitionPurchaseOrdersSchema.safeParse(rawArgs ?? {});
+        if (!parsed.success) return formatZodError(parsed.error, "bulk_transition_purchase_orders");
+        const data = parsed.data;
+
+        let resolvedStatusCode: number | undefined;
+        try {
+          resolvedStatusCode = resolvePoStatusCode(data.status);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return errorMarkdown(
+            `**Error calling \`bulk_transition_purchase_orders\`**: ${msg}`,
+          );
+        }
+
+        // Idempotency: cache the WHOLE batch report. Fingerprint
+        // includes the sorted ids so {1,2,3} and {3,2,1} map to the
+        // same cache key (semantically same write).
+        const { confirmation_id: _ci, idempotency_key: _ik, ...semantic } = data;
+        const fingerprintInput = {
+          ...semantic,
+          purchase_order_ids: [...data.purchase_order_ids].sort((a, b) => a - b),
+        };
+        const idemContext = checkIdempotency({
+          toolName: "bulk_transition_purchase_orders",
+          idempotencyStore,
+          sessionId,
+          idempotencyKey: data.idempotency_key,
+          fingerprintInput,
+        });
+        if (idemContext.replayResult) return idemContext.replayResult;
+        if (idemContext.mismatchError) return idemContext.mismatchError;
+
+        const result = await bulkTransitionPOConfirmed(
+          { ...data, _resolved_status_code: resolvedStatusCode },
+          store,
+          sessionId,
+        );
+
+        // Cache on execute calls, even when partial-failure (the
+        // result is NOT isError in that case — it's a status
+        // report). Mirrors architect's note on bulk cache semantics:
+        // a 9-of-10 success is morally not an error and should be
+        // cached so retries replay the report.
         storeIdempotencyResult({
           context: idemContext,
           result,
