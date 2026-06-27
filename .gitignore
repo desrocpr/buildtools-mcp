@@ -4,3 +4,10 @@ dist/
 .env
 .env.local
 .DS_Store
+
+# Test coverage reports (auto-generated)
+coverage/
+
+# Local data dumps / scratch
+omega_financial_statements.csv
+*.csv
