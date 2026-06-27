@@ -47,6 +47,7 @@ import type { Server as HttpServer } from "node:http";
 
 import { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { ConfirmationStore } from "../confirm/index.js";
+import { IdempotencyStore } from "../idempotency/index.js";
 import {
   attachmentTools,
   budgetTools,
@@ -113,6 +114,7 @@ function buildPerSessionServer(opts: {
   sessionId: string;
   sessionStore: SessionStore;
   confirmationStore: ConfirmationStore;
+  idempotencyStore: IdempotencyStore;
   defaultTenant?: string;
   /**
    * Phase 6c (MOS-328): when present, audit log writes go to
@@ -173,6 +175,7 @@ function buildPerSessionServer(opts: {
     () => resolveApi(),
     opts.confirmationStore,
     confirmationSubject,
+    opts.idempotencyStore,
   );
   const sessionTool = createSessionCredentialsTool({
     sessionStore: opts.sessionStore,
@@ -464,6 +467,17 @@ export async function startHttpTransport(
   );
   sweepInterval.unref();
 
+  // Process-wide IdempotencyStore (PR #60). One cache shared across
+  // sessions — entries are namespaced by user.id inside the store so
+  // cross-session collisions on the same key are impossible. Sweep
+  // unref'd so the express process exits cleanly.
+  const idempotencyStore = new IdempotencyStore();
+  const idemSweep = setInterval(
+    () => idempotencyStore.sweep(),
+    idempotencyStore.ttlMilliseconds,
+  );
+  idemSweep.unref();
+
   // Map sessionId → live SSE transport, used by /messages to route POST bodies
   // back into the right SSE stream.
   const transports = new Map<string, SSEServerTransport>();
@@ -614,6 +628,7 @@ export async function startHttpTransport(
       sessionId,
       sessionStore,
       confirmationStore,
+      idempotencyStore,
       defaultTenant: opts.defaultTenant,
       authDb: resolverDb,
     });

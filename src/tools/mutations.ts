@@ -19,6 +19,7 @@ import {
 } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 import { requiresConfirmation, type ConfirmationStore } from "../confirm/index.js";
+import { IdempotencyStore } from "../idempotency/index.js";
 
 import type { ToolDefinition, ToolResult } from "./projects.js";
 
@@ -253,6 +254,14 @@ const UpdatePurchaseOrderSchema = z.object({
     .describe(
       "After the save succeeds, re-fetch the PO and confirm the result matches intent. Default true. Set false to skip the verification fetch (saves one HTTP call; useful for high-throughput batch updates).",
     ),
+  idempotency_key: z
+    .string()
+    .min(8)
+    .max(128)
+    .optional()
+    .describe(
+      "Optional client-supplied idempotency key. When set, a successful execution is cached for 1 hour. A retry with the SAME key + same args returns the cached result immediately (no BT call) — useful when an ambiguous failure leaves you unsure whether the first call took effect. Reusing the same key with DIFFERENT args returns an error so accidental key reuse can't apply different changes.",
+    ),
   confirmation_id: z.string().optional(),
 }).refine(
   (d) => !(d.items !== undefined && d.items_append !== undefined),
@@ -340,6 +349,13 @@ export function createMutationTools(
    * Field name `sessionId` is a historical leftover.
    */
   sessionId?: string,
+  /**
+   * Optional idempotency cache. When provided, mutation tools that
+   * accept an `idempotency_key` arg consult the cache before
+   * confirmation and after success. Pass undefined to disable the
+   * cache (every call hits BT fresh — historical behavior).
+   */
+  idempotencyStore?: IdempotencyStore,
 ): ToolDefinition[] {
   // -- create_project -------------------------------------------------------
   const createProjectConfirmed = requiresConfirmation<CreateProjectArgs>(
@@ -1236,6 +1252,46 @@ export function createMutationTools(
         if (!parsed.success) return formatZodError(parsed.error, "update_purchase_order");
         const data = parsed.data;
 
+        // Idempotency check (only when the cache is wired and the
+        // caller passed a key). We do this BEFORE the confirmation
+        // flow so a retry of an already-successful call returns the
+        // cached result immediately — no second prompt, no second BT
+        // call. Fingerprint excludes `confirmation_id` (rotates per
+        // call) and `idempotency_key` itself (already in the cache key).
+        let idempotencyCacheKey: string | undefined;
+        let idempotencyArgsFingerprint: string | undefined;
+        if (idempotencyStore && data.idempotency_key) {
+          idempotencyCacheKey = IdempotencyStore.buildCacheKey(
+            "update_purchase_order",
+            sessionId,
+            data.idempotency_key,
+          );
+          const { confirmation_id: _ci, idempotency_key: _ik, ...semantic } = data;
+          idempotencyArgsFingerprint = IdempotencyStore.fingerprintArgs(semantic);
+          const lookup = idempotencyStore.lookup(
+            idempotencyCacheKey,
+            idempotencyArgsFingerprint,
+          );
+          if (lookup.kind === "hit") {
+            // Replay the original result with a banner so the caller
+            // knows this wasn't a fresh write.
+            const original = lookup.result;
+            const replayNote =
+              `_Idempotency replay: returning cached result for key \`${escapeMarkdownInline(data.idempotency_key)}\` — no BT call was made. Cache TTL ${idempotencyStore.ttlMinutes} min._\n\n`;
+            return {
+              ...original,
+              content: original.content.map((c) =>
+                "text" in c ? { ...c, text: replayNote + c.text } : c,
+              ),
+            };
+          }
+          if (lookup.kind === "mismatch") {
+            return errorMarkdown(
+              `**Idempotency key reused with different args.** The key \`${escapeMarkdownInline(data.idempotency_key)}\` was previously used (within the last ${idempotencyStore.ttlMinutes} min) with a DIFFERENT set of args. Use a fresh key per distinct write, or wait for the cache to expire.`,
+            );
+          }
+        }
+
         // Resolve the status label → code ONCE up-front, fail-fast on
         // unknown labels (Zod blocks them already, but a programmatic
         // internal caller bypassing the schema would otherwise reach
@@ -1264,7 +1320,7 @@ export function createMutationTools(
           resolvedCompanyName = await lookupCompanyName(data.company_id);
         }
 
-        return updatePOConfirmed(
+        const result = await updatePOConfirmed(
           {
             ...data,
             _resolved_company_name: resolvedCompanyName,
@@ -1273,6 +1329,30 @@ export function createMutationTools(
           store,
           sessionId,
         );
+
+        // Cache the result on success only — never on confirmation
+        // prompts (no commit happened yet) and never on errors (the
+        // caller should be able to retry without hitting a cached
+        // failure). `isError === true` is the failure marker;
+        // confirmation prompts have isError undefined AND no
+        // confirmation_id was consumed — but distinguishing those at
+        // this layer is hard. We use a simpler proxy: cache only when
+        // this WAS the execute call (confirmation_id was passed in)
+        // AND the result is not an error.
+        if (
+          idempotencyStore &&
+          idempotencyCacheKey &&
+          idempotencyArgsFingerprint &&
+          data.confirmation_id &&
+          !result.isError
+        ) {
+          idempotencyStore.store(
+            idempotencyCacheKey,
+            idempotencyArgsFingerprint,
+            result,
+          );
+        }
+        return result;
       },
     },
     makeTool(

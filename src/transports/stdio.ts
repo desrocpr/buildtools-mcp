@@ -20,6 +20,7 @@ import {
 import { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { loadConfigFromEnv } from "../client/config.js";
 import { ConfirmationStore } from "../confirm/index.js";
+import { IdempotencyStore } from "../idempotency/index.js";
 import {
   attachmentTools,
   budgetTools,
@@ -80,10 +81,23 @@ export async function startStdioTransport(): Promise<Server> {
   const SWEEP_INTERVAL_MS = confirmationStore.ttlMilliseconds;
   setInterval(() => confirmationStore.sweep(), SWEEP_INTERVAL_MS).unref();
 
+  // Idempotency cache for mutation tools (PR #60). Process-local, sweep
+  // unref'd so stdio process exits cleanly on Claude Desktop disconnect.
+  const idempotencyStore = new IdempotencyStore();
+  setInterval(
+    () => idempotencyStore.sweep(),
+    idempotencyStore.ttlMilliseconds,
+  ).unref();
+
   // -------------------------------------------------------------------------
   // Tool registry
   // -------------------------------------------------------------------------
-  const mutationTools = createMutationTools(() => getApi(), confirmationStore);
+  const mutationTools = createMutationTools(
+    () => getApi(),
+    confirmationStore,
+    undefined,
+    idempotencyStore,
+  );
 
   const toolsByName: Map<string, ToolDefinition> = new Map([
     ...projectTools.map((t) => [t.name, t] as const),
