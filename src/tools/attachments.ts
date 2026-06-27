@@ -431,10 +431,179 @@ export const downloadAttachmentTool: ToolDefinition = {
 };
 
 // ---------------------------------------------------------------------------
+// upload_attachment
+// ---------------------------------------------------------------------------
+
+/**
+ * Module codes BT uses to scope an upload to an entity. Verified live
+ * 2026-06-27 against `file.buildtools.app/files`. The schema accepts a
+ * friendly `entity_type` string and resolves to the code internally so
+ * callers never have to know the integer.
+ */
+const ENTITY_TYPE_TO_MODULE: Record<string, number> = {
+  project: 1000,
+  purchase_order: 1500,
+};
+
+const UploadAttachmentInputSchema = z.object({
+  entity_type: z
+    .enum(["project", "purchase_order"])
+    .describe(
+      "Where the file will be attached. 'project' puts it on the project's Documents tab; 'purchase_order' attaches it to a specific PO (visible on the PO's Email/attachments tab).",
+    ),
+  entity_id: z
+    .number()
+    .describe(
+      "The entity's primary key. For entity_type='project' this is the project_id; for 'purchase_order' it's the PO id.",
+    ),
+  project_id: z
+    .number()
+    .optional()
+    .describe(
+      "The parent project's id. REQUIRED for entity_type='purchase_order' (BT scopes every upload under a project, even when the file's module is something else). Optional for entity_type='project' (defaults to entity_id).",
+    ),
+  filename: z
+    .string()
+    .min(1)
+    .describe(
+      "Original filename including the extension (e.g. 'ADMO55739-F.pdf'). The extension drives BT's UI rendering (preview vs. download).",
+    ),
+  content_type: z
+    .string()
+    .optional()
+    .describe(
+      "MIME type (e.g. 'application/pdf'). Default 'application/octet-stream'. Pass the correct type so BT renders the file properly in its UI.",
+    ),
+  file_base64: z
+    .string()
+    .min(1)
+    .describe(
+      "Base64-encoded file bytes. Max 25 MB decoded. For text files use the same encoding (just base64 the raw bytes). NOT a data: URL prefix — just the base64 payload.",
+    ),
+});
+
+type UploadAttachmentInput = z.infer<typeof UploadAttachmentInputSchema>;
+
+async function uploadAttachmentHandler(
+  args: unknown,
+  api: BuildToolsAPI,
+): Promise<ToolResult> {
+  const parsed = UploadAttachmentInputSchema.safeParse(args ?? {});
+  if (!parsed.success) {
+    const issues = parsed.error.issues
+      .map((i) => {
+        const path = i.path.length > 0 ? i.path.join(".") : "(root)";
+        return `- \`${path}\`: ${i.message}`;
+      })
+      .join("\n");
+    return errorMarkdown(
+      `**Invalid input for \`upload_attachment\`:**\n${issues}`,
+    );
+  }
+  const input: UploadAttachmentInput = parsed.data;
+
+  const moduleCode = ENTITY_TYPE_TO_MODULE[input.entity_type];
+  if (moduleCode === undefined) {
+    // Defensive — Zod's enum should make this unreachable.
+    return errorMarkdown(
+      `**Invalid entity_type**: "${input.entity_type}". Expected one of: ${Object.keys(ENTITY_TYPE_TO_MODULE).join(", ")}.`,
+    );
+  }
+
+  // Decode base64. Use Buffer.from with strict=true semantics; trim
+  // surrounding whitespace and reject data: URL prefixes so callers
+  // who pass them get a clear error rather than upload garbage.
+  const b64 = input.file_base64.trim();
+  // Case-insensitive check: `DATA:...` would otherwise pass and
+  // `Buffer.from(..., "base64")` would silently strip the non-base64
+  // prefix chars, uploading a slightly-wrong file with no helpful
+  // error. URI scheme matching is case-insensitive per RFC 3986.
+  if (b64.toLowerCase().startsWith("data:")) {
+    return errorMarkdown(
+      "**Invalid `file_base64`**: looks like a `data:` URL. Strip the `data:<mime>;base64,` prefix — pass ONLY the base64 payload.",
+    );
+  }
+  let buf: Buffer;
+  try {
+    buf = Buffer.from(b64, "base64");
+  } catch {
+    return errorMarkdown("**Invalid `file_base64`**: could not decode as base64.");
+  }
+  if (buf.length === 0) {
+    return errorMarkdown(
+      "**Invalid `file_base64`**: decoded to zero bytes. Did the base64 string include only whitespace or an empty payload?",
+    );
+  }
+
+  // Resolve project_id. For project uploads it can default to entity_id.
+  // For PO uploads it's required (BT scopes uploads under a project).
+  let projectId = input.project_id;
+  if (projectId === undefined) {
+    if (input.entity_type === "project") {
+      projectId = input.entity_id;
+    } else {
+      return errorMarkdown(
+        `**Missing \`project_id\`**: required when entity_type='${input.entity_type}'. Use \`get_purchase_order\` to look up the parent project id.`,
+      );
+    }
+  }
+
+  try {
+    const file = await api.uploadAttachment({
+      projectId,
+      module: moduleCode,
+      moduleId: input.entity_id,
+      fileBuffer: buf,
+      filename: input.filename,
+      contentType: input.content_type,
+    });
+    const sizeKb = (file.size / 1024).toFixed(1);
+    const entityLabel =
+      input.entity_type === "purchase_order"
+        ? `purchase order #${input.entity_id}`
+        : `project #${projectId}`;
+    // `file.name` is BT's `display_name` which already includes the
+    // extension (e.g. "ADMO55739-F.pdf"). The separate `extension`
+    // field is for filter logic, not display — appending it here would
+    // double-print as "ADMO55739-F.pdf.pdf".
+    return markdown(
+      `**Attachment uploaded** to ${entityLabel}.\n\n` +
+        `- **File**: ${file.name}\n` +
+        `- **File ID**: ${file.fileId}\n` +
+        `- **Size**: ${sizeKb} KB\n` +
+        `- **Type**: ${file.mimeType || input.content_type || "—"}\n` +
+        `- **Download**: ${file.downloadUrl}\n` +
+        `- **Uploaded**: ${file.createdAt}\n\n` +
+        `_The file is now visible via \`list_project_attachments(${projectId})\`._`,
+    );
+  } catch (err) {
+    return formatError(err, "upload_attachment");
+  }
+}
+
+export const uploadAttachmentTool: ToolDefinition = {
+  name: "upload_attachment",
+  description:
+    "[v1 2026-06-27] Upload a file to BuildTools and associate it with a project or purchase order. " +
+    "Pass the file as `file_base64` (base64-encoded bytes, max 25 MB decoded) along with `filename`, `content_type`, " +
+    "`entity_type` ('project' or 'purchase_order'), and `entity_id`. For PO uploads also pass `project_id` (the PO's parent project). " +
+    "Returns the assigned file_id + download URL. The uploaded file becomes visible via `list_project_attachments`.",
+  inputSchema: zodToJsonSchema(UploadAttachmentInputSchema),
+  // Reuse `write:operations` — already provisioned for the editor role
+  // and semantically closest (project documents and PO attachments are
+  // operational artifacts). Adding a fine-grained `write:attachments`
+  // permission would require a schema migration + role rotation; defer
+  // until usage patterns justify it.
+  permission: "write:operations",
+  handler: uploadAttachmentHandler,
+};
+
+// ---------------------------------------------------------------------------
 // Exported registry
 // ---------------------------------------------------------------------------
 
 export const attachmentTools: ToolDefinition[] = [
   listProjectAttachmentsTool,
   downloadAttachmentTool,
+  uploadAttachmentTool,
 ];

@@ -43,6 +43,8 @@
  *     they still call `ensureAuthenticated()` up-front.
  */
 
+import { randomBytes } from "node:crypto";
+
 import {
   BuildToolsAuthError,
   BuildToolsNetworkError,
@@ -564,6 +566,14 @@ export class BuildToolsAPI {
     // (Most-recent call wins over constructor-seeded values.)
     this.username = email;
     this.password = password;
+
+    // Invalidate the cached App.bt.token from any prior session — the
+    // value is session-bound and the upload retry logic in
+    // `uploadAttachment` only re-harvests on a 401/403, not on every
+    // re-auth. Without this clear, a session rotation on the BT side
+    // followed by a manual `authenticate()` call would leave the
+    // upload path using a stale token until the first failure.
+    this.uploadToken = null;
 
     // 1. GET login page (NO redirect follow) to harvest CSRF `_token`.
     const loginPage = await this.request(
@@ -1219,6 +1229,221 @@ export class BuildToolsAPI {
     throw new BuildToolsServerError(
       `Too many redirects fetching ${urlString}`,
     );
+  }
+
+  /**
+   * App.bt.token cache. The token is emitted as inline JSON on most
+   * authenticated pages (e.g. /documents?PR[]=<id>). One value per
+   * authenticated session — re-harvested if the session is rotated.
+   */
+  private uploadToken: string | null = null;
+
+  /**
+   * Harvest the `App.bt.token` value used by the file-upload endpoint.
+   * Lazily fetches the project's documents page (which is small enough
+   * for a cheap one-time scrape) and caches the result. Re-thrown on
+   * non-200 / unparseable response — uploads can't proceed without it.
+   */
+  private async getUploadToken(projectId: string | number): Promise<string> {
+    if (this.uploadToken) return this.uploadToken;
+    await this.ensureAuthenticated();
+    const resp = await this.request(
+      `${this.baseUrl}/documents?PR[]=${projectId}`,
+      {
+        headers: {
+          Accept: "text/html",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+    if (resp.status !== 200) {
+      throw new BuildToolsServerError(
+        `Could not load documents page to harvest upload token (HTTP ${resp.status})`,
+      );
+    }
+    // The token is emitted as: bt: { token: '11134.6.764751e99c', ... }
+    const match = resp.body.match(/bt:\s*\{\s*token:\s*['"]([^'"]+)['"]/);
+    if (!match) {
+      throw new BuildToolsServerError(
+        "Could not find App.bt.token in the documents page HTML — BuildTools template may have drifted.",
+      );
+    }
+    this.uploadToken = match[1];
+    return this.uploadToken;
+  }
+
+  /**
+   * Uploads a file to BuildTools and associates it with the given
+   * entity. Verified live 2026-06-27 against `https://file.buildtools.app/files`.
+   *
+   * Mechanism: POST multipart/form-data to file.buildtools.app/files
+   * carrying the App.bt.token harvested from /documents?PR[]=<id>, the
+   * file payload as `files[]`, plus entity-context fields:
+   *   - `project_id` (required — every entity sits under a project)
+   *   - `module`     (1000 = project documents, 1500 = purchase order,
+   *                   …extensible per BT's module catalog)
+   *   - `module_id`  (the entity's primary key in its module)
+   *
+   * Returns the file metadata BuildTools assigns: its file_id, hashes,
+   * download/public URLs, etc. The same file then appears in
+   * `getProjectAttachments(projectId)` and (for module=1500) on the PO's
+   * email/attachments tab.
+   *
+   * Size cap defaults to 25 MB to match the download path's limit. The
+   * BuildTools UI reports cleaner errors for oversize than the server's
+   * raw 413, so we reject early.
+   */
+  async uploadAttachment(opts: {
+    projectId: string | number;
+    /** Module code: 1000=documents, 1500=purchase-orders. */
+    module: number;
+    /** Entity id within the module (project_id for module=1000; PO id for module=1500). */
+    moduleId: string | number;
+    /** Raw bytes of the file. */
+    fileBuffer: Buffer;
+    /** Original filename including extension. */
+    filename: string;
+    /** MIME type. Defaults to application/octet-stream. */
+    contentType?: string;
+    /** Max upload size in bytes. Default 25 MB. */
+    maxSizeBytes?: number;
+  }): Promise<{
+    fileId: number;
+    hash: string;
+    name: string;
+    extension: string;
+    mimeType: string;
+    size: number;
+    downloadUrl: string;
+    publicUrl: string;
+    module: string;
+    moduleId: string;
+    projectId: string;
+    createdAt: string;
+  }> {
+    await this.ensureAuthenticated();
+    const maxSize = opts.maxSizeBytes ?? 25 * 1024 * 1024;
+    if (opts.fileBuffer.length > maxSize) {
+      throw new BuildToolsServerError(
+        `File ${opts.filename} is ${opts.fileBuffer.length} bytes; exceeds max ${maxSize} bytes.`,
+      );
+    }
+    if (!opts.filename) {
+      throw new BuildToolsServerError("filename is required");
+    }
+
+    // Sanitize the filename + content-type BEFORE interpolating into
+    // the multipart header. Any literal `\r` / `\n` (or `"`) in either
+    // string would let an attacker close the header early and inject
+    // arbitrary new headers — classic CRLF injection in a multipart
+    // boundary. We strip control chars; non-ASCII filenames lose
+    // fidelity here (RFC 5987's `filename*=UTF-8''...` would preserve
+    // them, but BT's parser is the bottleneck and we haven't probed
+    // that surface).
+    const safeFilename = opts.filename.replace(/["\r\n]/g, "");
+    const safeContentType = (opts.contentType ?? "application/octet-stream")
+      .replace(/[\r\n]/g, "");
+
+    // Build a manual multipart body — we don't pull in form-data as a
+    // dep for a single call site. CRLF line endings per RFC 7578.
+    // Boundary: 32 hex chars from crypto.randomBytes (~128 bits of
+    // entropy) so a binary payload can never collide with it — the
+    // previous `Math.random()` form was non-crypto and gave only ~50
+    // bits, theoretically race-able for large file uploads.
+    const CRLF = "\r\n";
+    const uploadUrl = "https://file.buildtools.app/files";
+
+    // Retry-once wrapper around the actual upload — if BT returns 401/403
+    // we assume the cached App.bt.token has been rotated server-side,
+    // clear the cache, re-harvest, and try again. Without this a long-
+    // running MCP session would silently fail uploads after the first
+    // session rotation.
+    let attempt = 0;
+    let resp: Response;
+    let respText = "";
+    while (true) {
+      const token = await this.getUploadToken(opts.projectId);
+      const boundary = `----BTMCPBoundary${randomBytes(16).toString("hex")}`;
+      const enc = (s: string) => Buffer.from(s, "utf8");
+      const fieldPart = (name: string, value: string): Buffer =>
+        enc(
+          `--${boundary}${CRLF}` +
+            `Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}` +
+            `${value}${CRLF}`,
+        );
+      const filePartHeader = enc(
+        `--${boundary}${CRLF}` +
+          `Content-Disposition: form-data; name="files[]"; filename="${safeFilename}"${CRLF}` +
+          `Content-Type: ${safeContentType}${CRLF}${CRLF}`,
+      );
+      const body = Buffer.concat([
+        fieldPart("token", token),
+        fieldPart("project_id", String(opts.projectId)),
+        fieldPart("module", String(opts.module)),
+        fieldPart("module_id", String(opts.moduleId)),
+        filePartHeader,
+        opts.fileBuffer,
+        enc(`${CRLF}--${boundary}--${CRLF}`),
+      ]);
+
+      resp = await this.fetchImpl(uploadUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          Accept: "application/json",
+          // Cookie jar is keyed by HOSTNAME — passing the full URL
+          // resolves to an empty jar entry and sends no cookies. The
+          // upload currently succeeds because file.buildtools.app
+          // authenticates via the `token` form field alone, but BT
+          // could add session validation at any time and we'd silently
+          // 403; doing this right today removes that latent risk.
+          Cookie: this.getCookieString(new URL(uploadUrl).hostname),
+        },
+        body,
+      });
+      respText = await resp.text();
+      if (resp.status === 200) break;
+      // Retry once on auth-style failures with a fresh token.
+      if ((resp.status === 401 || resp.status === 403) && attempt === 0) {
+        attempt++;
+        this.uploadToken = null;
+        continue;
+      }
+      throw new BuildToolsServerError(
+        `Upload failed (HTTP ${resp.status}): ${respText.slice(0, 300)}`,
+      );
+    }
+
+    let parsed: { data?: { file?: Record<string, unknown> } };
+    try {
+      parsed = JSON.parse(respText);
+    } catch {
+      throw new BuildToolsServerError(
+        `Upload returned non-JSON response: ${respText.slice(0, 200)}`,
+      );
+    }
+    const file = parsed.data?.file;
+    if (!file || typeof file !== "object") {
+      throw new BuildToolsServerError(
+        `Upload response missing data.file: ${respText.slice(0, 200)}`,
+      );
+    }
+
+    return {
+      fileId: Number(file.file_id) || 0,
+      hash: String(file.hash ?? ""),
+      name: String(file.display_name ?? file.name ?? ""),
+      extension: String(file.extension ?? ""),
+      mimeType: String(file.mime_type ?? ""),
+      size: Number(file.size) || 0,
+      downloadUrl: String(file.download_url ?? ""),
+      publicUrl: String(file.public_url ?? ""),
+      module: String(file.module ?? ""),
+      moduleId: String(file.module_id ?? ""),
+      projectId: String(file.project_id ?? ""),
+      createdAt: String(file.created_at ?? ""),
+    };
   }
 
   // ========================================================================
