@@ -32,6 +32,7 @@ interface FakeApiOverrides {
   searchCompanies?: BuildToolsAPI["searchCompanies"];
   createPurchaseOrder?: BuildToolsAPI["createPurchaseOrder"];
   updatePurchaseOrder?: BuildToolsAPI["updatePurchaseOrder"];
+  transitionPurchaseOrderStatus?: BuildToolsAPI["transitionPurchaseOrderStatus"];
   getCompany?: BuildToolsAPI["getCompany"];
   getPurchaseOrder?: BuildToolsAPI["getPurchaseOrder"];
 }
@@ -534,11 +535,22 @@ describe("update_purchase_order — status by label, real errors, verify-after-w
     expect(text).toMatch(/status → Sent \(2\)/);
   });
 
-  it("forwards the resolved status CODE (not the label) to the API layer", async () => {
+  it("forwards the resolved status CODE through transitionPurchaseOrderStatus (PR #61: status changes route through /status/update, not /save)", async () => {
+    // After PR #61 status-only changes no longer touch /save —
+    // updatePurchaseOrder is skipped entirely and the status goes
+    // through the dedicated workflow endpoint. This test pins that
+    // routing change so a future refactor can't silently restore the
+    // brittle /save status field.
     const updatePurchaseOrder = vi.fn().mockResolvedValue({
       success: true, purchaseOrderId: 39752, message: "saved",
     });
-    const api = fakeApi({ updatePurchaseOrder: updatePurchaseOrder as any });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      success: true, message: "Status updated.",
+    });
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
     const store = mkStore();
     const tool = findUpdatePoTool(api, store);
 
@@ -547,8 +559,14 @@ describe("update_purchase_order — status by label, real errors, verify-after-w
     const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
     await tool.handler({ ...args, confirmation_id: confirmationId, verify: false }, api);
 
-    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
-    expect(updatePurchaseOrder.mock.calls[0][0].status).toBe(3);
+    // Status-only call: /save is NOT touched (no content changes).
+    expect(updatePurchaseOrder).not.toHaveBeenCalled();
+    // The dedicated transition endpoint gets the resolved code.
+    expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(1);
+    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({
+      purchaseOrderId: 39752,
+      status: 3,
+    });
   });
 
   it("surfaces the API's error string verbatim (no JSON.stringify wrapping) — fixes the 'Failed: \"\"' bug", async () => {
@@ -1153,5 +1171,240 @@ describe("update_purchase_order — idempotency guard (PR #60)", () => {
     );
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("idempotency_key");
+  });
+});
+
+describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", () => {
+  // Helper that wires the locked-PO snapshot into the pre-fetch
+  const confirmedSnapshot = {
+    id: 39201, projectId: 185936, name: "X", number: "", prefix: "PO",
+    status: 3, // Confirmed = write-locked
+    description: "",
+    companyId: 15, companyName: "Euro Stone Craft",
+    items: [{ id: 1, budgetCategoryId: 1680, budgetCategoryCode: "7051", budgetCategoryName: "Countertops Allowance", total: "17380.47", notes: "", internalNotes: "", invoiceRelated: "0.00", amounts: [], companyId: 15, companyName: "Euro Stone Craft" }],
+    totalNumeric: 17380.47,
+  };
+
+  it("rejects a content update on a locked PO when unlock_if_locked is NOT set (lock error surfaces via the API layer)", async () => {
+    // When unlock_if_locked is off, the tool layer doesn't pre-fetch
+    // (saves an HTTP call on the common non-locked path) and relies on
+    // updatePurchaseOrder's own proactive lock check. The API layer
+    // returns the lock error; the tool layer surfaces it verbatim. We
+    // mock updatePurchaseOrder to return exactly what the API layer
+    // would.
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: false,
+      currentStatus: 3,
+      errors:
+        "PO #39201 is in **Confirmed** state (code 3) — BuildTools' /purchase-orders/save endpoint refuses ALL writes on it. To apply changes anyway, re-invoke with `unlock_if_locked: true`.",
+    });
+    const transitionPurchaseOrderStatus = vi.fn();
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+    const args = {
+      purchase_order_id: 39201,
+      name: "renamed",
+      verify: false,
+      // unlock_if_locked NOT set
+    };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const result = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Confirmed");
+    expect(textOf(result)).toContain("unlock_if_locked");
+    // No status transitions attempted — we never entered the
+    // auto-transition path.
+    expect(transitionPurchaseOrderStatus).not.toHaveBeenCalled();
+  });
+
+  it("orchestrates demote → /save → restore-to-Sent when unlock_if_locked is set against a Confirmed PO", async () => {
+    const getPurchaseOrder = vi
+      .fn()
+      // Pre-snapshot (outer handler) — locked
+      .mockResolvedValueOnce(confirmedSnapshot)
+      // Post-save verify fetch — items now $19533.81, status now Sent
+      .mockResolvedValueOnce({
+        ...confirmedSnapshot,
+        status: 2,
+        items: [{ ...confirmedSnapshot.items[0], total: "19533.81" }],
+        totalNumeric: 19533.81,
+      });
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39201, message: "saved",
+    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      success: true, message: "Status updated.",
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+    const args = {
+      purchase_order_id: 39201,
+      items: [{ budget_code: "7051", description: "ADMO55739-F", total: 19533.81 }],
+      unlock_if_locked: true,
+      // No `status` passed → restore defaults to Sent (2)
+    };
+    const prompt = await tool.handler(args, api);
+    const promptText = textOf(prompt);
+    // Confirmation prompt surfaces the full plan + side-effect warning.
+    expect(promptText).toContain("Auto-transition");
+    expect(promptText).toContain("Confirmed → Draft → apply edits → Sent");
+    expect(promptText).toContain("vendor will see");
+
+    const confirmationId = promptText.match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+    expect(exec.isError).toBeFalsy();
+
+    // Sequence: demote(1) → /save → restore(2).
+    expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(2);
+    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({ purchaseOrderId: 39201, status: 1 });
+    expect(transitionPurchaseOrderStatus.mock.calls[1][0]).toEqual({ purchaseOrderId: 39201, status: 2 });
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
+    // /save MUST NOT carry a status field — that's the whole decoupling point.
+    expect(updatePurchaseOrder.mock.calls[0][0].status).toBeUndefined();
+
+    const execText = textOf(exec);
+    expect(execText).toContain("demoted Confirmed → Draft");
+    expect(execText).toContain("applied content changes");
+    expect(execText).toContain("set status → Sent");
+  });
+
+  it("auto-transition: restores to CALLER's target status if provided (not the default Sent)", async () => {
+    const getPurchaseOrder = vi
+      .fn()
+      .mockResolvedValueOnce(confirmedSnapshot)
+      .mockResolvedValueOnce({ ...confirmedSnapshot, status: 4 }); // Rejected
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39201, message: "saved",
+    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      success: true, message: "ok",
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+    const args = {
+      purchase_order_id: 39201,
+      name: "renamed",
+      status: "Rejected" as const,
+      unlock_if_locked: true,
+      verify: false,
+    };
+    const prompt = await tool.handler(args, api);
+    expect(textOf(prompt)).toContain("Confirmed → Draft → apply edits → Rejected");
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    // Restore target = 4 (Rejected), not the default Sent.
+    expect(transitionPurchaseOrderStatus.mock.calls[1][0]).toEqual({ purchaseOrderId: 39201, status: 4 });
+  });
+
+  it("auto-transition: rolls back to original status when the /save step fails between demote and restore", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue(confirmedSnapshot);
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: false, errors: "HTTP 500 — fake server failure",
+    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      success: true, message: "ok",
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+    const args = {
+      purchase_order_id: 39201,
+      items: [{ budget_code: "7051", description: "x", total: 100 }],
+      unlock_if_locked: true,
+      verify: false,
+    };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const result = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toContain("Failed to update PO #39201");
+    expect(text).toContain("HTTP 500");
+    expect(text).toContain("Restored to original");
+
+    // Sequence: demote(1) → /save (fails) → restore(3 — original Confirmed)
+    expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(2);
+    expect(transitionPurchaseOrderStatus.mock.calls[0][0].status).toBe(1);
+    expect(transitionPurchaseOrderStatus.mock.calls[1][0].status).toBe(3);
+  });
+
+  it("auto-transition: when the rollback ALSO fails, surfaces a loud 'PO stranded in Draft' message", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue(confirmedSnapshot);
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: false, errors: "save failed",
+    });
+    const transitionPurchaseOrderStatus = vi
+      .fn()
+      .mockResolvedValueOnce({ success: true, message: "demoted" })
+      .mockResolvedValueOnce({ success: false, errors: "restore failed too" });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+    const args = {
+      purchase_order_id: 39201,
+      items: [{ budget_code: "7051", description: "x", total: 100 }],
+      unlock_if_locked: true,
+      verify: false,
+    };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const result = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toContain("Could not restore to Confirmed");
+    expect(text).toContain("PO is now in Draft");
+    expect(text).toContain("fix manually in the BT UI");
+  });
+
+  it("auto-transition: aborts cleanly when the demote step itself fails (PO unchanged)", async () => {
+    const getPurchaseOrder = vi.fn().mockResolvedValue(confirmedSnapshot);
+    const updatePurchaseOrder = vi.fn();
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      success: false, errors: "BT refused demote",
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+    const args = {
+      purchase_order_id: 39201,
+      items: [{ budget_code: "7051", description: "x", total: 100 }],
+      unlock_if_locked: true,
+      verify: false,
+    };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const result = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Auto-transition: demote failed");
+    expect(textOf(result)).toContain("PO unchanged");
+    // /save was never attempted.
+    expect(updatePurchaseOrder).not.toHaveBeenCalled();
+    // Only the one demote attempt — no follow-up.
+    expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(1);
   });
 });

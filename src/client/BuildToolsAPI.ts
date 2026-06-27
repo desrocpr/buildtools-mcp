@@ -165,12 +165,14 @@ export function formatPurchaseOrderLockError(poId: number, statusCode: number): 
   const label = PURCHASE_ORDER_STATUS_LABELS[statusCode] ?? `code ${statusCode}`;
   return (
     `PO #${poId} is in **${label}** state (code ${statusCode}) — ` +
-    `BuildTools locks ALL writes on this PO via /purchase-orders/save, ` +
-    `including status-only transitions. Verified live: even a no-op save ` +
-    `returns HTTP 403 with empty body. ` +
-    `Workarounds: (a) void this PO in the BT web UI and create a replacement ` +
-    `via create_purchase_order, or (b) contact a BT admin to demote it out ` +
-    `of ${label} (no API path is exposed for this).`
+    `BuildTools' /purchase-orders/save endpoint refuses ALL writes on it ` +
+    `(verified live: even a no-op save returns HTTP 403). ` +
+    `**To apply changes anyway, re-invoke with \`unlock_if_locked: true\`** ` +
+    `— the tool will demote → apply edits → restore to Sent (so the vendor ` +
+    `re-acknowledges the change) via the workflow endpoint ` +
+    `\`/purchase-orders/status/update\`. ` +
+    `Alternatives: (a) void this PO in the BT web UI and create a replacement ` +
+    `via create_purchase_order, or (b) edit in the BT web UI directly.`
   );
 }
 
@@ -3641,6 +3643,115 @@ export class BuildToolsAPI {
       `[updatePurchaseOrder] po=${poId} project=${currentProjectId} save FAILED status=${status} body=${JSON.stringify(bodyPreview)}\n`,
     );
     return { success: false, errors: errorParts.join(" — ") };
+  }
+
+  /**
+   * Transitions a PO's status via the dedicated workflow endpoint.
+   *
+   * Discovered 2026-06-27: BuildTools' edit form has a hidden
+   * `data-url-status="/purchase-orders/status/update"` attribute that
+   * status-only changes route to. The PO form's `#cancelPO` button and
+   * the status `<select>`'s `.status-access` class both feed into this
+   * endpoint via the bundled app.js. CRITICAL property: this endpoint
+   * accepts transitions that `/purchase-orders/save` REFUSES — most
+   * notably Confirmed (3) → Draft (1), which the save endpoint returns
+   * 403 for and which I'd previously documented as impossible.
+   *
+   * Payload shape (verified live):
+   *   _token: <csrf>
+   *   ids[]: <po-id>           (the endpoint is multi-id capable; we
+   *                             use it single-id for now)
+   *   status: <numeric code>
+   *
+   * Success response: `{r:1, msg:[], s:1, f:0, l:["Purchase Order", ...]}`.
+   * Failure response is also JSON with `r:0` and `msg:[<reason>]`.
+   *
+   * Some transitions still validate — most notably promote to Confirmed
+   * (3) requires a non-empty signature field, which we don't surface
+   * yet. That'll come as a follow-up if a real use case appears.
+   */
+  async transitionPurchaseOrderStatus(opts: {
+    purchaseOrderId: string | number;
+    status: number;
+  }): Promise<{
+    success: boolean;
+    message?: unknown;
+    errors?: unknown;
+  }> {
+    await this.ensureAuthenticated();
+
+    const poId = Number(opts.purchaseOrderId);
+    if (!Number.isFinite(poId)) {
+      return { success: false, errors: "purchase_order_id is not a number" };
+    }
+
+    // Harvest CSRF from the PO's edit form (cheap fetch; reuses the
+    // same path the other write methods use).
+    const formResp = await this.requestWithReauthRetry(
+      `${this.baseUrl}/purchase-orders/form/${poId}`,
+      { headers: { "X-Requested-With": "XMLHttpRequest" } },
+      false,
+    );
+    if (formResp.status !== 200) {
+      return {
+        success: false,
+        errors: `Could not fetch PO form to harvest CSRF (HTTP ${formResp.status})`,
+      };
+    }
+    const csrf = formResp.body.match(/name="_token"[^>]*value="([^"]+)"/)?.[1];
+    if (!csrf) {
+      return {
+        success: false,
+        errors: "Could not harvest CSRF _token from PO form",
+      };
+    }
+
+    const form = new URLSearchParams();
+    form.append("_token", csrf);
+    form.append("ids[]", String(poId));
+    form.append("status", String(opts.status));
+
+    const resp = await this.request(
+      `${this.baseUrl}/purchase-orders/status/update`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "X-Requested-With": "XMLHttpRequest",
+          Accept: "application/json",
+          ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+        },
+        body: form.toString(),
+      },
+      false,
+    );
+
+    // Response shape: `{r: 0|1, msg: string[], s: <success count>, f:
+    // <failure count>, l: [singular, plural]}`. Non-numeric `r:1`
+    // means the call's wire succeeded; we also need `f === 0` to know
+    // no per-id failure occurred.
+    let parsed: { r?: number; msg?: unknown; s?: number; f?: number };
+    try {
+      parsed = JSON.parse(resp.body) as typeof parsed;
+    } catch {
+      return {
+        success: false,
+        errors: `Non-JSON response from /status/update (HTTP ${resp.status}): ${resp.body.slice(0, 200)}`,
+      };
+    }
+    if (parsed.r !== 1 || (parsed.f ?? 0) > 0) {
+      const msg = Array.isArray(parsed.msg)
+        ? (parsed.msg as unknown[]).join("; ")
+        : String(parsed.msg ?? "");
+      process.stderr.write(
+        `[transitionPurchaseOrderStatus] po=${poId} status=${opts.status} FAILED body=${JSON.stringify(resp.body.slice(0, 300))}\n`,
+      );
+      return {
+        success: false,
+        errors: msg || `HTTP ${resp.status} — ${resp.body.slice(0, 200)}`,
+      };
+    }
+    return { success: true, message: "Status updated." };
   }
 
   // ========================================================================

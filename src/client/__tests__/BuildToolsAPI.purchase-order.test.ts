@@ -164,7 +164,13 @@ describe("BuildToolsAPI.updatePurchaseOrder — proactive lock detection", () =>
     expect(result.success).toBe(false);
     expect(result.currentStatus).toBe(3);
     expect(String(result.errors)).toContain("Confirmed");
-    expect(String(result.errors)).toContain("BuildTools locks ALL writes");
+    // PR #61 rewording: now says "refuses ALL writes" and points the
+    // caller at `unlock_if_locked: true` for auto-transition. The
+    // assertion is intentionally lenient on exact phrasing so future
+    // wording tweaks don't break the test — what matters is the lock
+    // is named and the workaround is surfaced.
+    expect(String(result.errors)).toMatch(/refuses ALL writes|locks ALL writes/);
+    expect(String(result.errors)).toContain("unlock_if_locked");
 
     // Only the form fetch should have happened — NO save POST.
     const saveCalls = recorded.filter((r) =>
