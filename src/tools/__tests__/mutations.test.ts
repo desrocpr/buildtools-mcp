@@ -37,6 +37,9 @@ interface FakeApiOverrides {
   getPurchaseOrder?: BuildToolsAPI["getPurchaseOrder"];
   getPurchaseOrders?: BuildToolsAPI["getPurchaseOrders"];
   uploadAttachment?: BuildToolsAPI["uploadAttachment"];
+  getProject?: BuildToolsAPI["getProject"];
+  getFinancialStatements?: BuildToolsAPI["getFinancialStatements"];
+  createFinancialStatementWithAmount?: BuildToolsAPI["createFinancialStatementWithAmount"];
 }
 
 function fakeApi(overrides: FakeApiOverrides = {}): BuildToolsAPI {
@@ -2303,5 +2306,354 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
     expect(textOf(exec)).not.toContain("javascript:");
     // No markdown link rendered when URL is rejected.
     expect(textOf(exec)).not.toContain("[Download]");
+  });
+});
+
+describe("create_draw_request — workflow consolidator (PR #65)", () => {
+  function findTool(api: BuildToolsAPI, store: ConfirmationStore) {
+    const tools = createMutationTools(() => api, store);
+    const tool = tools.find((t) => t.name === "create_draw_request");
+    if (!tool) throw new Error("create_draw_request not registered");
+    return tool;
+  }
+
+  const projectRow = { id: 100002, name: "Jones Addition" };
+  const priorFs = {
+    statusCount: {},
+    statements: [
+      { id: "1", name: "Draw #1 - 2026-01-15", status: "Paid", amount: 25000, paid: 25000, balance: 0, date: "2026-01-15" },
+      { id: "2", name: "Draw #2 - 2026-02-15", status: "Sent", amount: 30000, paid: 0, balance: 30000, date: "2026-02-15" },
+    ],
+  };
+
+  it("happy path with direct `amount`: prompt shows project + prior draws + new amount; executor creates the FS", async () => {
+    const getProject = vi.fn().mockResolvedValue(projectRow);
+    const getFinancialStatements = vi.fn().mockResolvedValue(priorFs);
+    const createFinancialStatementWithAmount = vi.fn().mockResolvedValue({
+      success: true, statementId: 700001, amount: "$ 40,000.00",
+    });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: getFinancialStatements as any,
+      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+    });
+    const tool = findTool(api, mkStore());
+    const args = { project_id: 100002, amount: 40000 };
+    const prompt = await tool.handler(args, api);
+    const promptText = textOf(prompt);
+    expect(promptText).toContain("Jones Addition");
+    expect(promptText).toContain("Prior draws**: 2 statement(s) totalling $55000.00");
+    expect(promptText).toContain("This draw amount**: **$40000.00**");
+    expect(promptText).toContain("Cumulative after**: $95000.00");
+    expect(promptText).toContain("Draw name**: Draw #3");
+
+    const cid = promptText.match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(exec.isError).toBeFalsy();
+    expect(textOf(exec)).toContain("Draw request **#700001**");
+    expect(createFinancialStatementWithAmount).toHaveBeenCalledTimes(1);
+    const call = createFinancialStatementWithAmount.mock.calls[0][0];
+    expect(call.amount).toBe(40000);
+    expect(call.projectId).toBe(100002);
+    expect(call.name).toMatch(/^Draw #3/);
+    expect(call.status).toBe(1); // Draft default
+  });
+
+  it("work_completed_to_date path: tool computes `(work × (1-retainage)) - prior_draws`", async () => {
+    const getProject = vi.fn().mockResolvedValue(projectRow);
+    const getFinancialStatements = vi.fn().mockResolvedValue(priorFs);
+    const createFinancialStatementWithAmount = vi.fn().mockResolvedValue({
+      success: true, statementId: 700002,
+    });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: getFinancialStatements as any,
+      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+    });
+    const tool = findTool(api, mkStore());
+    // work_completed = 100k, retainage = 10%, prior = 55k
+    // expected = 100k × 0.9 − 55k = 35k
+    const args = {
+      project_id: 100002,
+      work_completed_to_date: 100000,
+      retainage_percent: 10,
+    };
+    const prompt = await tool.handler(args, api);
+    const promptText = textOf(prompt);
+    expect(promptText).toContain("Work completed to date**: $100000.00");
+    expect(promptText).toContain("Retainage**: 10% ($10000.00 held back)");
+    expect(promptText).toContain("Billable to date (after retainage)**: $90000.00");
+    expect(promptText).toContain("− Prior draws**: $55000.00");
+    expect(promptText).toContain("This draw amount**: **$35000.00**");
+
+    const cid = promptText.match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(createFinancialStatementWithAmount.mock.calls[0][0].amount).toBe(35000);
+  });
+
+  it("Zod refines: both amount AND work_completed_to_date → error", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler(
+      { project_id: 100002, amount: 1000, work_completed_to_date: 5000 },
+      api,
+    );
+    expect(result.isError).toBe(true);
+  });
+
+  it("Zod refines: neither amount NOR work_completed_to_date → error", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler({ project_id: 100002 }, api);
+    expect(result.isError).toBe(true);
+  });
+
+  it("non-positive computed amount: surfaces clean error BEFORE the confirmation prompt (PR #65 review MEDIUM 4)", async () => {
+    const getProject = vi.fn().mockResolvedValue(projectRow);
+    const getFinancialStatements = vi.fn().mockResolvedValue(priorFs); // prior = 55000
+    const createFinancialStatementWithAmount = vi.fn();
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: getFinancialStatements as any,
+      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+    });
+    const tool = findTool(api, mkStore());
+    // work_completed = 50k, retainage = 0, prior = 55k → -5k
+    const args = { project_id: 100002, work_completed_to_date: 50000 };
+    // FIRST call returns the error directly — no confirmation prompt
+    // for an impossible amount.
+    const result = await tool.handler(args, api);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("non-positive");
+    expect(textOf(result)).toContain("$55000.00"); // prior shown
+    expect(textOf(result)).toContain("$50000.00"); // work shown
+    // No confirmation prompt was returned (no confirmation_id to consume).
+    expect(textOf(result)).not.toContain("confirmation_id");
+    expect(createFinancialStatementWithAmount).not.toHaveBeenCalled();
+  });
+
+  it("draw number auto-increments from existing 'Draw #N' names, not just count", async () => {
+    // Statements with gaps: "Draw #5" exists but only 2 records.
+    const getProject = vi.fn().mockResolvedValue(projectRow);
+    const getFinancialStatements = vi.fn().mockResolvedValue({
+      statusCount: {},
+      statements: [
+        { id: "1", name: "Initial Deposit", status: "Paid", amount: 10000, paid: 10000, balance: 0, date: "2026-01-01" },
+        { id: "2", name: "Draw #5 - 2026-03-15", status: "Sent", amount: 20000, paid: 0, balance: 20000, date: "2026-03-15" },
+      ],
+    });
+    const createFinancialStatementWithAmount = vi.fn().mockResolvedValue({ success: true, statementId: 1 });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: getFinancialStatements as any,
+      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+    });
+    const tool = findTool(api, mkStore());
+    const args = { project_id: 100002, amount: 5000 };
+    const prompt = await tool.handler(args, api);
+    expect(textOf(prompt)).toContain("Draw #6"); // max(5)+1, NOT count(2)+1=3
+  });
+
+  it("caller override: `draw_number`, `name`, and `status` all bypass auto-resolution", async () => {
+    const getProject = vi.fn().mockResolvedValue(projectRow);
+    const getFinancialStatements = vi.fn().mockResolvedValue(priorFs);
+    const createFinancialStatementWithAmount = vi.fn().mockResolvedValue({ success: true, statementId: 1 });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: getFinancialStatements as any,
+      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+    });
+    const tool = findTool(api, mkStore());
+    const args = {
+      project_id: 100002,
+      amount: 10000,
+      draw_number: 99,
+      name: "Custom Draw Name",
+      status: 5, // Sent
+    };
+    const prompt = await tool.handler(args, api);
+    const promptText = textOf(prompt);
+    expect(promptText).toContain("Custom Draw Name");
+    // PR #65 review MEDIUM 5: when `name` is overridden, the
+    // "Draw #N" line is suppressed (BT FS has no separate draw#
+    // column). Caller's draw_number is now used internally only —
+    // not shown in the prompt because BT won't store it.
+    expect(promptText).not.toContain("Draw #**: 99");
+    expect(promptText).toContain("status code 5");
+
+    const cid = promptText.match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args, confirmation_id: cid }, api);
+    const call = createFinancialStatementWithAmount.mock.calls[0][0];
+    expect(call.name).toBe("Custom Draw Name");
+    expect(call.status).toBe(5);
+  });
+
+  it("prior FS fetch failure: clean error before BT mutation, suggests workaround", async () => {
+    const getProject = vi.fn().mockResolvedValue(projectRow);
+    const getFinancialStatements = vi.fn().mockRejectedValue(new Error("BT 503"));
+    const createFinancialStatementWithAmount = vi.fn();
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: getFinancialStatements as any,
+      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+    });
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler(
+      { project_id: 100002, amount: 5000 },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Could not list prior draws");
+    expect(textOf(result)).toContain("BT 503");
+    expect(createFinancialStatementWithAmount).not.toHaveBeenCalled();
+  });
+
+  it("idempotency replay: retry with same key + same args returns cached result, no second BT call", async () => {
+    const getProject = vi.fn().mockResolvedValue(projectRow);
+    const getFinancialStatements = vi.fn().mockResolvedValue(priorFs);
+    const createFinancialStatementWithAmount = vi.fn().mockResolvedValue({
+      success: true, statementId: 700100,
+    });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: getFinancialStatements as any,
+      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+    });
+    const { IdempotencyStore } = await import("../../idempotency/index.js");
+    const idem = new IdempotencyStore();
+    const tools = createMutationTools(() => api, mkStore(), undefined, idem);
+    const tool = tools.find((t) => t.name === "create_draw_request")!;
+
+    const args = {
+      project_id: 100002,
+      amount: 40000,
+      idempotency_key: "pr65-replay-test",
+    };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(createFinancialStatementWithAmount).toHaveBeenCalledTimes(1);
+
+    const retry = await tool.handler(args, api);
+    expect(textOf(retry)).toContain("Idempotency replay");
+    expect(createFinancialStatementWithAmount).toHaveBeenCalledTimes(1);
+  });
+
+  // ---------- PR #65 review round-2 fixes ----------
+
+  it("review HIGH 1: `due_date` is no longer in the schema — silently stripped, NOT shown in prompt (was: shown but silently dropped on commit)", async () => {
+    const getProject = vi.fn().mockResolvedValue(projectRow);
+    const getFinancialStatements = vi.fn().mockResolvedValue(priorFs);
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: getFinancialStatements as any,
+    });
+    const tool = findTool(api, mkStore());
+    const prompt = await tool.handler(
+      { project_id: 100002, amount: 5000, due_date: "2026-07-15" } as any,
+      api,
+    );
+    expect(prompt.isError).toBeFalsy();
+    // CRITICAL: due_date does NOT appear in the prompt because the
+    // schema strips it. Pre-fix, it WAS shown in the prompt and then
+    // silently dropped at the BT call layer — a data-loss bug.
+    expect(textOf(prompt)).not.toContain("Due date");
+    expect(textOf(prompt)).not.toContain("2026-07-15");
+    expect(textOf(prompt)).not.toContain("due_date");
+    // The schema definition itself doesn't list due_date as an input.
+    const properties = (tool.inputSchema as any).properties;
+    expect(properties.due_date).toBeUndefined();
+  });
+
+  it("review HIGH 2: prompt description mentions the formula assumption (not AIA G702)", async () => {
+    // Verify the schema description names the methodology explicitly.
+    const tool = findTool(fakeApi({}), mkStore());
+    const desc = (tool.inputSchema as any).properties.work_completed_to_date.description;
+    expect(desc).toContain("cumulative");
+    expect(desc).toContain("NOT AIA G702");
+  });
+
+  it("review MEDIUM (status): Zod rejects unknown status codes like 3, 99, 1.5", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    for (const bad of [3, 99, 1.5, 0, -1]) {
+      const result = await tool.handler(
+        { project_id: 100002, amount: 1000, status: bad },
+        api,
+      );
+      expect(result.isError).toBe(true);
+    }
+  });
+
+  it("review LOW: retainage_percent + amount → refine error (silent ignore would mis-bill)", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler(
+      { project_id: 100002, amount: 1000, retainage_percent: 10 },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("retainage_percent");
+  });
+
+  it("review LOW: name field rejects non-ASCII (BT HTML-encoding without decoding)", async () => {
+    const api = fakeApi({});
+    const tool = findTool(api, mkStore());
+    const result = await tool.handler(
+      { project_id: 100002, amount: 1000, name: "Café Draw" },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result).toLowerCase()).toContain("ascii");
+  });
+
+  it("review LOW (rounding): priorDrawsSum rounded before display so prompt matches executor", async () => {
+    // 3 statements at $33333.33 → raw sum $99999.99 (float drift would
+    // make it 99999.99000000001). Test that rounding produces clean display.
+    const getProject = vi.fn().mockResolvedValue(projectRow);
+    const getFinancialStatements = vi.fn().mockResolvedValue({
+      statusCount: {},
+      statements: [
+        { id: "1", name: "Draw #1", status: "Paid", amount: 33333.33, paid: 0, balance: 0, date: "" },
+        { id: "2", name: "Draw #2", status: "Paid", amount: 33333.33, paid: 0, balance: 0, date: "" },
+        { id: "3", name: "Draw #3", status: "Paid", amount: 33333.33, paid: 0, balance: 0, date: "" },
+      ],
+    });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: getFinancialStatements as any,
+    });
+    const tool = findTool(api, mkStore());
+    const prompt = await tool.handler(
+      { project_id: 100002, work_completed_to_date: 200000, retainage_percent: 10 },
+      api,
+    );
+    const text = textOf(prompt);
+    // $99999.99 (rounded), not $99999.99000000001
+    expect(text).toContain("Prior draws**: 3 statement(s) totalling $99999.99");
+    // billable = 200000 × 0.9 = 180000; minus 99999.99 = 80000.01
+    expect(text).toContain("This draw amount**: **$80000.01**");
+  });
+
+  it("BT create failure: surfaces the API error verbatim", async () => {
+    const getProject = vi.fn().mockResolvedValue(projectRow);
+    const getFinancialStatements = vi.fn().mockResolvedValue(priorFs);
+    const createFinancialStatementWithAmount = vi.fn().mockResolvedValue({
+      success: false,
+      errors: "Amount validation failed at BT",
+    });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getFinancialStatements: getFinancialStatements as any,
+      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+    });
+    const tool = findTool(api, mkStore());
+    const args = { project_id: 100002, amount: 5000 };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(exec.isError).toBe(true);
+    expect(textOf(exec)).toContain("Failed to create draw request");
+    expect(textOf(exec)).toContain("Amount validation failed at BT");
   });
 });

@@ -349,6 +349,109 @@ const CreateFinancialStatementSchema = z.object({
 });
 type CreateFinancialStatementArgs = z.infer<typeof CreateFinancialStatementSchema>;
 
+// create_draw_request (PR #65) — collapses the "set up a new project
+// draw" workflow into one confirmed call.
+//
+// Today this takes ~3 round trips: list_financial_statements (to find
+// the next draw number + prior draws sum) → math the user has to do
+// in their head → create_financial_statement.
+//
+// The tool replaces the manual arithmetic + lookup steps. The PM still
+// needs to know either (a) the exact dollar amount they want to bill,
+// or (b) the cumulative work-completed value (the tool will then
+// deduct prior draws and apply retainage).
+const CreateDrawRequestSchema = z.object({
+  project_id: z.number().describe("BuildTools project ID."),
+  amount: z
+    .number()
+    .positive()
+    .finite()
+    .max(10_000_000)
+    .optional()
+    .describe(
+      "Direct dollar amount to bill on this draw. Skips the work-completed math. Mutually exclusive with `work_completed_to_date`.",
+    ),
+  work_completed_to_date: z
+    .number()
+    .positive()
+    .finite()
+    .max(10_000_000)
+    .optional()
+    .describe(
+      "Cumulative work-completed dollar value to date. Tool computes the draw amount as `(work_completed_to_date × (1 - retainage_percent/100)) − sum(prior draws)`. " +
+        "**This is the standard cumulative-work-completed method. NOT AIA G702/G703** (which separates retainage on completed work vs stored materials). " +
+        "If your draw schedule uses a different methodology, pass `amount` directly. " +
+        "Mutually exclusive with `amount`.",
+    ),
+  retainage_percent: z
+    .number()
+    .min(0)
+    .max(50)
+    .optional()
+    .describe(
+      "Percentage retainage held back from this draw (typical: 5-10%). Default 0. ONLY meaningful when `work_completed_to_date` is used — passing this with `amount` is rejected (caller is presumed to have already applied retainage to the direct amount).",
+    ),
+  draw_number: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      "Override the auto-incremented draw number. Default: max(existing draws on project)+1, or 1 if none.",
+    ),
+  name: z
+    .string()
+    .max(200)
+    .regex(/^[\x20-\x7E]*$/, "name must be ASCII printable characters only — BT HTML-encodes non-ASCII and the list view doesn't decode")
+    .optional()
+    .describe(
+      "Override the auto-generated statement name. Default: `\"Draw #N - YYYY-MM-DD\"` (ASCII hyphen). Max 200 chars; ASCII printable only.",
+    ),
+  // PR #65 review HIGH 1: due_date was accepted in the schema but
+  // `createFinancialStatementWithAmount` has no due_date field — the
+  // value was shown in the prompt and silently dropped on commit.
+  // Removed entirely until the BT API method gains support.
+  notes: z
+    .string()
+    .max(2000)
+    .optional()
+    .describe("Internal notes on the statement. Max 2000 chars."),
+  status: z
+    .number()
+    .int()
+    .refine((v) => [1, 2, 4, 5, 6].includes(v), {
+      message: "status must be one of: 1 (Draft), 2 (Pending), 4 (Partial), 5 (Sent), 6 (Paid)",
+    })
+    .optional()
+    .describe(
+      "FS status code. Default 1 (Draft) so PM can review in the BT UI before sending. 1=Draft, 2=Pending, 4=Partial, 5=Sent, 6=Paid. Note: 3 is intentionally absent from the FS enum.",
+    ),
+  idempotency_key: z
+    .string()
+    .min(8)
+    .max(128)
+    .optional()
+    .describe(
+      "Optional client-supplied idempotency key. Successful executions cached for 1 hour. Retry with same key + same args replays the result (no second BT call) — protects against ambiguous-timeout double-creates.",
+    ),
+  confirmation_id: z.string().optional(),
+})
+  .refine(
+    (data) => (data.amount === undefined) !== (data.work_completed_to_date === undefined),
+    {
+      message: "Exactly one of `amount` or `work_completed_to_date` must be provided.",
+      path: ["amount"],
+    },
+  )
+  .refine(
+    (data) => !(data.amount !== undefined && data.retainage_percent !== undefined),
+    {
+      message: "`retainage_percent` only applies to the `work_completed_to_date` path; when `amount` is set, the caller is presumed to have already applied retainage.",
+      path: ["retainage_percent"],
+    },
+  );
+type CreateDrawRequestArgs = z.infer<typeof CreateDrawRequestSchema>;
+
 // apply_vendor_quote (PR #63) — collapses the 6-round-trip "vendor sent
 // a new quote PDF, update the PO + attach + send" workflow into ONE
 // confirmed tool call. See `docs/TOOLS.md` for the workflow rationale.
@@ -1834,6 +1937,104 @@ export function createMutationTools(
     },
   );
 
+  // ---------------------------------------------------------------------
+  // create_draw_request (PR #65) — workflow consolidator for new draws
+  // ---------------------------------------------------------------------
+  //
+  // Inputs:
+  //   project_id (req)
+  //   EITHER amount (direct $) OR work_completed_to_date (tool computes)
+  //   retainage_percent (optional, only used with work_completed_to_date)
+  //   draw_number, name, due_date, notes, status, idempotency_key (all optional)
+  //
+  // The tool fetches prior FS on the project, computes the math when
+  // work_completed_to_date is used, auto-names the draw, surfaces every
+  // component in the confirmation prompt, and calls createFinancialStatement
+  // with the final values.
+
+  type CreateDrawRequestInternalArgs = CreateDrawRequestArgs & {
+    _project_name?: string;
+    _prior_draws_count?: number;
+    _prior_draws_sum?: number;
+    _resolved_amount?: number;
+    _resolved_draw_number?: number;
+    _resolved_name?: string;
+  };
+
+  const createDrawRequestConfirmed = requiresConfirmation<CreateDrawRequestInternalArgs>(
+    "create_draw_request",
+    (a) => {
+      const projectLabel = a._project_name
+        ? `**${escapeMarkdownInline(a._project_name)}** (#${a.project_id})`
+        : `#${a.project_id}`;
+      const lines: string[] = [];
+      lines.push(`Create draw request on project ${projectLabel}.`);
+      lines.push("");
+      lines.push(`- **Draw name**: ${a._resolved_name ? escapeMarkdownInline(a._resolved_name) : "_(unresolved)_"}`);
+      // PR #65 review MEDIUM 5: BT FS records have no standalone
+      // "draw number" column — the # only lives inside the name
+      // string. Showing a separate "Draw #: N" line when the caller
+      // overrode `name` would imply BT will store the number
+      // separately, which it won't. Only render when the auto-name
+      // is being used (i.e. caller didn't override `name`).
+      if (a._resolved_draw_number !== undefined && a.name === undefined) {
+        lines.push(`- **Draw #**: ${a._resolved_draw_number}`);
+      }
+      if (a._prior_draws_count !== undefined && a._prior_draws_sum !== undefined) {
+        lines.push(`- **Prior draws**: ${a._prior_draws_count} statement(s) totalling $${a._prior_draws_sum.toFixed(2)}`);
+      }
+      if (a.work_completed_to_date !== undefined) {
+        const retainage = a.retainage_percent ?? 0;
+        const billable = a.work_completed_to_date * (1 - retainage / 100);
+        lines.push(
+          `- **Work completed to date**: $${a.work_completed_to_date.toFixed(2)}`,
+          `- **Retainage**: ${retainage}% ($${(a.work_completed_to_date - billable).toFixed(2)} held back)`,
+          `- **Billable to date (after retainage)**: $${billable.toFixed(2)}`,
+          `- **− Prior draws**: $${(a._prior_draws_sum ?? 0).toFixed(2)}`,
+        );
+      }
+      lines.push(`- **This draw amount**: **$${(a._resolved_amount ?? 0).toFixed(2)}**`);
+      const cumulative = (a._prior_draws_sum ?? 0) + (a._resolved_amount ?? 0);
+      lines.push(`- **Cumulative after**: $${cumulative.toFixed(2)}`);
+      const statusLabel = a.status === undefined ? "Draft (default)" : `status code ${a.status}`;
+      lines.push(`- **Statement status**: ${statusLabel}`);
+      return lines.join("\n");
+    },
+    async (a) => {
+      try {
+        const finalAmount = a._resolved_amount;
+        const finalName = a._resolved_name;
+        if (finalAmount === undefined || finalName === undefined) {
+          return errorMarkdown(
+            `**Error calling \`create_draw_request\`**: amount or name was not resolved (internal — outer handler should have set these).`,
+          );
+        }
+        if (finalAmount <= 0) {
+          return errorMarkdown(
+            `**Computed draw amount is non-positive** ($${finalAmount.toFixed(2)}). This typically means prior draws already cover (or exceed) the cumulative work. Verify \`work_completed_to_date\` or pass \`amount\` directly.`,
+          );
+        }
+        const result = await getApi().createFinancialStatementWithAmount({
+          projectId: a.project_id,
+          name: finalName,
+          amount: finalAmount,
+          notes: a.notes,
+          status: a.status ?? 1,
+        });
+        if (!result.success) {
+          return errorMarkdown(
+            `**Failed to create draw request** on project #${a.project_id}: ${String(result.errors ?? "(no detail)")}`,
+          );
+        }
+        return markdown(
+          `Draw request **#${result.statementId}** ("${escapeMarkdownInline(finalName)}") created on project #${a.project_id} for **$${result.amount ?? finalAmount.toFixed(2)}**. Status: ${a.status === undefined ? "Draft" : `code ${a.status}`}.`,
+        );
+      } catch (err) {
+        return formatError(err, "create_draw_request");
+      }
+    },
+  );
+
   // -- delete_financial_statement -------------------------------------------
   const deleteFSConfirmed = requiresConfirmation<DeleteFinancialStatementArgs>(
     "delete_financial_statement",
@@ -2633,6 +2834,180 @@ export function createMutationTools(
       createFSConfirmed,
       "write:financial",
     ),
+    // create_draw_request (PR #65) — workflow consolidator for billings.
+    // Custom handler because of pre-fetch (prior FS), math, and
+    // auto-naming.
+    {
+      name: "create_draw_request",
+      description:
+        "Create a new project draw request (financial statement) in ONE call. " +
+        "Looks up prior draws on the project, computes the new draw number (max+1), " +
+        "auto-names the statement, and creates it with the right amount. " +
+        "Pass EITHER `amount` (direct $ — caller already did the math) OR `work_completed_to_date` " +
+        "(tool computes `(work × (1 - retainage/100)) − prior_draws_sum`). " +
+        "Defaults to Draft status so the PM can review in the BT UI before sending. " +
+        "Inherits idempotency semantics from the other consolidator tools.",
+      inputSchema: zodToJsonSchema(CreateDrawRequestSchema),
+      permission: "write:financial",
+      handler: async (rawArgs: unknown, _api: BuildToolsAPI) => {
+        const parsed = CreateDrawRequestSchema.safeParse(rawArgs ?? {});
+        if (!parsed.success) return formatZodError(parsed.error, "create_draw_request");
+        const data = parsed.data;
+
+        // Idempotency lookup BEFORE the resolution + executor.
+        let idempotencyCacheKey: string | undefined;
+        let idempotencyArgsFingerprint: string | undefined;
+        if (idempotencyStore && data.idempotency_key) {
+          idempotencyCacheKey = IdempotencyStore.buildCacheKey(
+            "create_draw_request",
+            sessionId,
+            data.idempotency_key,
+          );
+          const { confirmation_id: _ci, idempotency_key: _ik, ...semantic } = data;
+          idempotencyArgsFingerprint = IdempotencyStore.fingerprintArgs(semantic);
+          const lookup = idempotencyStore.lookup(
+            idempotencyCacheKey,
+            idempotencyArgsFingerprint,
+          );
+          if (lookup.kind === "hit") {
+            const original = lookup.result;
+            const banner = `_Idempotency replay: returning cached result for key \`${escapeMarkdownInline(data.idempotency_key)}\` — no BT call was made. Cache TTL ${idempotencyStore.ttlMinutes} min._\n\n`;
+            return {
+              ...original,
+              content: original.content.map((c) =>
+                "text" in c ? { ...c, text: banner + c.text } : c,
+              ),
+            };
+          }
+          if (lookup.kind === "mismatch") {
+            return errorMarkdown(
+              `**Idempotency key reused with different args.** The key \`${escapeMarkdownInline(data.idempotency_key)}\` was previously used with DIFFERENT args.`,
+            );
+          }
+        }
+
+        // === First-call resolution (skip on confirmation_id replay) ===
+        let projectName: string | undefined;
+        let priorDrawsCount: number | undefined;
+        let priorDrawsSum: number | undefined;
+        let resolvedDrawNumber: number | undefined;
+        let resolvedAmount: number | undefined;
+        let resolvedName: string | undefined;
+        if (!data.confirmation_id) {
+          // Project lookup (best-effort for the prompt).
+          try {
+            const project = await getApi().getProject<{
+              name?: string;
+              title?: string;
+            }>(data.project_id);
+            const rawName = project?.name ?? project?.title ?? "";
+            projectName = rawName.replace(/<[^>]*>/g, "").trim() || undefined;
+          } catch {
+            // ignore — prompt will show only the id
+          }
+
+          // Prior FS lookup — required for next draw # and sum.
+          type FsResult = {
+            statements: Array<{ id: string; name: string; amount: number }>;
+          };
+          let fsResult: FsResult | null = null;
+          try {
+            fsResult = (await getApi().getFinancialStatements(data.project_id)) as FsResult;
+          } catch (err) {
+            return errorMarkdown(
+              `**Could not list prior draws** on project #${data.project_id}: ${err instanceof Error ? err.message : String(err)}. Fix and retry, or pass \`amount\` + \`draw_number\` directly to skip the lookup.`,
+            );
+          }
+          const priorStatements = fsResult?.statements ?? [];
+          priorDrawsCount = priorStatements.length;
+          // PR #65 review LOW 7: round the accumulated sum to cents
+          // before downstream subtraction. A 12-statement project
+          // each at $33,333.33 accumulates to $399,999.96 raw due to
+          // IEEE 754 — and the prompt rendered the raw sum, while
+          // the executor's amount used post-subtraction Math.round.
+          // Round here so prompt and executor agree on display.
+          const rawSum = priorStatements.reduce(
+            (acc: number, s: { amount: number }) =>
+              acc + (typeof s.amount === "number" && Number.isFinite(s.amount) ? s.amount : 0),
+            0,
+          );
+          priorDrawsSum = Math.round(rawSum * 100) / 100;
+
+          // Next draw number. Caller can override; otherwise auto.
+          if (data.draw_number !== undefined) {
+            resolvedDrawNumber = data.draw_number;
+          } else {
+            // Try to parse "Draw #N" from existing statement names;
+            // fall back to count+1 if nothing parseable.
+            const maxParsed = priorStatements.reduce(
+              (max: number, s: { name: string }) => {
+                const m = (s.name ?? "").match(/Draw\s*#?(\d+)/i);
+                return m ? Math.max(max, parseInt(m[1], 10)) : max;
+              },
+              0,
+            );
+            resolvedDrawNumber = (maxParsed > 0 ? maxParsed : priorStatements.length) + 1;
+          }
+
+          // Amount resolution.
+          if (data.amount !== undefined) {
+            resolvedAmount = data.amount;
+          } else if (data.work_completed_to_date !== undefined) {
+            const retainage = data.retainage_percent ?? 0;
+            const billable = data.work_completed_to_date * (1 - retainage / 100);
+            resolvedAmount = Math.round((billable - (priorDrawsSum ?? 0)) * 100) / 100;
+          }
+
+          // Name resolution.
+          if (data.name) {
+            resolvedName = data.name;
+          } else {
+            const todayIso = new Date().toISOString().slice(0, 10);
+            resolvedName = `Draw #${resolvedDrawNumber} - ${todayIso}`;
+          }
+
+          // PR #65 review MEDIUM 4: non-positive amount check fires
+          // BEFORE the confirmation prompt — saves the user a wasted
+          // confirm round on impossible math.
+          if (resolvedAmount !== undefined && resolvedAmount <= 0) {
+            return errorMarkdown(
+              `**Computed draw amount is non-positive** ($${resolvedAmount.toFixed(2)}) for project #${data.project_id}. ` +
+                `This typically means prior draws ($${(priorDrawsSum ?? 0).toFixed(2)}) already cover (or exceed) the cumulative work-completed ($${(data.work_completed_to_date ?? 0).toFixed(2)}). ` +
+                `Verify \`work_completed_to_date\` or pass \`amount\` directly.`,
+            );
+          }
+        }
+
+        const result = await createDrawRequestConfirmed(
+          {
+            ...data,
+            _project_name: projectName,
+            _prior_draws_count: priorDrawsCount,
+            _prior_draws_sum: priorDrawsSum,
+            _resolved_draw_number: resolvedDrawNumber,
+            _resolved_amount: resolvedAmount,
+            _resolved_name: resolvedName,
+          },
+          store,
+          sessionId,
+        );
+
+        if (
+          idempotencyStore &&
+          idempotencyCacheKey &&
+          idempotencyArgsFingerprint &&
+          data.confirmation_id &&
+          !result.isError
+        ) {
+          idempotencyStore.store(
+            idempotencyCacheKey,
+            idempotencyArgsFingerprint,
+            result,
+          );
+        }
+        return result;
+      },
+    },
     makeTool(
       "delete_financial_statement",
       "Delete one or more financial statements from a project. Requires confirmation. This is destructive and cannot be undone.",
