@@ -1224,7 +1224,9 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
   it("orchestrates demote → /save → restore-to-Sent when unlock_if_locked is set against a Confirmed PO", async () => {
     const getPurchaseOrder = vi
       .fn()
-      // Pre-snapshot (outer handler) — locked
+      // Outer-handler snapshot — locked Confirmed
+      .mockResolvedValueOnce(confirmedSnapshot)
+      // Executor live re-fetch (HIGH-1 race fix) — still Confirmed
       .mockResolvedValueOnce(confirmedSnapshot)
       // Post-save verify fetch — items now $19533.81, status now Sent
       .mockResolvedValueOnce({
@@ -1279,8 +1281,9 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
   it("auto-transition: restores to CALLER's target status if provided (not the default Sent)", async () => {
     const getPurchaseOrder = vi
       .fn()
-      .mockResolvedValueOnce(confirmedSnapshot)
-      .mockResolvedValueOnce({ ...confirmedSnapshot, status: 4 }); // Rejected
+      .mockResolvedValueOnce(confirmedSnapshot) // outer snapshot
+      .mockResolvedValueOnce(confirmedSnapshot) // executor live re-fetch
+      .mockResolvedValueOnce({ ...confirmedSnapshot, status: 4 }); // Rejected (post-save, if verify ran)
     const updatePurchaseOrder = vi.fn().mockResolvedValue({
       success: true, purchaseOrderId: 39201, message: "saved",
     });
@@ -1374,6 +1377,131 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
     const text = textOf(result);
     expect(text).toContain("Could not restore to Confirmed");
     expect(text).toContain("PO is now in Draft");
+    expect(text).toContain("fix manually in the BT UI");
+  });
+
+  it("auto-transition: ignores stale snapshot — executor re-fetches live status and skips demote when PO is no longer locked (PR #61 review HIGH-1)", async () => {
+    // Outer-handler snapshot said Confirmed; reality (executor's live
+    // re-fetch) is Sent because a concurrent user already demoted →
+    // edited → re-sent the PO. We must NOT issue our own demote — that
+    // would silently regress the vendor-facing state.
+    const getPurchaseOrder = vi
+      .fn()
+      // Outer snapshot — stale Confirmed
+      .mockResolvedValueOnce(confirmedSnapshot)
+      // Executor live re-fetch — now Sent
+      .mockResolvedValueOnce({ ...confirmedSnapshot, status: 2 });
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39201, message: "saved",
+    });
+    const transitionPurchaseOrderStatus = vi.fn();
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+    const args = {
+      purchase_order_id: 39201,
+      items: [{ budget_code: "7051", description: "x", total: 100 }],
+      unlock_if_locked: true,
+      verify: false,
+    };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const result = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    expect(result.isError).toBeFalsy();
+    // No transitions issued: live state was already unlocked, /save
+    // applied content directly.
+    expect(transitionPurchaseOrderStatus).not.toHaveBeenCalled();
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
+  });
+
+  it("auto-transition: rolls back to ORIGINAL status when the final restore fails (PR #61 review HIGH-2)", async () => {
+    // Demote(3→1) OK → /save OK → restore-to-Confirmed FAILS (signature
+    // required at BT). Executor must roll back to original Confirmed
+    // and report concretely, not leave the PO stranded in Draft with
+    // content applied.
+    const getPurchaseOrder = vi
+      .fn()
+      .mockResolvedValueOnce(confirmedSnapshot)
+      .mockResolvedValueOnce(confirmedSnapshot);
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39201, message: "saved",
+    });
+    const transitionPurchaseOrderStatus = vi
+      .fn()
+      .mockResolvedValueOnce({ success: true, message: "demoted" })
+      .mockResolvedValueOnce({ success: false, errors: "The Signature field is required." })
+      .mockResolvedValueOnce({ success: true, message: "rolled back" });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+    const args = {
+      purchase_order_id: 39201,
+      items: [{ budget_code: "7051", description: "ADMO55739-F", total: 19533.81 }],
+      status: "Confirmed" as const,
+      unlock_if_locked: true,
+      verify: false,
+    };
+    const prompt = await tool.handler(args, api);
+    // Prompt warns about the restore-step requirement (MEDIUM-1 fix).
+    expect(textOf(prompt)).toContain("restore step is likely to fail");
+    expect(textOf(prompt)).toContain("signature");
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const result = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toContain("status transition to Confirmed failed");
+    expect(text).toContain("Signature field is required");
+    expect(text).toContain("Rolled back to original");
+    expect(text).toContain("content edits remain applied");
+    // Sequence: demote(1) → /save → restore-target(3 fails) → rollback(3 succeeds)
+    expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(3);
+    expect(transitionPurchaseOrderStatus.mock.calls[0][0].status).toBe(1);
+    expect(transitionPurchaseOrderStatus.mock.calls[1][0].status).toBe(3);
+    expect(transitionPurchaseOrderStatus.mock.calls[2][0].status).toBe(3);
+  });
+
+  it("auto-transition: when both the final transition AND the rollback fail, surfaces a loud 'PO stranded in Draft' message", async () => {
+    const getPurchaseOrder = vi
+      .fn()
+      .mockResolvedValueOnce(confirmedSnapshot)
+      .mockResolvedValueOnce(confirmedSnapshot);
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39201, message: "saved",
+    });
+    const transitionPurchaseOrderStatus = vi
+      .fn()
+      .mockResolvedValueOnce({ success: true, message: "demoted" })
+      .mockResolvedValueOnce({ success: false, errors: "Signature required" })
+      .mockResolvedValueOnce({ success: false, errors: "Rollback also failed (signature)" });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+    const args = {
+      purchase_order_id: 39201,
+      items: [{ budget_code: "7051", description: "x", total: 100 }],
+      status: "Confirmed" as const,
+      unlock_if_locked: true,
+      verify: false,
+    };
+    const prompt = await tool.handler(args, api);
+    const confirmationId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const result = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+
+    expect(result.isError).toBe(true);
+    const text = textOf(result);
+    expect(text).toContain("Rollback to Confirmed ALSO failed");
+    expect(text).toContain("PO is now in Draft with your content edits applied");
     expect(text).toContain("fix manually in the BT UI");
   });
 

@@ -548,10 +548,21 @@ export function createMutationTools(
         const fromLabel = poStatusLabel(snap.status);
         const restoreCode = a._resolved_status_code ?? 2;
         const restoreLabel = poStatusLabel(restoreCode);
+        // PR #61 review MEDIUM-1: if the requested restore target is
+        // ITSELF a write-locked status (Confirmed is the only one in
+        // practice), surface that BT will refuse the restore step
+        // because it requires a signature we don't supply. Caller can
+        // then choose Sent instead — far better than silently applying
+        // the content edit and stranding the PO in Draft.
+        const restoreIsLocked = PURCHASE_ORDER_WRITE_LOCKED_STATUSES.has(restoreCode);
+        const restoreWarning = restoreIsLocked
+          ? `\n\n⛔ **The restore step is likely to fail**: promoting to **${restoreLabel}** requires a canvas-drawn signature (\`PurchaseOrder[signature]\`) that this tool doesn't supply. The plan above will roll back to **${fromLabel}** if the restore fails. Consider using \`status: "Sent"\` instead — the vendor can advance to ${restoreLabel} on their side.`
+          : "";
         return (
           `${base}\n\n⚠️ **Auto-transition** (\`unlock_if_locked\`): PO is currently **${fromLabel}**. ` +
           `Plan: ${fromLabel} → Draft → apply edits → ${restoreLabel}. ` +
-          `_The vendor will see the status flip in their portal; BT may send a vendor email when status moves back to ${restoreLabel}._`
+          `_The vendor will see the status flip in their portal; BT may send a vendor email when status moves back to ${restoreLabel}._` +
+          restoreWarning
         );
       }
       return base;
@@ -574,13 +585,23 @@ export function createMutationTools(
         // operate without (status-only changes route through
         // /status/update which accepts transitions /save refuses,
         // and the API method does its own lock check for /save calls).
+        // PR #61 review HIGH-1 race fix: for `unlock_if_locked` we
+        // ALWAYS re-fetch live in the executor — never trust the
+        // outer-handler's snapshot for the demote decision. The
+        // snapshot was captured during the prompt phase (potentially
+        // minutes ago given the confirmation TTL) and a concurrent
+        // user could have moved the PO out of Confirmed in the
+        // meantime. Issuing a demote against a stale-Confirmed PO
+        // that's now in Sent would silently regress the vendor-facing
+        // state. The outer snapshot is fine for prompt rendering;
+        // routing decisions need ground truth.
         let preSnapshot = a._pre_snapshot;
-        const needSnapshot =
-          a.unlock_if_locked ||
-          (a.items_append !== undefined &&
-            a.items_append.length > 0 &&
-            (a.verify ?? true));
-        if (preSnapshot === undefined && needSnapshot) {
+        const needLiveStatus = !!a.unlock_if_locked;
+        const needAppendSnapshot =
+          a.items_append !== undefined &&
+          a.items_append.length > 0 &&
+          (a.verify ?? true);
+        if (needLiveStatus || (preSnapshot === undefined && needAppendSnapshot)) {
           try {
             const pre = await getApi().getPurchaseOrder(a.purchase_order_id);
             preSnapshot = pre
@@ -719,10 +740,36 @@ export function createMutationTools(
             status: finalTarget,
           });
           if (!transition.success) {
-            // Content updated successfully but status didn't move. PO
-            // is in an intermediate state — be loud about it.
+            // PR #61 review HIGH-2: if we entered via the auto-transition
+            // path, the PO is now in Draft with the user's content
+            // applied — silently leaving it there strands the PO in a
+            // state the caller never asked for. Mirror the /save
+            // failure path: attempt to restore the original status, and
+            // report concretely (Draft / original) — never "intermediate".
+            const headlineVerb = hasContentChange
+              ? "Content updated"
+              : "No content change requested";
+            if (isLocked && a.unlock_if_locked && currentStatus !== null) {
+              const rollback = await getApi().transitionPurchaseOrderStatus({
+                purchaseOrderId: a.purchase_order_id,
+                status: currentStatus,
+              });
+              const rollbackNote = rollback.success
+                ? `\n\n_Rolled back to original **${poStatusLabel(currentStatus)}** state — your content edits remain applied but the status didn't move forward._`
+                : `\n\n**Rollback to ${poStatusLabel(currentStatus)} ALSO failed** (${String(rollback.errors ?? "(no detail)")}). **PO is now in Draft with your content edits applied — fix manually in the BT UI.**`;
+              return errorMarkdown(
+                `**${headlineVerb}** for PO #${a.purchase_order_id} but **status transition to ${poStatusLabel(finalTarget)} failed**: ${String(transition.errors ?? "(no detail)")}.${rollbackNote}`,
+              );
+            }
+            // Non-auto-transition path: nothing to rollback (caller is
+            // making a deliberate status change against a non-locked PO
+            // and BT refused). The PO's status is unchanged from
+            // currentStatus — be concrete about that.
+            const stateNote = currentStatus !== null
+              ? `\n\n_PO status is unchanged at **${poStatusLabel(currentStatus)}**._`
+              : "";
             return errorMarkdown(
-              `**Content updated** for PO #${a.purchase_order_id} but **status transition to ${poStatusLabel(finalTarget)} failed**: ${String(transition.errors ?? "(no detail)")}. PO may be in an intermediate state — verify via \`get_purchase_order\`.`,
+              `**${headlineVerb}** for PO #${a.purchase_order_id} but **status transition to ${poStatusLabel(finalTarget)} failed**: ${String(transition.errors ?? "(no detail)")}.${stateNote}`,
             );
           }
           workflowSteps.push(`set status → ${poStatusLabel(finalTarget)}`);
@@ -792,7 +839,18 @@ export function createMutationTools(
                     `status: expected ${finalTarget} (${poStatusLabel(finalTarget)}), got ${detail.status} (${poStatusLabel(detail.status)})`,
                   );
                 } else if (detail.status !== null) {
-                  verified.push(`status=${poStatusLabel(detail.status)} (${detail.status})`);
+                  // PR #61 review LOW-2: qualify when the target was
+                  // auto-chosen by the unlock path rather than asked
+                  // for explicitly, so the verify line doesn't read as
+                  // "user wanted Sent" when they didn't say that.
+                  const autoDefaulted =
+                    targetStatusCode === undefined &&
+                    isLocked &&
+                    a.unlock_if_locked;
+                  const qualifier = autoDefaulted ? " (auto-transition default)" : "";
+                  verified.push(
+                    `status=${poStatusLabel(detail.status)} (${detail.status})${qualifier}`,
+                  );
                 }
               }
               // Vendor: skip the mismatch check if the re-fetch couldn't
