@@ -25,6 +25,7 @@ import {
   attachmentTools,
   downloadAttachmentTool,
   listProjectAttachmentsTool,
+  uploadAttachmentTool,
 } from "../attachments.js";
 import { type ToolResult } from "../projects.js";
 
@@ -35,6 +36,7 @@ import { type ToolResult } from "../projects.js";
 function fakeApi(overrides: {
   getProjectAttachments?: BuildToolsAPI["getProjectAttachments"];
   downloadAttachment?: BuildToolsAPI["downloadAttachment"];
+  uploadAttachment?: BuildToolsAPI["uploadAttachment"];
 }): BuildToolsAPI {
   return overrides as unknown as BuildToolsAPI;
 }
@@ -89,7 +91,11 @@ const samplePngAttachment = {
 describe("attachmentTools registry", () => {
   it("exports the contract-mandated tools", () => {
     const names = attachmentTools.map((t) => t.name);
-    expect(names).toEqual(["list_project_attachments", "download_attachment"]);
+    expect(names).toEqual([
+      "list_project_attachments",
+      "download_attachment",
+      "upload_attachment",
+    ]);
   });
 
   it("the tool exposes a JSON Schema for its input", () => {
@@ -433,5 +439,176 @@ describe("download_attachment", () => {
     );
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("Not authenticated");
+  });
+});
+
+describe("upload_attachment", () => {
+  const validB64 = Buffer.from("hello world").toString("base64");
+
+  it("uploads a PO-scoped attachment, forwards module=1500 and the entity ids correctly", async () => {
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      fileId: 146000,
+      hash: "abc123",
+      name: "test.pdf",
+      extension: "pdf",
+      mimeType: "application/pdf",
+      size: 1024,
+      downloadUrl: "https://file.buildtools.app/o/x/file/hash/abc123?download=1",
+      publicUrl: "https://file.buildtools.app/f/292/146000-x.pdf",
+      module: "1500",
+      moduleId: "39752",
+      projectId: "185936",
+      createdAt: "2026-06-27 14:00:00",
+    });
+    const api = fakeApi({ uploadAttachment: uploadAttachment as any });
+    const result = await uploadAttachmentTool.handler(
+      {
+        entity_type: "purchase_order",
+        entity_id: 39752,
+        project_id: 185936,
+        filename: "test.pdf",
+        content_type: "application/pdf",
+        file_base64: validB64,
+      },
+      api,
+    );
+    expect(result.isError).toBeFalsy();
+
+    expect(uploadAttachment).toHaveBeenCalledTimes(1);
+    const passed = uploadAttachment.mock.calls[0][0];
+    expect(passed.module).toBe(1500); // purchase_order code
+    expect(passed.moduleId).toBe(39752);
+    expect(passed.projectId).toBe(185936);
+    expect(passed.filename).toBe("test.pdf");
+    expect(passed.contentType).toBe("application/pdf");
+    expect(Buffer.isBuffer(passed.fileBuffer)).toBe(true);
+    expect(passed.fileBuffer.toString("utf8")).toBe("hello world");
+
+    const text = textOf(result);
+    expect(text).toContain("**Attachment uploaded** to purchase order #39752");
+    expect(text).toContain("File ID**: 146000");
+    expect(text).toContain("https://file.buildtools.app/o/x/file/hash/abc123");
+    // No doubled extension (PR #59 round 2 fix).
+    expect(text).not.toMatch(/test\.pdf\.pdf/);
+  });
+
+  it("uploads a project-scoped attachment, defaults project_id to entity_id when omitted", async () => {
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      fileId: 146001, hash: "y", name: "doc.pdf", extension: "pdf",
+      mimeType: "application/pdf", size: 100,
+      downloadUrl: "u", publicUrl: "p",
+      module: "1000", moduleId: "185936", projectId: "185936",
+      createdAt: "2026-06-27 14:00:00",
+    });
+    const api = fakeApi({ uploadAttachment: uploadAttachment as any });
+    const result = await uploadAttachmentTool.handler(
+      {
+        entity_type: "project",
+        entity_id: 185936,
+        filename: "doc.pdf",
+        content_type: "application/pdf",
+        file_base64: validB64,
+      },
+      api,
+    );
+    expect(result.isError).toBeFalsy();
+    const passed = uploadAttachment.mock.calls[0][0];
+    expect(passed.module).toBe(1000); // project code
+    expect(passed.moduleId).toBe(185936);
+    expect(passed.projectId).toBe(185936); // defaulted from entity_id
+    expect(textOf(result)).toContain("**Attachment uploaded** to project #185936");
+  });
+
+  it("rejects PO uploads when project_id is missing — required for BT scoping", async () => {
+    const uploadAttachment = vi.fn();
+    const api = fakeApi({ uploadAttachment: uploadAttachment as any });
+    const result = await uploadAttachmentTool.handler(
+      {
+        entity_type: "purchase_order",
+        entity_id: 39752,
+        filename: "x.pdf",
+        content_type: "application/pdf",
+        file_base64: validB64,
+      },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Missing `project_id`");
+    expect(textOf(result)).toContain("get_purchase_order");
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it("rejects `data:` URL prefix with a clear hint", async () => {
+    const uploadAttachment = vi.fn();
+    const api = fakeApi({ uploadAttachment: uploadAttachment as any });
+    const result = await uploadAttachmentTool.handler(
+      {
+        entity_type: "project",
+        entity_id: 185936,
+        filename: "x.pdf",
+        content_type: "application/pdf",
+        file_base64: "data:application/pdf;base64," + validB64,
+      },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Strip the `data:<mime>;base64,` prefix");
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it("rejects empty / whitespace-only base64", async () => {
+    const uploadAttachment = vi.fn();
+    const api = fakeApi({ uploadAttachment: uploadAttachment as any });
+    const result = await uploadAttachmentTool.handler(
+      {
+        entity_type: "project",
+        entity_id: 185936,
+        filename: "x.pdf",
+        content_type: "application/pdf",
+        // Whitespace-only — still passes Zod's min(1) but decodes to 0 bytes.
+        file_base64: "   \n\n   ",
+      },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("decoded to zero bytes");
+    expect(uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it("rejects unknown entity_type at the Zod layer", async () => {
+    const api = fakeApi({});
+    const result = await uploadAttachmentTool.handler(
+      {
+        entity_type: "unknown_type",
+        entity_id: 1,
+        filename: "x.pdf",
+        content_type: "application/pdf",
+        file_base64: validB64,
+      },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Invalid input for `upload_attachment`");
+    expect(textOf(result)).toContain("entity_type");
+  });
+
+  it("surfaces API-level errors (e.g. token harvest failure) cleanly", async () => {
+    const uploadAttachment = vi
+      .fn()
+      .mockRejectedValue(new BuildToolsServerError("Could not find App.bt.token"));
+    const api = fakeApi({ uploadAttachment: uploadAttachment as any });
+    const result = await uploadAttachmentTool.handler(
+      {
+        entity_type: "project",
+        entity_id: 185936,
+        filename: "x.pdf",
+        content_type: "application/pdf",
+        file_base64: validB64,
+      },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("upload_attachment");
+    expect(textOf(result)).toContain("Could not find App.bt.token");
   });
 });

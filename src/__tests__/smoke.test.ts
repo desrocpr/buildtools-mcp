@@ -25,8 +25,9 @@ describe("buildtools-mcp", () => {
     expect(allNames).toContain("get_customer");
     expect(allNames).toContain("list_project_attachments");
     expect(allNames).toContain("download_attachment");
+    expect(allNames).toContain("upload_attachment");
     expect(allNames).toContain("list_financial_statements");
-    expect(allNames.length).toBe(12);
+    expect(allNames.length).toBe(13);
   });
 
   it("mutation tool factory produces all confirmed tools", async () => {

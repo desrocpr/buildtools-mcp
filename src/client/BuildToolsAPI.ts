@@ -1221,6 +1221,185 @@ export class BuildToolsAPI {
     );
   }
 
+  /**
+   * App.bt.token cache. The token is emitted as inline JSON on most
+   * authenticated pages (e.g. /documents?PR[]=<id>). One value per
+   * authenticated session — re-harvested if the session is rotated.
+   */
+  private uploadToken: string | null = null;
+
+  /**
+   * Harvest the `App.bt.token` value used by the file-upload endpoint.
+   * Lazily fetches the project's documents page (which is small enough
+   * for a cheap one-time scrape) and caches the result. Re-thrown on
+   * non-200 / unparseable response — uploads can't proceed without it.
+   */
+  private async getUploadToken(projectId: string | number): Promise<string> {
+    if (this.uploadToken) return this.uploadToken;
+    await this.ensureAuthenticated();
+    const resp = await this.request(
+      `${this.baseUrl}/documents?PR[]=${projectId}`,
+      {
+        headers: {
+          Accept: "text/html",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+    if (resp.status !== 200) {
+      throw new BuildToolsServerError(
+        `Could not load documents page to harvest upload token (HTTP ${resp.status})`,
+      );
+    }
+    // The token is emitted as: bt: { token: '11134.6.764751e99c', ... }
+    const match = resp.body.match(/bt:\s*\{\s*token:\s*['"]([^'"]+)['"]/);
+    if (!match) {
+      throw new BuildToolsServerError(
+        "Could not find App.bt.token in the documents page HTML — BuildTools template may have drifted.",
+      );
+    }
+    this.uploadToken = match[1];
+    return this.uploadToken;
+  }
+
+  /**
+   * Uploads a file to BuildTools and associates it with the given
+   * entity. Verified live 2026-06-27 against `https://file.buildtools.app/files`.
+   *
+   * Mechanism: POST multipart/form-data to file.buildtools.app/files
+   * carrying the App.bt.token harvested from /documents?PR[]=<id>, the
+   * file payload as `files[]`, plus entity-context fields:
+   *   - `project_id` (required — every entity sits under a project)
+   *   - `module`     (1000 = project documents, 1500 = purchase order,
+   *                   …extensible per BT's module catalog)
+   *   - `module_id`  (the entity's primary key in its module)
+   *
+   * Returns the file metadata BuildTools assigns: its file_id, hashes,
+   * download/public URLs, etc. The same file then appears in
+   * `getProjectAttachments(projectId)` and (for module=1500) on the PO's
+   * email/attachments tab.
+   *
+   * Size cap defaults to 25 MB to match the download path's limit. The
+   * BuildTools UI reports cleaner errors for oversize than the server's
+   * raw 413, so we reject early.
+   */
+  async uploadAttachment(opts: {
+    projectId: string | number;
+    /** Module code: 1000=documents, 1500=purchase-orders. */
+    module: number;
+    /** Entity id within the module (project_id for module=1000; PO id for module=1500). */
+    moduleId: string | number;
+    /** Raw bytes of the file. */
+    fileBuffer: Buffer;
+    /** Original filename including extension. */
+    filename: string;
+    /** MIME type. Defaults to application/octet-stream. */
+    contentType?: string;
+    /** Max upload size in bytes. Default 25 MB. */
+    maxSizeBytes?: number;
+  }): Promise<{
+    fileId: number;
+    hash: string;
+    name: string;
+    extension: string;
+    mimeType: string;
+    size: number;
+    downloadUrl: string;
+    publicUrl: string;
+    module: string;
+    moduleId: string;
+    projectId: string;
+    createdAt: string;
+  }> {
+    await this.ensureAuthenticated();
+    const maxSize = opts.maxSizeBytes ?? 25 * 1024 * 1024;
+    if (opts.fileBuffer.length > maxSize) {
+      throw new BuildToolsServerError(
+        `File ${opts.filename} is ${opts.fileBuffer.length} bytes; exceeds max ${maxSize} bytes.`,
+      );
+    }
+    if (!opts.filename) {
+      throw new BuildToolsServerError("filename is required");
+    }
+
+    const token = await this.getUploadToken(opts.projectId);
+
+    // Build a manual multipart body — we don't pull in form-data as a
+    // dep for a single call site. CRLF line endings + boundary markers
+    // per RFC 7578.
+    const boundary = `----BTMCPBoundary${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+    const CRLF = "\r\n";
+    const enc = (s: string) => Buffer.from(s, "utf8");
+    const fieldPart = (name: string, value: string): Buffer =>
+      enc(
+        `--${boundary}${CRLF}` +
+          `Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}` +
+          `${value}${CRLF}`,
+      );
+    const filePartHeader = enc(
+      `--${boundary}${CRLF}` +
+        `Content-Disposition: form-data; name="files[]"; filename="${opts.filename.replace(/"/g, "")}"${CRLF}` +
+        `Content-Type: ${opts.contentType ?? "application/octet-stream"}${CRLF}${CRLF}`,
+    );
+    const body = Buffer.concat([
+      fieldPart("token", token),
+      fieldPart("project_id", String(opts.projectId)),
+      fieldPart("module", String(opts.module)),
+      fieldPart("module_id", String(opts.moduleId)),
+      filePartHeader,
+      opts.fileBuffer,
+      enc(`${CRLF}--${boundary}--${CRLF}`),
+    ]);
+
+    const uploadUrl = "https://file.buildtools.app/files";
+    const resp = await this.fetchImpl(uploadUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        Accept: "application/json",
+        Cookie: this.getCookieString(uploadUrl),
+      },
+      body,
+    });
+    const respText = await resp.text();
+    if (resp.status !== 200) {
+      throw new BuildToolsServerError(
+        `Upload failed (HTTP ${resp.status}): ${respText.slice(0, 300)}`,
+      );
+    }
+
+    let parsed: { data?: { file?: Record<string, unknown> } };
+    try {
+      parsed = JSON.parse(respText);
+    } catch {
+      throw new BuildToolsServerError(
+        `Upload returned non-JSON response: ${respText.slice(0, 200)}`,
+      );
+    }
+    const file = parsed.data?.file;
+    if (!file || typeof file !== "object") {
+      throw new BuildToolsServerError(
+        `Upload response missing data.file: ${respText.slice(0, 200)}`,
+      );
+    }
+
+    return {
+      fileId: Number(file.file_id) || 0,
+      hash: String(file.hash ?? ""),
+      name: String(file.display_name ?? file.name ?? ""),
+      extension: String(file.extension ?? ""),
+      mimeType: String(file.mime_type ?? ""),
+      size: Number(file.size) || 0,
+      downloadUrl: String(file.download_url ?? ""),
+      publicUrl: String(file.public_url ?? ""),
+      module: String(file.module ?? ""),
+      moduleId: String(file.module_id ?? ""),
+      projectId: String(file.project_id ?? ""),
+      createdAt: String(file.created_at ?? ""),
+    };
+  }
+
   // ========================================================================
   // SELECTION METHODS
   // ========================================================================

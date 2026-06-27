@@ -35,6 +35,7 @@ export {
 export {
   listProjectAttachmentsTool,
   downloadAttachmentTool,
+  uploadAttachmentTool,
   attachmentTools,
 } from "./attachments.js";
 
