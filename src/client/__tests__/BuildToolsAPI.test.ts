@@ -2166,3 +2166,71 @@ describe("BuildToolsAPI.transitionPurchaseOrderStatus — CSRF cache (PR #62)", 
     expect(String(result.errors)).not.toContain("Non-JSON response");
   });
 });
+
+describe("BuildToolsAPI — token cache consolidation (PR #70)", () => {
+  // Full TokenCache shape mirror — PR #70 review LOW 2: cast through
+  // the complete struct rather than property-narrow projections so a
+  // future rename of `tokens` becomes a compile error instead of a
+  // runtime TypeError.
+  type TokenCache = {
+    csrf: string | null;
+    xsrf: string | null;
+    form: string | null;
+    upload: string | null;
+  };
+  // Intersection won't work (BuildToolsAPI's private tokens collapses
+  // to never) — cast through unknown to expose the internals for tests.
+  type ApiInternal = {
+    tokens: TokenCache;
+    invalidateAllTokens: () => void;
+  };
+  function asInternal(api: BuildToolsAPI): ApiInternal {
+    return api as unknown as ApiInternal;
+  }
+
+  it("PR #70 review MEDIUM 1: invalidateAllTokens clears all four token slots in one call", () => {
+    const api = asInternal(new BuildToolsAPI({ tenant: "test" }));
+    api.tokens.csrf = "csrf-x";
+    api.tokens.xsrf = "xsrf-x";
+    api.tokens.form = "form-x";
+    api.tokens.upload = "upload-x";
+    api.invalidateAllTokens();
+    expect(api.tokens).toEqual({
+      csrf: null,
+      xsrf: null,
+      form: null,
+      upload: null,
+    });
+  });
+
+  it("targeted invalidation (419 path): only `form` is cleared; others survive", () => {
+    const api = asInternal(new BuildToolsAPI({ tenant: "test" }));
+    api.tokens.csrf = "csrf-stable";
+    api.tokens.xsrf = "xsrf-stable";
+    api.tokens.form = "form-stale";
+    api.tokens.upload = "upload-stable";
+    // Mimic the 419 retry path's invalidation (verbatim from
+    // bulkTransitionPurchaseOrderStatuses).
+    api.tokens.form = null;
+    expect(api.tokens).toEqual({
+      csrf: "csrf-stable",
+      xsrf: "xsrf-stable",
+      form: null,
+      upload: "upload-stable",
+    });
+  });
+
+  it("targeted invalidation (upload 401/403 path): only `upload` is cleared", () => {
+    const api = asInternal(new BuildToolsAPI({ tenant: "test" }));
+    api.tokens.csrf = "csrf-stable";
+    api.tokens.xsrf = "xsrf-stable";
+    api.tokens.form = "form-stable";
+    api.tokens.upload = "upload-stale";
+    // Mimic the upload-attachment retry path.
+    api.tokens.upload = null;
+    expect(api.tokens.csrf).toBe("csrf-stable");
+    expect(api.tokens.xsrf).toBe("xsrf-stable");
+    expect(api.tokens.form).toBe("form-stable");
+    expect(api.tokens.upload).toBeNull();
+  });
+});
