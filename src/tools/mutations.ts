@@ -23,7 +23,11 @@ import {
 } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 import { requiresConfirmation, type ConfirmationStore } from "../confirm/index.js";
-import { IdempotencyStore } from "../idempotency/index.js";
+import {
+  IdempotencyStore,
+  checkIdempotency,
+  storeIdempotencyResult,
+} from "../idempotency/index.js";
 
 import type { ToolDefinition, ToolResult } from "./projects.js";
 
@@ -2368,59 +2372,22 @@ export function createMutationTools(
         if (!parsed.success) return formatZodError(parsed.error, "update_purchase_order");
         const data = parsed.data;
 
-        // Idempotency check (only when the cache is wired and the
-        // caller passed a key). We do this BEFORE the confirmation
-        // flow so a retry of an already-successful call returns the
-        // cached result immediately — no second prompt, no second BT
-        // call. Fingerprint excludes `confirmation_id` (rotates per
-        // call) and `idempotency_key` itself (already in the cache key).
-        let idempotencyCacheKey: string | undefined;
-        let idempotencyArgsFingerprint: string | undefined;
-        if (idempotencyStore && data.idempotency_key) {
-          idempotencyCacheKey = IdempotencyStore.buildCacheKey(
-            "update_purchase_order",
-            sessionId,
-            data.idempotency_key,
-          );
-          // Strip fields that don't represent the semantic write BT will
-          // apply:
-          //   - confirmation_id: rotates per call
-          //   - idempotency_key: already in the cache key
-          //   - verify: a client-side post-write check, not a BT mutation.
-          //     If a caller times out with `verify: true` and retries with
-          //     `verify: false` to skip the second round-trip, that's the
-          //     SAME write — fingerprinting them differently would turn
-          //     the safety net into a trap.
-          const {
-            confirmation_id: _ci,
-            idempotency_key: _ik,
-            verify: _v,
-            ...semantic
-          } = data;
-          idempotencyArgsFingerprint = IdempotencyStore.fingerprintArgs(semantic);
-          const lookup = idempotencyStore.lookup(
-            idempotencyCacheKey,
-            idempotencyArgsFingerprint,
-          );
-          if (lookup.kind === "hit") {
-            // Replay the original result with a banner so the caller
-            // knows this wasn't a fresh write.
-            const original = lookup.result;
-            const replayNote =
-              `_Idempotency replay: returning cached result for key \`${escapeMarkdownInline(data.idempotency_key)}\` — no BT call was made. Cache TTL ${idempotencyStore.ttlMinutes} min._\n\n`;
-            return {
-              ...original,
-              content: original.content.map((c) =>
-                "text" in c ? { ...c, text: replayNote + c.text } : c,
-              ),
-            };
-          }
-          if (lookup.kind === "mismatch") {
-            return errorMarkdown(
-              `**Idempotency key reused with different args.** The key \`${escapeMarkdownInline(data.idempotency_key)}\` was previously used (within the last ${idempotencyStore.ttlMinutes} min) with a DIFFERENT set of args. Use a fresh key per distinct write, or wait for the cache to expire.`,
-            );
-          }
-        }
+        // Idempotency check (PR #67 — uses shared helper). Strips
+        // fields that don't represent the semantic write BT will
+        // apply: confirmation_id (rotates per call), idempotency_key
+        // (already in the cache key), and verify (a client-side
+        // post-write check — if a caller retries with verify:false
+        // after timing out on verify:true, it's the SAME write).
+        const { confirmation_id: _ci, idempotency_key: _ik, verify: _v, ...semantic } = data;
+        const idemContext = checkIdempotency({
+          toolName: "update_purchase_order",
+          idempotencyStore,
+          sessionId,
+          idempotencyKey: data.idempotency_key,
+          fingerprintInput: semantic,
+        });
+        if (idemContext.replayResult) return idemContext.replayResult;
+        if (idemContext.mismatchError) return idemContext.mismatchError;
 
         // Resolve the status label → code ONCE up-front, fail-fast on
         // unknown labels (Zod blocks them already, but a programmatic
@@ -2493,19 +2460,12 @@ export function createMutationTools(
         // this layer is hard. We use a simpler proxy: cache only when
         // this WAS the execute call (confirmation_id was passed in)
         // AND the result is not an error.
-        if (
-          idempotencyStore &&
-          idempotencyCacheKey &&
-          idempotencyArgsFingerprint &&
-          data.confirmation_id &&
-          !result.isError
-        ) {
-          idempotencyStore.store(
-            idempotencyCacheKey,
-            idempotencyArgsFingerprint,
-            result,
-          );
-        }
+        storeIdempotencyResult({
+          context: idemContext,
+          idempotencyStore,
+          result,
+          isExecuteCall: !!data.confirmation_id,
+        });
         return result;
       },
     },
@@ -2537,39 +2497,17 @@ export function createMutationTools(
           );
         }
 
-        // PR #64 review fix (MEDIUM): idempotency lookup BEFORE the
-        // current-status fetch + confirmation flow. Matches the
-        // pattern in update_purchase_order + apply_vendor_quote.
-        let idempotencyCacheKey: string | undefined;
-        let idempotencyArgsFingerprint: string | undefined;
-        if (idempotencyStore && data.idempotency_key) {
-          idempotencyCacheKey = IdempotencyStore.buildCacheKey(
-            "transition_purchase_order_status",
-            sessionId,
-            data.idempotency_key,
-          );
-          const { confirmation_id: _ci, idempotency_key: _ik, ...semantic } = data;
-          idempotencyArgsFingerprint = IdempotencyStore.fingerprintArgs(semantic);
-          const lookup = idempotencyStore.lookup(
-            idempotencyCacheKey,
-            idempotencyArgsFingerprint,
-          );
-          if (lookup.kind === "hit") {
-            const original = lookup.result;
-            const banner = `_Idempotency replay: returning cached result for key \`${escapeMarkdownInline(data.idempotency_key)}\` — no BT call was made. Cache TTL ${idempotencyStore.ttlMinutes} min._\n\n`;
-            return {
-              ...original,
-              content: original.content.map((c) =>
-                "text" in c ? { ...c, text: banner + c.text } : c,
-              ),
-            };
-          }
-          if (lookup.kind === "mismatch") {
-            return errorMarkdown(
-              `**Idempotency key reused with different args.** The key \`${escapeMarkdownInline(data.idempotency_key)}\` was previously used with DIFFERENT args.`,
-            );
-          }
-        }
+        // Idempotency check (PR #67 — shared helper).
+        const { confirmation_id: _ci, idempotency_key: _ik, ...semantic } = data;
+        const idemContext = checkIdempotency({
+          toolName: "transition_purchase_order_status",
+          idempotencyStore,
+          sessionId,
+          idempotencyKey: data.idempotency_key,
+          fingerprintInput: semantic,
+        });
+        if (idemContext.replayResult) return idemContext.replayResult;
+        if (idemContext.mismatchError) return idemContext.mismatchError;
 
         // PR #64 review fix (MEDIUM): fetch current status for the
         // confirmation prompt. Best-effort — a failed fetch leaves
@@ -2604,19 +2542,12 @@ export function createMutationTools(
           sessionId,
         );
 
-        if (
-          idempotencyStore &&
-          idempotencyCacheKey &&
-          idempotencyArgsFingerprint &&
-          data.confirmation_id &&
-          !result.isError
-        ) {
-          idempotencyStore.store(
-            idempotencyCacheKey,
-            idempotencyArgsFingerprint,
-            result,
-          );
-        }
+        storeIdempotencyResult({
+          context: idemContext,
+          idempotencyStore,
+          result,
+          isExecuteCall: !!data.confirmation_id,
+        });
         return result;
       },
     },
@@ -2669,49 +2600,23 @@ export function createMutationTools(
           );
         }
 
-        // === Idempotency lookup (PR #63 review HIGH) ===
-        // When caller passes idempotency_key, check the cache BEFORE
-        // running resolution + executor. The schema advertised this
-        // capability; the original PR shipped without wiring it. A
-        // retry after timeout would otherwise re-execute the full
-        // workflow (duplicate vendor email + duplicate attachment).
-        let idempotencyCacheKey: string | undefined;
-        let idempotencyArgsFingerprint: string | undefined;
-        if (idempotencyStore && data.idempotency_key) {
-          idempotencyCacheKey = IdempotencyStore.buildCacheKey(
-            "apply_vendor_quote",
-            sessionId,
-            data.idempotency_key,
-          );
-          // Strip per-call metadata + the large file_base64 from the
-          // fingerprint (we substitute its SHA-256 to keep retries
-          // detectable without bloating the cache key).
-          const { confirmation_id: _ci, idempotency_key: _ik, file_base64: _fb, ...semantic } = data;
-          const fileHash = createHash("sha256").update(data.file_base64).digest("hex");
-          idempotencyArgsFingerprint = IdempotencyStore.fingerprintArgs({
+        // Idempotency check (PR #67 — shared helper). file_base64 is
+        // substituted by its SHA-256 in the fingerprint to keep the
+        // cache key small while still detecting different file
+        // contents as different writes.
+        const { confirmation_id: _ci, idempotency_key: _ik, file_base64: _fb, ...semantic } = data;
+        const idemContext = checkIdempotency({
+          toolName: "apply_vendor_quote",
+          idempotencyStore,
+          sessionId,
+          idempotencyKey: data.idempotency_key,
+          fingerprintInput: {
             ...semantic,
-            _file_sha256: fileHash,
-          });
-          const lookup = idempotencyStore.lookup(
-            idempotencyCacheKey,
-            idempotencyArgsFingerprint,
-          );
-          if (lookup.kind === "hit") {
-            const original = lookup.result;
-            const banner = `_Idempotency replay: returning cached result for key \`${escapeMarkdownInline(data.idempotency_key)}\` — no BT call was made. Cache TTL ${idempotencyStore.ttlMinutes} min._\n\n`;
-            return {
-              ...original,
-              content: original.content.map((c) =>
-                "text" in c ? { ...c, text: banner + c.text } : c,
-              ),
-            };
-          }
-          if (lookup.kind === "mismatch") {
-            return errorMarkdown(
-              `**Idempotency key reused with different args.** The key \`${escapeMarkdownInline(data.idempotency_key)}\` was previously used (within the last ${idempotencyStore.ttlMinutes} min) with a DIFFERENT set of args. Use a fresh key per distinct write, or wait for the cache to expire.`,
-            );
-          }
-        }
+            _file_sha256: createHash("sha256").update(data.file_base64).digest("hex"),
+          },
+        });
+        if (idemContext.replayResult) return idemContext.replayResult;
+        if (idemContext.mismatchError) return idemContext.mismatchError;
 
         // === First-call resolution (skip on confirmation_id replay
         //     — the framework already has the resolved args stored).
@@ -2788,21 +2693,12 @@ export function createMutationTools(
           sessionId,
         );
 
-        // Cache the result on the execute call (confirmation_id present)
-        // when it succeeded. Same proxy condition as update_purchase_order.
-        if (
-          idempotencyStore &&
-          idempotencyCacheKey &&
-          idempotencyArgsFingerprint &&
-          data.confirmation_id &&
-          !result.isError
-        ) {
-          idempotencyStore.store(
-            idempotencyCacheKey,
-            idempotencyArgsFingerprint,
-            result,
-          );
-        }
+        storeIdempotencyResult({
+          context: idemContext,
+          idempotencyStore,
+          result,
+          isExecuteCall: !!data.confirmation_id,
+        });
         return result;
       },
     },
@@ -2854,37 +2750,17 @@ export function createMutationTools(
         if (!parsed.success) return formatZodError(parsed.error, "create_draw_request");
         const data = parsed.data;
 
-        // Idempotency lookup BEFORE the resolution + executor.
-        let idempotencyCacheKey: string | undefined;
-        let idempotencyArgsFingerprint: string | undefined;
-        if (idempotencyStore && data.idempotency_key) {
-          idempotencyCacheKey = IdempotencyStore.buildCacheKey(
-            "create_draw_request",
-            sessionId,
-            data.idempotency_key,
-          );
-          const { confirmation_id: _ci, idempotency_key: _ik, ...semantic } = data;
-          idempotencyArgsFingerprint = IdempotencyStore.fingerprintArgs(semantic);
-          const lookup = idempotencyStore.lookup(
-            idempotencyCacheKey,
-            idempotencyArgsFingerprint,
-          );
-          if (lookup.kind === "hit") {
-            const original = lookup.result;
-            const banner = `_Idempotency replay: returning cached result for key \`${escapeMarkdownInline(data.idempotency_key)}\` — no BT call was made. Cache TTL ${idempotencyStore.ttlMinutes} min._\n\n`;
-            return {
-              ...original,
-              content: original.content.map((c) =>
-                "text" in c ? { ...c, text: banner + c.text } : c,
-              ),
-            };
-          }
-          if (lookup.kind === "mismatch") {
-            return errorMarkdown(
-              `**Idempotency key reused with different args.** The key \`${escapeMarkdownInline(data.idempotency_key)}\` was previously used with DIFFERENT args.`,
-            );
-          }
-        }
+        // Idempotency check (PR #67 — shared helper).
+        const { confirmation_id: _ci, idempotency_key: _ik, ...semantic } = data;
+        const idemContext = checkIdempotency({
+          toolName: "create_draw_request",
+          idempotencyStore,
+          sessionId,
+          idempotencyKey: data.idempotency_key,
+          fingerprintInput: semantic,
+        });
+        if (idemContext.replayResult) return idemContext.replayResult;
+        if (idemContext.mismatchError) return idemContext.mismatchError;
 
         // === First-call resolution (skip on confirmation_id replay) ===
         let projectName: string | undefined;
@@ -2992,19 +2868,12 @@ export function createMutationTools(
           sessionId,
         );
 
-        if (
-          idempotencyStore &&
-          idempotencyCacheKey &&
-          idempotencyArgsFingerprint &&
-          data.confirmation_id &&
-          !result.isError
-        ) {
-          idempotencyStore.store(
-            idempotencyCacheKey,
-            idempotencyArgsFingerprint,
-            result,
-          );
-        }
+        storeIdempotencyResult({
+          context: idemContext,
+          idempotencyStore,
+          result,
+          isExecuteCall: !!data.confirmation_id,
+        });
         return result;
       },
     },
