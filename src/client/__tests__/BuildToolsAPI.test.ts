@@ -367,7 +367,7 @@ describe("post()", () => {
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
     // Inject a known XSRF so we can assert it goes out on the header.
-    (api as unknown as { xsrfToken: string }).xsrfToken = "xsrf-abc";
+    (api as unknown as { tokens: { xsrf: string } }).tokens.xsrf = "xsrf-abc";
 
     const out = await api.post("/projects/save", {
       name: "P",
@@ -2099,7 +2099,7 @@ describe("BuildToolsAPI.transitionPurchaseOrderStatus — CSRF cache (PR #62)", 
     const api = new BuildToolsAPI({ fetch: harness.fetchImpl } as any);
     (api as unknown as { authenticated: boolean }).authenticated = true;
     // Pre-seed the cache so we start with a stale token in cache.
-    (api as unknown as { cachedFormToken: string }).cachedFormToken = "stale-token";
+    (api as unknown as { tokens: { form: string } }).tokens.form = "stale-token";
 
     const r = await api.transitionPurchaseOrderStatus({ purchaseOrderId: 39752, status: 1 });
     expect(r.success).toBe(true);
@@ -2122,7 +2122,7 @@ describe("BuildToolsAPI.transitionPurchaseOrderStatus — CSRF cache (PR #62)", 
 
     await api.getPurchaseOrder(39752);
     // Token cached without a second fetch
-    expect((api as unknown as { cachedFormToken: string | null }).cachedFormToken).toBe("opportune-token");
+    expect((api as unknown as { tokens: { form: string | null } }).tokens.form).toBe("opportune-token");
   });
 
   it("PR #64 review fix (M1): 419 followed by non-200 form refresh returns a CLEAR error (not 'non-JSON response')", async () => {

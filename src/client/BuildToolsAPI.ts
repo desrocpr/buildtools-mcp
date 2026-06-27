@@ -299,21 +299,38 @@ export class BuildToolsAPI {
   /** Hostname-keyed cookie jar: { hostname → { cookieName → cookieValue } }. */
   private cookies: Record<string, Record<string, string>> = {};
 
-  /** CSRF `_token` harvested from login HTML. */
-  private csrfToken: string | null = null;
-
-  /** Decoded `XSRF-TOKEN` cookie value, sent as `X-XSRF-TOKEN` header. */
-  private xsrfToken: string | null = null;
-
   /**
-   * Cached `_token` form field, harvested opportunistically from any
-   * form HTML the client fetches. BT (Laravel) issues a session-bound
-   * CSRF token that's stable for the session lifetime. Caching saves
-   * a form fetch on calls that ONLY need the token (e.g.
-   * `transitionPurchaseOrderStatus` doesn't otherwise need the form
-   * body). Invalidated by `authenticate()` and by any 419 response.
+   * Consolidated token cache (PR #70). Four tokens with related but
+   * distinct lifecycles, kept in one struct so invalidation is
+   * auditable in one place rather than scattered across the class.
+   *
+   * - `csrf`: Laravel `_token` harvested from the login HTML. Set
+   *   once in `authenticate()`.
+   * - `xsrf`: decoded `XSRF-TOKEN` cookie value, sent as the
+   *   `X-XSRF-TOKEN` header on writes. Updated whenever the cookie
+   *   rotates.
+   * - `form`: opportunistically-cached `_token` from any form HTML
+   *   the client fetches. Saves a form round-trip on token-only
+   *   consumers (e.g. `transitionPurchaseOrderStatus`). Invalidated
+   *   on 419.
+   * - `upload`: `App.bt.token` value used by the file-upload endpoint.
+   *   Lazily harvested from /documents?PR[]=<id>'s inline JS.
+   *   Invalidated on 401/403 in the upload retry path.
    */
-  private cachedFormToken: string | null = null;
+  private tokens: {
+    csrf: string | null;
+    xsrf: string | null;
+    form: string | null;
+    upload: string | null;
+  } = { csrf: null, xsrf: null, form: null, upload: null };
+
+  /** Invalidate ALL tokens — called on `authenticate()` (session boundary). */
+  private invalidateAllTokens(): void {
+    this.tokens.csrf = null;
+    this.tokens.xsrf = null;
+    this.tokens.form = null;
+    this.tokens.upload = null;
+  }
 
   /**
    * Extract `_token` from form HTML and cache it. Called from any site
@@ -323,7 +340,7 @@ export class BuildToolsAPI {
   private absorbFormToken(formHtml: string): string | null {
     const m = formHtml.match(/name="_token"[^>]*value="([^"]+)"/);
     if (m) {
-      this.cachedFormToken = m[1];
+      this.tokens.form = m[1];
       return m[1];
     }
     return null;
@@ -432,9 +449,9 @@ export class BuildToolsAPI {
 
       if (name === "XSRF-TOKEN") {
         try {
-          this.xsrfToken = decodeURIComponent(value);
+          this.tokens.xsrf = decodeURIComponent(value);
         } catch {
-          this.xsrfToken = value;
+          this.tokens.xsrf = value;
         }
       }
 
@@ -513,8 +530,8 @@ export class BuildToolsAPI {
       ...options.headers,
     };
 
-    if (this.xsrfToken && headers["X-XSRF-TOKEN"] === undefined) {
-      headers["X-XSRF-TOKEN"] = this.xsrfToken;
+    if (this.tokens.xsrf && headers["X-XSRF-TOKEN"] === undefined) {
+      headers["X-XSRF-TOKEN"] = this.tokens.xsrf;
     }
 
     const timeoutMs = options.timeoutMs ?? this.defaultTimeoutMs;
@@ -594,16 +611,12 @@ export class BuildToolsAPI {
     this.password = password;
 
     // Invalidate the cached App.bt.token from any prior session — the
-    // value is session-bound and the upload retry logic in
-    // `uploadAttachment` only re-harvests on a 401/403, not on every
-    // re-auth. Without this clear, a session rotation on the BT side
-    // followed by a manual `authenticate()` call would leave the
-    // upload path using a stale token until the first failure.
-    this.uploadToken = null;
-    // Same logic for the cached form-CSRF token (PR #62 — class-level
-    // token cache). Authentication invalidates any session-bound
-    // token; the next form fetch will re-populate.
-    this.cachedFormToken = null;
+    // PR #70: single invalidation of all session-bound tokens.
+    // Previously each token (upload, form) was cleared in its own
+    // statement — scattered invalidation rules were what the
+    // architect's PR #62 review flagged as drift-prone. Now one
+    // method, one call site.
+    this.invalidateAllTokens();
 
     // 1. GET login page (NO redirect follow) to harvest CSRF `_token`.
     const loginPage = await this.request(
@@ -612,9 +625,9 @@ export class BuildToolsAPI {
       false,
     );
     const csrfMatch = loginPage.body.match(/name="_token"[^>]*value="([^"]+)"/);
-    if (csrfMatch) this.csrfToken = csrfMatch[1];
+    if (csrfMatch) this.tokens.csrf = csrfMatch[1];
 
-    if (!this.csrfToken) {
+    if (!this.tokens.csrf) {
       throw new BuildToolsAuthError(
         "Could not harvest CSRF _token from login page",
         { status: loginPage.status, url: loginPage.url },
@@ -623,7 +636,7 @@ export class BuildToolsAPI {
 
     // 2. POST login form to authUrl (follow redirects).
     const formData = new URLSearchParams({
-      _token: this.csrfToken,
+      _token: this.tokens.csrf,
       email,
       password,
       remember: "on",
@@ -832,7 +845,7 @@ export class BuildToolsAPI {
           "Content-Type": "application/x-www-form-urlencoded",
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
-          ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
         },
         body,
       },
@@ -1262,20 +1275,13 @@ export class BuildToolsAPI {
   }
 
   /**
-   * App.bt.token cache. The token is emitted as inline JSON on most
-   * authenticated pages (e.g. /documents?PR[]=<id>). One value per
-   * authenticated session — re-harvested if the session is rotated.
-   */
-  private uploadToken: string | null = null;
-
-  /**
    * Harvest the `App.bt.token` value used by the file-upload endpoint.
    * Lazily fetches the project's documents page (which is small enough
    * for a cheap one-time scrape) and caches the result. Re-thrown on
    * non-200 / unparseable response — uploads can't proceed without it.
    */
   private async getUploadToken(projectId: string | number): Promise<string> {
-    if (this.uploadToken) return this.uploadToken;
+    if (this.tokens.upload) return this.tokens.upload;
     await this.ensureAuthenticated();
     const resp = await this.request(
       `${this.baseUrl}/documents?PR[]=${projectId}`,
@@ -1299,8 +1305,8 @@ export class BuildToolsAPI {
         "Could not find App.bt.token in the documents page HTML — BuildTools template may have drifted.",
       );
     }
-    this.uploadToken = match[1];
-    return this.uploadToken;
+    this.tokens.upload = match[1];
+    return this.tokens.upload;
   }
 
   /**
@@ -1437,7 +1443,7 @@ export class BuildToolsAPI {
       // Retry once on auth-style failures with a fresh token.
       if ((resp.status === 401 || resp.status === 403) && attempt === 0) {
         attempt++;
-        this.uploadToken = null;
+        this.tokens.upload = null;
         continue;
       }
       throw new BuildToolsServerError(
@@ -1994,7 +2000,7 @@ export class BuildToolsAPI {
           "Content-Type": "application/x-www-form-urlencoded",
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
-          "X-XSRF-TOKEN": this.xsrfToken ?? "",
+          "X-XSRF-TOKEN": this.tokens.xsrf ?? "",
         },
         body: fd.toString(),
       },
@@ -2076,7 +2082,7 @@ export class BuildToolsAPI {
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
           "X-CSRF-TOKEN": csrf,
-          "X-XSRF-TOKEN": this.xsrfToken ?? "",
+          "X-XSRF-TOKEN": this.tokens.xsrf ?? "",
         },
         body: fd.toString(),
       },
@@ -2143,7 +2149,7 @@ export class BuildToolsAPI {
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
           "X-CSRF-TOKEN": csrf ?? "",
-          "X-XSRF-TOKEN": this.xsrfToken ?? "",
+          "X-XSRF-TOKEN": this.tokens.xsrf ?? "",
         },
         body: fd.toString(),
       },
@@ -2393,7 +2399,7 @@ export class BuildToolsAPI {
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
           "X-CSRF-TOKEN": csrf,
-          "X-XSRF-TOKEN": this.xsrfToken ?? "",
+          "X-XSRF-TOKEN": this.tokens.xsrf ?? "",
         },
         body: fd.toString(),
       },
@@ -2457,7 +2463,7 @@ export class BuildToolsAPI {
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
           "X-CSRF-TOKEN": csrf,
-          "X-XSRF-TOKEN": this.xsrfToken ?? "",
+          "X-XSRF-TOKEN": this.tokens.xsrf ?? "",
         },
         body: fd.toString(),
       },
@@ -2569,7 +2575,7 @@ export class BuildToolsAPI {
           "Content-Type": "application/x-www-form-urlencoded",
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
-          ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
         },
         body: formData.toString(),
       },
@@ -3202,7 +3208,7 @@ export class BuildToolsAPI {
           "Content-Type": "application/x-www-form-urlencoded",
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
-          ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
         },
         body: formData.toString(),
       },
@@ -3619,7 +3625,7 @@ export class BuildToolsAPI {
           "Content-Type": "application/x-www-form-urlencoded",
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
-          ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
         },
         body: form.toString(),
       },
@@ -3772,7 +3778,7 @@ export class BuildToolsAPI {
     // form fetch in the auto-transition path which calls this method
     // 2-3 times in succession). Fall back to a fresh form fetch.
     // PR #62 — review LOW finding from PR #61.
-    let csrf = this.cachedFormToken;
+    let csrf = this.tokens.form;
     if (!csrf) {
       const formResp = await this.requestWithReauthRetry(
         `${this.baseUrl}/purchase-orders/form/${poId}`,
@@ -3817,14 +3823,14 @@ export class BuildToolsAPI {
           "Content-Type": "application/x-www-form-urlencoded",
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
-          ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
         },
         body: buildBody(csrf),
       },
       false,
     );
     if (resp.status === 419) {
-      this.cachedFormToken = null;
+      this.tokens.form = null;
       const refreshResp = await this.requestWithReauthRetry(
         `${this.baseUrl}/purchase-orders/form/${poId}`,
         { headers: { "X-Requested-With": "XMLHttpRequest" } },
@@ -3858,7 +3864,7 @@ export class BuildToolsAPI {
             "Content-Type": "application/x-www-form-urlencoded",
             "X-Requested-With": "XMLHttpRequest",
             Accept: "application/json",
-            ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+            ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
           },
           body: buildBody(fresh),
         },
@@ -4039,7 +4045,7 @@ export class BuildToolsAPI {
           "Content-Type": "application/x-www-form-urlencoded",
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
-          ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
         },
         body: formData.toString(),
       },
@@ -4093,7 +4099,7 @@ export class BuildToolsAPI {
       false,
     );
 
-    let csrfToken: string | null = this.xsrfToken;
+    let csrfToken: string | null = this.tokens.xsrf;
     if (formResp.status === 200) {
       const tokenMatch = formResp.body.match(
         /name=['"]_token['"][^>]*value=['"]([^'"]+)['"]/i,
@@ -4124,7 +4130,7 @@ export class BuildToolsAPI {
           "Content-Type": "application/x-www-form-urlencoded",
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
-          ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
         },
         body: formData.toString(),
       },
@@ -4195,7 +4201,7 @@ export class BuildToolsAPI {
           "Content-Type": "application/x-www-form-urlencoded",
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
-          ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
         },
         body: formData.toString(),
       },
@@ -4328,7 +4334,7 @@ export class BuildToolsAPI {
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
           "X-CSRF-TOKEN": csrfToken,
-          ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
         },
         body: fd.toString(),
       },
@@ -4401,7 +4407,7 @@ export class BuildToolsAPI {
           "X-Requested-With": "XMLHttpRequest",
           Accept: "application/json",
           "X-CSRF-TOKEN": csrf,
-          ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
         },
         body: fd.toString(),
       },
