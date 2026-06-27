@@ -65,7 +65,6 @@ describe("checkIdempotency", () => {
     });
     storeIdempotencyResult({
       context: ctx1,
-      idempotencyStore: store,
       result: mkResult("original result"),
       isExecuteCall: true,
     });
@@ -94,7 +93,6 @@ describe("checkIdempotency", () => {
     });
     storeIdempotencyResult({
       context: ctx1,
-      idempotencyStore: store,
       result: mkResult("first"),
       isExecuteCall: true,
     });
@@ -107,8 +105,10 @@ describe("checkIdempotency", () => {
     });
     expect(ctx2.mismatchError).toBeDefined();
     expect(ctx2.mismatchError!.isError).toBe(true);
-    expect((ctx2.mismatchError!.content[0] as { text: string }).text).toContain(
-      "Idempotency key reused with different args",
+    // PR #67 review LOW 4: tighten assertion against the full wording
+    // (was just the prefix, which masked drift from the inline forms).
+    expect((ctx2.mismatchError!.content[0] as { text: string }).text).toMatch(
+      /within the last \d+ min.*Use a fresh key per distinct write/,
     );
   });
 
@@ -122,7 +122,6 @@ describe("checkIdempotency", () => {
     });
     storeIdempotencyResult({
       context: ctxA,
-      idempotencyStore: store,
       result: mkResult("from A"),
       isExecuteCall: true,
     });
@@ -147,7 +146,6 @@ describe("checkIdempotency", () => {
     });
     storeIdempotencyResult({
       context: ctxA,
-      idempotencyStore: store,
       result: mkResult("alice's"),
       isExecuteCall: true,
     });
@@ -174,7 +172,6 @@ describe("storeIdempotencyResult", () => {
     });
     storeIdempotencyResult({
       context: ctx,
-      idempotencyStore: store,
       result: mkResult("prompt"),
       isExecuteCall: false,
     });
@@ -191,7 +188,6 @@ describe("storeIdempotencyResult", () => {
     });
     storeIdempotencyResult({
       context: ctx,
-      idempotencyStore: store,
       result: mkError("BT failed"),
       isExecuteCall: true,
     });
@@ -208,7 +204,6 @@ describe("storeIdempotencyResult", () => {
     });
     storeIdempotencyResult({
       context: ctx,
-      idempotencyStore: store,
       result: mkResult("success"),
       isExecuteCall: true,
     });
@@ -225,19 +220,17 @@ describe("storeIdempotencyResult", () => {
     });
     storeIdempotencyResult({
       context: ctx,
-      idempotencyStore: store,
       result: mkResult("success"),
       isExecuteCall: true,
     });
     expect(store.size).toBe(1);
   });
 
-  it("no-op when store is undefined (caller doesn't use idempotency at all)", () => {
-    const ctx = { cacheKey: "k", argsFingerprint: "f" };
+  it("no-op when context has no store (caller didn't use idempotency at all)", () => {
+    const ctx = { cacheKey: "k", argsFingerprint: "f" }; // no store
     // Should not throw.
     storeIdempotencyResult({
       context: ctx,
-      idempotencyStore: undefined,
       result: mkResult("x"),
       isExecuteCall: true,
     });

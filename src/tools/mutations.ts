@@ -2462,7 +2462,6 @@ export function createMutationTools(
         // AND the result is not an error.
         storeIdempotencyResult({
           context: idemContext,
-          idempotencyStore,
           result,
           isExecuteCall: !!data.confirmation_id,
         });
@@ -2544,7 +2543,6 @@ export function createMutationTools(
 
         storeIdempotencyResult({
           context: idemContext,
-          idempotencyStore,
           result,
           isExecuteCall: !!data.confirmation_id,
         });
@@ -2604,16 +2602,22 @@ export function createMutationTools(
         // substituted by its SHA-256 in the fingerprint to keep the
         // cache key small while still detecting different file
         // contents as different writes.
+        // PR #67 review HIGH: skip the SHA computation entirely on
+        // the common path where idempotency_key isn't passed —
+        // base64 SHA on a ~33 MB file is tens of ms; not worth it
+        // when the helper would short-circuit anyway.
         const { confirmation_id: _ci, idempotency_key: _ik, file_base64: _fb, ...semantic } = data;
         const idemContext = checkIdempotency({
           toolName: "apply_vendor_quote",
           idempotencyStore,
           sessionId,
           idempotencyKey: data.idempotency_key,
-          fingerprintInput: {
-            ...semantic,
-            _file_sha256: createHash("sha256").update(data.file_base64).digest("hex"),
-          },
+          fingerprintInput: data.idempotency_key
+            ? {
+                ...semantic,
+                _file_sha256: createHash("sha256").update(data.file_base64).digest("hex"),
+              }
+            : semantic,
         });
         if (idemContext.replayResult) return idemContext.replayResult;
         if (idemContext.mismatchError) return idemContext.mismatchError;
@@ -2695,7 +2699,6 @@ export function createMutationTools(
 
         storeIdempotencyResult({
           context: idemContext,
-          idempotencyStore,
           result,
           isExecuteCall: !!data.confirmation_id,
         });
@@ -2870,7 +2873,6 @@ export function createMutationTools(
 
         storeIdempotencyResult({
           context: idemContext,
-          idempotencyStore,
           result,
           isExecuteCall: !!data.confirmation_id,
         });

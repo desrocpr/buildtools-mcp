@@ -65,6 +65,16 @@ export interface IdempotencyContext {
   cacheKey?: string;
   argsFingerprint?: string;
   /**
+   * Store reference bound at lookup time (PR #67 review MEDIUM). The
+   * `storeIdempotencyResult` helper uses this rather than taking a
+   * separate `idempotencyStore` parameter — that earlier API let a
+   * caller silently pass a DIFFERENT store on the store call vs the
+   * lookup call, which would have meant the cache key/fingerprint
+   * generated against store A were written into store B. Embedding
+   * the store here makes that drift impossible.
+   */
+  store?: IdempotencyStore;
+  /**
    * On cache hit: the cached result, ready to return verbatim. The
    * caller's outer handler should return this immediately without
    * doing any resolution work.
@@ -104,8 +114,6 @@ export interface CheckIdempotencyOptions {
 export interface StoreIdempotencyResultOptions {
   /** The context returned by `checkIdempotency` for this call. */
   context: IdempotencyContext;
-  /** The shared store. Pass through verbatim from the caller. */
-  idempotencyStore?: IdempotencyStore;
   /** The tool's final result. */
   result: ToolResult;
   /**
@@ -154,6 +162,7 @@ export function checkIdempotency(
     return {
       cacheKey,
       argsFingerprint,
+      store: opts.idempotencyStore,
       replayResult: {
         ...original,
         content: original.content.map((c) =>
@@ -166,12 +175,13 @@ export function checkIdempotency(
     return {
       cacheKey,
       argsFingerprint,
+      store: opts.idempotencyStore,
       mismatchError: errorMarkdown(
         `**Idempotency key reused with different args.** The key \`${escapeMarkdownInline(opts.idempotencyKey)}\` was previously used (within the last ${opts.idempotencyStore.ttlMinutes} min) with a DIFFERENT set of args. Use a fresh key per distinct write, or wait for the cache to expire.`,
       ),
     };
   }
-  return { cacheKey, argsFingerprint };
+  return { cacheKey, argsFingerprint, store: opts.idempotencyStore };
 }
 
 /**
@@ -186,7 +196,7 @@ export function checkIdempotency(
  */
 export function storeIdempotencyResult(opts: StoreIdempotencyResultOptions): void {
   if (
-    !opts.idempotencyStore ||
+    !opts.context.store ||
     !opts.context.cacheKey ||
     !opts.context.argsFingerprint ||
     !opts.isExecuteCall ||
@@ -194,7 +204,7 @@ export function storeIdempotencyResult(opts: StoreIdempotencyResultOptions): voi
   ) {
     return;
   }
-  opts.idempotencyStore.store(
+  opts.context.store.store(
     opts.context.cacheKey,
     opts.context.argsFingerprint,
     opts.result,

@@ -1,0 +1,253 @@
+project_id,project_name,project_location,statement_id,status,name,amount,paid,balance,date
+186000,Szente 1 Remodel,Fairfax,8312,Unknown,Paid,2500.00,2500.00,0.00,05/12/2026
+185999,O'Neil 1 Kitchen,Gaithersburg,8311,Unknown,Draft,3700.00,0.00,3700.00,05/12/2026
+185999,O'Neil 1 Kitchen,Gaithersburg,8310,Unknown,Draft,14800.00,0.00,14800.00,05/12/2026
+185999,O'Neil 1 Kitchen,Gaithersburg,8309,Unknown,Draft,55500.00,0.00,55500.00,05/12/2026
+185999,O'Neil 1 Kitchen,Gaithersburg,8308,Unknown,Draft,53000.00,0.00,53000.00,05/12/2026
+185999,O'Neil 1 Kitchen,Gaithersburg,8307,Unknown,Draft,27750.00,0.00,27750.00,05/12/2026
+185999,O'Neil 1 Kitchen,Gaithersburg,8306,Unknown,Draft,13875.00,0.00,13875.00,05/12/2026
+185999,O'Neil 1 Kitchen,Gaithersburg,8305,Unknown,Draft,13875.00,0.00,13875.00,05/12/2026
+185999,O'Neil 1 Kitchen,Gaithersburg,8304,Unknown,Paid,2500.00,2500.00,0.00,05/12/2026
+185998,Matzkin 1 Addition,Arlington,8300,Unknown,Paid,2500.00,2500.00,0.00,05/08/2026
+185995,Spaniol 1 Addition,Annandale,8322,Unknown,Draft,5600.00,0.00,5600.00,05/14/2026
+185995,Spaniol 1 Addition,Annandale,8321,Unknown,Draft,22400.00,0.00,22400.00,05/14/2026
+185995,Spaniol 1 Addition,Annandale,8320,Unknown,Draft,42000.00,0.00,42000.00,05/14/2026
+185995,Spaniol 1 Addition,Annandale,8319,Unknown,Draft,56000.00,0.00,56000.00,05/14/2026
+185995,Spaniol 1 Addition,Annandale,8318,Unknown,Draft,81500.00,0.00,81500.00,05/14/2026
+185995,Spaniol 1 Addition,Annandale,8317,Unknown,Draft,17500.00,0.00,17500.00,05/14/2026
+185995,Spaniol 1 Addition,Annandale,8316,Unknown,Draft,17500.00,0.00,17500.00,05/14/2026
+185995,Spaniol 1 Addition,Annandale,8315,Unknown,Draft,17500.00,0.00,17500.00,05/14/2026
+185995,Spaniol 1 Addition,Annandale,8314,Unknown,Draft,17500.00,0.00,17500.00,05/14/2026
+185995,Spaniol 1 Addition,Annandale,8278,Unknown,Paid,2500.00,2500.00,0.00,04/28/2026
+185992,Nicely 1 Addition,Haymarket,8243,Unknown,Draft,9500.00,0.00,9500.00,04/14/2026
+185992,Nicely 1 Addition,Haymarket,8242,Unknown,Draft,38000.00,0.00,38000.00,04/14/2026
+185992,Nicely 1 Addition,Haymarket,8241,Unknown,Draft,71250.00,0.00,71250.00,04/14/2026
+185992,Nicely 1 Addition,Haymarket,8240,Unknown,Draft,95000.00,0.00,95000.00,04/14/2026
+185992,Nicely 1 Addition,Haymarket,8239,Unknown,Draft,140000.00,0.00,140000.00,04/14/2026
+185992,Nicely 1 Addition,Haymarket,8238,Unknown,Draft,29687.50,0.00,29687.50,04/14/2026
+185992,Nicely 1 Addition,Haymarket,8237,Unknown,Draft,29687.50,0.00,29687.50,04/14/2026
+185992,Nicely 1 Addition,Haymarket,8236,Unknown,Draft,29687.50,0.00,29687.50,04/14/2026
+185992,Nicely 1 Addition,Haymarket,8235,Unknown,Draft,29687.50,0.00,29687.50,04/14/2026
+185992,Nicely 1 Addition,Haymarket,8234,Unknown,Paid,2500.00,2500.00,0.00,04/14/2026
+185988,Morris 1 Kitchen Addition,Washington,8207,Unknown,Draft,6000.00,0.00,6000.00,04/01/2026
+185988,Morris 1 Kitchen Addition,Washington,8206,Unknown,Draft,24000.00,0.00,24000.00,04/01/2026
+185988,Morris 1 Kitchen Addition,Washington,8205,Unknown,Draft,45000.00,0.00,45000.00,04/01/2026
+185988,Morris 1 Kitchen Addition,Washington,8204,Unknown,Draft,60000.00,0.00,60000.00,04/01/2026
+185988,Morris 1 Kitchen Addition,Washington,8203,Unknown,Draft,87500.00,0.00,87500.00,04/01/2026
+185988,Morris 1 Kitchen Addition,Washington,8202,Unknown,Draft,18750.00,0.00,18750.00,04/01/2026
+185988,Morris 1 Kitchen Addition,Washington,8201,Unknown,Draft,18750.00,0.00,18750.00,04/01/2026
+185988,Morris 1 Kitchen Addition,Washington,8200,Unknown,Paid,18750.00,18750.00,0.00,04/01/2026
+185988,Morris 1 Kitchen Addition,Washington,8199,Unknown,Paid,18750.00,18750.00,0.00,04/01/2026
+185988,Morris 1 Kitchen Addition,Washington,8198,Unknown,Paid,2500.00,2500.00,0.00,04/01/2026
+185987,Kuzara 1 Primary Bathroom,Haymarket,8197,Unknown,Draft,2300.00,0.00,2300.00,03/31/2026
+185987,Kuzara 1 Primary Bathroom,Haymarket,8196,Unknown,Draft,9200.00,0.00,9200.00,03/31/2026
+185987,Kuzara 1 Primary Bathroom,Haymarket,8195,Unknown,Draft,34500.00,0.00,34500.00,03/31/2026
+185987,Kuzara 1 Primary Bathroom,Haymarket,8194,Unknown,Draft,32000.00,0.00,32000.00,03/31/2026
+185987,Kuzara 1 Primary Bathroom,Haymarket,8193,Unknown,Draft,17250.00,0.00,17250.00,03/31/2026
+185987,Kuzara 1 Primary Bathroom,Haymarket,8192,Unknown,Draft,8625.00,0.00,8625.00,03/31/2026
+185987,Kuzara 1 Primary Bathroom,Haymarket,8191,Unknown,Paid,8625.00,8625.00,0.00,03/31/2026
+185987,Kuzara 1 Primary Bathroom,Haymarket,8190,Unknown,Paid,2500.00,2500.00,0.00,03/31/2026
+185982,McFeely 1 Addition,Bethesda,8158,Unknown,Draft,5500.00,0.00,5500.00,03/16/2026
+185982,McFeely 1 Addition,Bethesda,8157,Unknown,Draft,22000.00,0.00,22000.00,03/16/2026
+185982,McFeely 1 Addition,Bethesda,8156,Unknown,Draft,41250.00,0.00,41250.00,03/16/2026
+185982,McFeely 1 Addition,Bethesda,8155,Unknown,Draft,55000.00,0.00,55000.00,03/16/2026
+185982,McFeely 1 Addition,Bethesda,8154,Unknown,Draft,80000.00,0.00,80000.00,03/16/2026
+185982,McFeely 1 Addition,Bethesda,8153,Unknown,Draft,17187.50,0.00,17187.50,03/16/2026
+185982,McFeely 1 Addition,Bethesda,8152,Unknown,Draft,17187.50,0.00,17187.50,03/16/2026
+185982,McFeely 1 Addition,Bethesda,8151,Unknown,Paid,17187.50,17187.50,0.00,03/16/2026
+185982,McFeely 1 Addition,Bethesda,8150,Unknown,Paid,17187.50,17187.50,0.00,03/16/2026
+185982,McFeely 1 Addition,Bethesda,8149,Unknown,Paid,2500.00,2500.00,0.00,03/16/2026
+185975,Grivas 1 Exterior,Leesburg,8088,Unknown,Draft,3500.00,0.00,3500.00,03/01/2026
+185975,Grivas 1 Exterior,Leesburg,8087,Unknown,Draft,14000.00,0.00,14000.00,03/01/2026
+185975,Grivas 1 Exterior,Leesburg,8086,Unknown,Draft,52500.00,0.00,52500.00,03/01/2026
+185975,Grivas 1 Exterior,Leesburg,8085,Unknown,Draft,50000.00,0.00,50000.00,03/01/2026
+185975,Grivas 1 Exterior,Leesburg,8084,Unknown,Draft,26250.00,0.00,26250.00,03/01/2026
+185975,Grivas 1 Exterior,Leesburg,8083,Unknown,Paid,13125.00,13125.00,0.00,03/01/2026
+185975,Grivas 1 Exterior,Leesburg,8082,Unknown,Paid,13125.00,13125.00,0.00,03/01/2026
+185975,Grivas 1 Exterior,Leesburg,8081,Unknown,Paid,2500.00,2500.00,0.00,03/01/2026
+185974,Neff 2 Kitchen,Ashburn,8071,Unknown,Draft,2900.00,0.00,2900.00,02/25/2026
+185974,Neff 2 Kitchen,Ashburn,8070,Unknown,Draft,11600.00,0.00,11600.00,02/25/2026
+185974,Neff 2 Kitchen,Ashburn,8069,Unknown,Draft,43500.00,0.00,43500.00,02/25/2026
+185974,Neff 2 Kitchen,Ashburn,8068,Unknown,Draft,41000.00,0.00,41000.00,02/25/2026
+185974,Neff 2 Kitchen,Ashburn,8067,Unknown,Draft,21750.00,0.00,21750.00,02/25/2026
+185974,Neff 2 Kitchen,Ashburn,8066,Unknown,Paid,10875.00,10875.00,0.00,02/25/2026
+185974,Neff 2 Kitchen,Ashburn,8065,Unknown,Paid,10875.00,10875.00,0.00,02/25/2026
+185974,Neff 2 Kitchen,Ashburn,8064,Unknown,Paid,2500.00,2500.00,0.00,02/25/2026
+185966,API Example 1976 Test,Vienna,8002,Unknown,Draft,0.00,0.00,0.00,02/06/2026
+185966,API Example 1976 Test,Vienna,8001,Unknown,Draft,0.00,0.00,0.00,02/06/2026
+185966,API Example 1976 Test,Vienna,8000,Unknown,Draft,0.00,0.00,0.00,02/06/2026
+185962,Kuruvilla 1 Interior Remodel,Clifton,7981,Unknown,Draft,1300.00,0.00,1300.00,02/03/2026
+185962,Kuruvilla 1 Interior Remodel,Clifton,7980,Unknown,Draft,5200.00,0.00,5200.00,02/03/2026
+185962,Kuruvilla 1 Interior Remodel,Clifton,7979,Unknown,Draft,19500.00,0.00,19500.00,02/03/2026
+185962,Kuruvilla 1 Interior Remodel,Clifton,7978,Unknown,Paid,11830.41,11830.41,0.00,02/03/2026
+185962,Kuruvilla 1 Interior Remodel,Clifton,7977,Unknown,Paid,9750.00,9750.00,0.00,02/03/2026
+185962,Kuruvilla 1 Interior Remodel,Clifton,7976,Unknown,Paid,4875.00,4875.00,0.00,02/03/2026
+185962,Kuruvilla 1 Interior Remodel,Clifton,7975,Unknown,Paid,4875.00,4875.00,0.00,02/03/2026
+185962,Kuruvilla 1 Interior Remodel,Clifton,7974,Unknown,Paid,2500.00,2500.00,0.00,02/03/2026
+185951,Petullo 1 Addition,Bristow,7887,Unknown,Draft,1900.00,0.00,1900.00,12/26/2025
+185951,Petullo 1 Addition,Bristow,7886,Unknown,Draft,7600.00,0.00,7600.00,12/26/2025
+185951,Petullo 1 Addition,Bristow,7885,Unknown,Draft,14250.00,0.00,14250.00,12/26/2025
+185951,Petullo 1 Addition,Bristow,7884,Unknown,Draft,19000.00,0.00,19000.00,12/26/2025
+185951,Petullo 1 Addition,Bristow,7883,Unknown,Draft,26000.00,0.00,26000.00,12/26/2025
+185951,Petullo 1 Addition,Bristow,7882,Unknown,Draft,5937.50,0.00,5937.50,12/26/2025
+185951,Petullo 1 Addition,Bristow,7881,Unknown,Paid,5937.50,6000.00,0.00,12/26/2025
+185951,Petullo 1 Addition,Bristow,7880,Unknown,Paid,5937.50,6000.00,0.00,12/26/2025
+185951,Petullo 1 Addition,Bristow,7879,Unknown,Paid,5937.50,6000.00,0.00,12/26/2025
+185951,Petullo 1 Addition,Bristow,7878,Unknown,Paid,2500.00,2500.00,0.00,12/26/2025
+185944,Amdall 1 Basement,Manassas,7797,Unknown,Draft,2500.00,0.00,2500.00,11/26/2025
+185944,Amdall 1 Basement,Manassas,7796,Unknown,Draft,10000.00,0.00,10000.00,11/26/2025
+185944,Amdall 1 Basement,Manassas,7795,Unknown,Draft,37500.00,0.00,37500.00,11/26/2025
+185944,Amdall 1 Basement,Manassas,7794,Unknown,Draft,35000.00,0.00,35000.00,11/26/2025
+185944,Amdall 1 Basement,Manassas,7793,Unknown,Draft,18750.00,0.00,18750.00,11/26/2025
+185944,Amdall 1 Basement,Manassas,7792,Unknown,Paid,18750.00,18750.00,0.00,11/26/2025
+185944,Amdall 1 Basement,Manassas,7791,Unknown,Paid,2500.00,2500.00,0.00,11/26/2025
+185933,Burke 2 Cabinet Conversion,Fairfax,7725,Unknown,Paid,541.00,541.00,0.00,10/21/2025
+185933,Burke 2 Cabinet Conversion,Fairfax,7724,Unknown,Paid,541.00,541.00,0.00,10/21/2025
+185933,Burke 2 Cabinet Conversion,Fairfax,7723,Unknown,Paid,1082.00,1082.00,0.00,10/21/2025
+185931,Stover 1 Interior Remodel,Aldie,8263,Unknown,Paid,6940.00,6940.00,0.00,04/20/2026
+185931,Stover 1 Interior Remodel,Aldie,8189,Unknown,Draft,5000.00,0.00,5000.00,03/31/2026
+185931,Stover 1 Interior Remodel,Aldie,8188,Unknown,Paid,47500.00,47500.00,0.00,03/31/2026
+185931,Stover 1 Interior Remodel,Aldie,8102,Unknown,Paid,47833.08,47833.08,0.00,03/06/2026
+185931,Stover 1 Interior Remodel,Aldie,7870,Unknown,Paid,55000.00,55000.00,0.00,12/19/2025
+185931,Stover 1 Interior Remodel,Aldie,7719,Unknown,Draft,10500.00,0.00,10500.00,10/15/2025
+185931,Stover 1 Interior Remodel,Aldie,7718,Unknown,Draft,32000.00,0.00,32000.00,10/15/2025
+185931,Stover 1 Interior Remodel,Aldie,7717,Unknown,Paid,50000.00,50000.00,0.00,10/15/2025
+185931,Stover 1 Interior Remodel,Aldie,7716,Unknown,Paid,100000.00,100000.00,0.00,10/15/2025
+185931,Stover 1 Interior Remodel,Aldie,7715,Unknown,Paid,41250.00,41250.00,0.00,10/15/2025
+185931,Stover 1 Interior Remodel,Aldie,7714,Unknown,Paid,20625.00,20625.00,0.00,10/15/2025
+185931,Stover 1 Interior Remodel,Aldie,7713,Unknown,Paid,20625.00,20625.00,0.00,10/15/2025
+185931,Stover 1 Interior Remodel,Aldie,7712,Unknown,Paid,2500.00,2500.00,0.00,10/15/2025
+185930,Schmidt 2 Basement,Fairfax,7875,Unknown,Paid,59917.19,59917.19,0.00,12/23/2025
+185930,Schmidt 2 Basement,Fairfax,7694,Unknown,To Pay,1725.54,0.00,1725.54,10/09/2025
+185930,Schmidt 2 Basement,Fairfax,7693,Unknown,Paid,7200.00,7200.00,0.00,10/09/2025
+185930,Schmidt 2 Basement,Fairfax,7692,Unknown,Paid,27000.00,27000.00,0.00,10/09/2025
+185930,Schmidt 2 Basement,Fairfax,7691,Unknown,Paid,24500.00,24500.00,0.00,10/09/2025
+185930,Schmidt 2 Basement,Fairfax,7690,Unknown,Paid,13500.00,13500.00,0.00,10/09/2025
+185930,Schmidt 2 Basement,Fairfax,7689,Unknown,Paid,13500.00,13500.00,0.00,10/09/2025
+185930,Schmidt 2 Basement,Fairfax,7688,Unknown,Paid,2500.00,2500.00,0.00,10/09/2025
+185914,Ingersoll 1 Addition,Manassas,7859,Unknown,Paid,2944.24,3000.00,0.00,12/10/2025
+185914,Ingersoll 1 Addition,Manassas,7554,Unknown,Draft,3700.00,0.00,3700.00,09/03/2025
+185914,Ingersoll 1 Addition,Manassas,7553,Unknown,Draft,14800.00,0.00,14800.00,09/03/2025
+185914,Ingersoll 1 Addition,Manassas,7552,Unknown,Draft,25252.00,0.00,25252.00,09/03/2025
+185914,Ingersoll 1 Addition,Manassas,7551,Unknown,Draft,37000.00,0.00,37000.00,09/03/2025
+185914,Ingersoll 1 Addition,Manassas,7550,Unknown,Draft,55500.00,0.00,55500.00,09/03/2025
+185914,Ingersoll 1 Addition,Manassas,7549,Unknown,Draft,11562.00,0.00,11562.00,09/03/2025
+185914,Ingersoll 1 Addition,Manassas,7548,Unknown,Paid,11562.00,12000.00,0.00,09/03/2025
+185914,Ingersoll 1 Addition,Manassas,7547,Unknown,Paid,11562.00,11562.00,0.00,09/03/2025
+185914,Ingersoll 1 Addition,Manassas,7546,Unknown,Paid,11562.00,11562.00,0.00,09/03/2025
+185914,Ingersoll 1 Addition,Manassas,7545,Unknown,Paid,2500.00,2500.00,0.00,09/03/2025
+185911,Mckee 1 Addition,Fairfax,7532,Unknown,Draft,16450.00,0.00,16450.00,08/26/2025
+185911,Mckee 1 Addition,Fairfax,7531,Unknown,Draft,65800.00,0.00,65800.00,08/26/2025
+185911,Mckee 1 Addition,Fairfax,7530,Unknown,Draft,123375.00,0.00,123375.00,08/26/2025
+185911,Mckee 1 Addition,Fairfax,7529,Unknown,Draft,164500.00,0.00,164500.00,08/26/2025
+185911,Mckee 1 Addition,Fairfax,7528,Unknown,Draft,246750.00,0.00,246750.00,08/26/2025
+185911,Mckee 1 Addition,Fairfax,7527,Unknown,Draft,51406.25,0.00,51406.25,08/26/2025
+185911,Mckee 1 Addition,Fairfax,7526,Unknown,Paid,51406.25,51406.25,0.00,08/26/2025
+185911,Mckee 1 Addition,Fairfax,7525,Unknown,Paid,51406.25,51406.25,0.00,08/26/2025
+185911,Mckee 1 Addition,Fairfax,7524,Unknown,Paid,51406.25,51406.25,0.00,08/26/2025
+185911,Mckee 1 Addition,Fairfax,7523,Unknown,Paid,2500.00,2500.00,0.00,08/26/2025
+185907,Katchmark 1 Addition,Centreville,8128,Unknown,Paid,56000.00,56000.00,0.00,03/12/2026
+185907,Katchmark 1 Addition,Centreville,7491,Unknown,Draft,9000.00,0.00,9000.00,08/11/2025
+185907,Katchmark 1 Addition,Centreville,7490,Unknown,Draft,46000.00,0.00,46000.00,08/11/2025
+185907,Katchmark 1 Addition,Centreville,7489,Unknown,Draft,86250.00,0.00,86250.00,08/11/2025
+185907,Katchmark 1 Addition,Centreville,7488,Unknown,Draft,115000.00,0.00,115000.00,08/11/2025
+185907,Katchmark 1 Addition,Centreville,7487,Unknown,Paid,172500.00,172500.00,0.00,08/11/2025
+185907,Katchmark 1 Addition,Centreville,7486,Unknown,Paid,28750.00,28750.00,0.00,08/11/2025
+185907,Katchmark 1 Addition,Centreville,7485,Unknown,Paid,28750.00,28750.00,0.00,08/11/2025
+185907,Katchmark 1 Addition,Centreville,7484,Unknown,Paid,43125.00,43125.00,0.00,08/11/2025
+185907,Katchmark 1 Addition,Centreville,7483,Unknown,Paid,43125.00,43125.00,0.00,08/11/2025
+185907,Katchmark 1 Addition,Centreville,7482,Unknown,Paid,2500.00,2500.00,0.00,08/11/2025
+185905,Cabero 1 Addition,Chantilly,8105,Unknown,Paid,6343.00,6343.00,0.00,03/06/2026
+185905,Cabero 1 Addition,Chantilly,8104,Unknown,Paid,6758.00,6758.00,0.00,03/06/2026
+185905,Cabero 1 Addition,Chantilly,7636,Unknown,Paid,65698.00,65698.00,0.00,09/26/2025
+185905,Cabero 1 Addition,Chantilly,7472,Unknown,To Pay,5217.94,0.00,5217.94,07/28/2025
+185905,Cabero 1 Addition,Chantilly,7471,Unknown,Paid,24900.00,24900.00,0.00,07/28/2025
+185905,Cabero 1 Addition,Chantilly,7470,Unknown,Paid,53748.00,53748.00,0.00,07/28/2025
+185905,Cabero 1 Addition,Chantilly,7469,Unknown,Paid,75000.00,75000.00,0.00,07/28/2025
+185905,Cabero 1 Addition,Chantilly,7468,Unknown,Paid,112500.00,112500.00,0.00,07/28/2025
+185905,Cabero 1 Addition,Chantilly,7467,Unknown,Paid,23438.00,23438.00,0.00,07/28/2025
+185905,Cabero 1 Addition,Chantilly,7466,Unknown,Paid,23438.00,23438.00,0.00,07/28/2025
+185905,Cabero 1 Addition,Chantilly,7465,Unknown,Paid,23438.00,23438.00,0.00,07/28/2025
+185905,Cabero 1 Addition,Chantilly,7464,Unknown,Paid,23438.00,23438.00,0.00,07/28/2025
+185905,Cabero 1 Addition,Chantilly,7463,Unknown,Paid,2500.00,2500.00,0.00,07/28/2025
+185891,Martinez 1 Addition,Reston,8267,Unknown,Draft,998.42,0.00,998.42,04/24/2026
+185891,Martinez 1 Addition,Reston,8090,Unknown,Paid,4530.00,4530.00,0.00,03/02/2026
+185891,Martinez 1 Addition,Reston,7818,Unknown,Paid,6300.00,6300.00,0.00,12/03/2025
+185891,Martinez 1 Addition,Reston,7330,Unknown,Paid,8000.00,8000.00,0.00,06/03/2025
+185891,Martinez 1 Addition,Reston,7329,Unknown,Paid,58000.00,58000.00,0.00,06/03/2025
+185891,Martinez 1 Addition,Reston,7328,Unknown,Paid,87000.00,87000.00,0.00,06/03/2025
+185891,Martinez 1 Addition,Reston,7327,Unknown,Paid,87000.00,87000.00,0.00,06/03/2025
+185891,Martinez 1 Addition,Reston,7326,Unknown,Paid,49300.00,49300.00,0.00,06/02/2025
+185884,Liff 1 Kitchen,Fairfax,8303,Unknown,Paid,3820.00,3820.00,0.00,05/11/2026
+185884,Liff 1 Kitchen,Fairfax,8289,Unknown,Draft,650.00,0.00,650.00,04/30/2026
+185884,Liff 1 Kitchen,Fairfax,7972,Unknown,Paid,1430.00,1430.00,0.00,01/29/2026
+185884,Liff 1 Kitchen,Fairfax,7605,Unknown,Paid,30729.31,30729.31,0.00,09/18/2025
+185884,Liff 1 Kitchen,Fairfax,7276,Unknown,Paid,12570.20,12570.20,0.00,04/18/2025
+185884,Liff 1 Kitchen,Fairfax,7275,Unknown,Paid,12000.00,12000.00,0.00,04/18/2025
+185884,Liff 1 Kitchen,Fairfax,7274,Unknown,Paid,45000.00,45000.00,0.00,04/18/2025
+185884,Liff 1 Kitchen,Fairfax,7273,Unknown,Paid,62782.98,62782.98,0.00,04/18/2025
+185884,Liff 1 Kitchen,Fairfax,7272,Unknown,Paid,15000.00,15000.00,0.00,04/18/2025
+185884,Liff 1 Kitchen,Fairfax,7271,Unknown,Paid,7500.00,7500.00,0.00,04/18/2025
+185884,Liff 1 Kitchen,Fairfax,7270,Unknown,Paid,7500.00,7500.00,0.00,04/18/2025
+185884,Liff 1 Kitchen,Fairfax,7269,Unknown,Paid,15000.00,15000.00,0.00,04/18/2025
+185870,Keith 1 Addition,Oakton,8251,Unknown,Paid,31483.45,31483.45,0.00,04/15/2026
+185870,Keith 1 Addition,Oakton,7107,Unknown,Draft,13787.69,0.00,13787.69,02/05/2025
+185870,Keith 1 Addition,Oakton,7106,Unknown,Draft,36287.69,0.00,36287.69,02/05/2025
+185870,Keith 1 Addition,Oakton,7105,Unknown,Draft,62537.69,0.00,62537.69,02/05/2025
+185870,Keith 1 Addition,Oakton,7104,Unknown,Draft,81287.69,0.00,81287.69,02/05/2025
+185870,Keith 1 Addition,Oakton,7103,Unknown,Draft,118787.69,0.00,118787.69,02/05/2025
+185870,Keith 1 Addition,Oakton,7102,Unknown,Paid,18750.00,18750.00,0.00,02/05/2025
+185870,Keith 1 Addition,Oakton,7101,Unknown,Paid,18750.00,18750.00,0.00,02/05/2025
+185870,Keith 1 Addition,Oakton,7100,Unknown,Paid,18750.00,18750.00,0.00,02/05/2025
+185870,Keith 1 Addition,Oakton,7099,Unknown,Paid,18750.00,18750.00,0.00,02/05/2025
+185870,Keith 1 Addition,Oakton,7098,Unknown,Paid,18750.00,18750.00,0.00,02/05/2025
+185864,Gonzalez 1 Addition,Fairfax,8103,Unknown,Paid,2300.00,2300.00,0.00,03/06/2026
+185864,Gonzalez 1 Addition,Fairfax,7334,Unknown,Paid,4175.00,4175.00,0.00,06/09/2025
+185864,Gonzalez 1 Addition,Fairfax,7042,Unknown,Paid,3842.86,3842.86,0.00,12/30/2024
+185864,Gonzalez 1 Addition,Fairfax,7041,Unknown,Paid,31216.37,31216.37,0.00,12/30/2024
+185864,Gonzalez 1 Addition,Fairfax,7040,Unknown,Paid,84000.00,84000.00,0.00,12/30/2024
+185864,Gonzalez 1 Addition,Fairfax,7039,Unknown,Paid,90830.90,90830.90,0.00,12/30/2024
+185864,Gonzalez 1 Addition,Fairfax,7038,Unknown,Paid,28000.00,28000.00,0.00,12/30/2024
+185864,Gonzalez 1 Addition,Fairfax,7037,Unknown,Paid,14000.00,14000.00,0.00,12/30/2024
+185864,Gonzalez 1 Addition,Fairfax,7036,Unknown,Paid,14000.00,14000.00,0.00,12/30/2024
+185864,Gonzalez 1 Addition,Fairfax,7035,Unknown,Paid,28000.00,28000.00,0.00,12/30/2024
+185861,Victor 1 Addition,Manassas,7817,Unknown,Paid,9886.00,9886.00,0.00,12/03/2025
+185861,Victor 1 Addition,Manassas,6997,Unknown,To Pay,12500.00,0.00,12500.00,12/11/2024
+185861,Victor 1 Addition,Manassas,6996,Unknown,Paid,24457.79,24457.79,0.00,12/11/2024
+185861,Victor 1 Addition,Manassas,6995,Unknown,Paid,22510.00,22510.00,0.00,12/11/2024
+185861,Victor 1 Addition,Manassas,6994,Unknown,Paid,140625.00,140625.00,0.00,12/11/2024
+185861,Victor 1 Addition,Manassas,6993,Unknown,Paid,187500.00,187500.00,0.00,12/11/2024
+185861,Victor 1 Addition,Manassas,6992,Unknown,Paid,31250.00,31250.00,0.00,12/11/2024
+185861,Victor 1 Addition,Manassas,6991,Unknown,Paid,31250.00,31250.00,0.00,12/11/2024
+185861,Victor 1 Addition,Manassas,6990,Unknown,Paid,31250.00,31250.00,0.00,12/11/2024
+185861,Victor 1 Addition,Manassas,6989,Unknown,Paid,31250.00,31250.00,0.00,12/11/2024
+185861,Victor 1 Addition,Manassas,6988,Unknown,Paid,12500.00,12500.00,0.00,12/11/2024
+185848,Thompson 2 Home Services,Centreville,6888,Unknown,Draft,600.00,0.00,600.00,09/23/2024
+185848,Thompson 2 Home Services,Centreville,6887,Unknown,Draft,2400.00,0.00,2400.00,09/23/2024
+185848,Thompson 2 Home Services,Centreville,6886,Unknown,Paid,3000.00,3000.00,0.00,09/23/2024
+185846,Brooks 1 Bathroom,Arlington,6877,Unknown,Paid,1127.97,1127.97,0.00,09/17/2024
+185846,Brooks 1 Bathroom,Arlington,6876,Unknown,Paid,3120.00,3120.00,0.00,09/17/2024
+185846,Brooks 1 Bathroom,Arlington,6875,Unknown,Paid,16203.45,16203.45,0.00,09/17/2024
+185846,Brooks 1 Bathroom,Arlington,6874,Unknown,Paid,16203.45,16203.45,0.00,09/17/2024
+185846,Brooks 1 Bathroom,Arlington,6873,Unknown,Paid,3900.00,3900.00,0.00,09/17/2024
+185846,Brooks 1 Bathroom,Arlington,6872,Unknown,Paid,1950.00,1950.00,0.00,09/17/2024
+185846,Brooks 1 Bathroom,Arlington,6871,Unknown,Paid,1950.00,1950.00,0.00,09/17/2024
+185846,Brooks 1 Bathroom,Arlington,6870,Unknown,Paid,3900.00,3900.00,0.00,09/17/2024
+185819,Johannessen 1 Wet Bar,Springfield,6985,Unknown,Draft,1226.95,0.00,1226.95,12/11/2024
+185819,Johannessen 1 Wet Bar,Springfield,6637,Unknown,To Pay,4600.00,0.00,4600.00,06/27/2024
+185819,Johannessen 1 Wet Bar,Springfield,6636,Unknown,Paid,13275.00,13275.00,0.00,06/27/2024
+185819,Johannessen 1 Wet Bar,Springfield,6635,Unknown,Paid,15875.00,15875.00,0.00,06/27/2024
+185819,Johannessen 1 Wet Bar,Springfield,6634,Unknown,Paid,2600.00,2600.00,0.00,06/27/2024
+185819,Johannessen 1 Wet Bar,Springfield,6633,Unknown,Paid,3250.00,3250.00,0.00,06/27/2024
+185819,Johannessen 1 Wet Bar,Springfield,6632,Unknown,Paid,3250.00,3250.00,0.00,06/27/2024
+185814,Selchert 1 Addition,Fairfax,7298,Unknown,Paid,1200.00,1200.00,0.00,05/15/2025
+185814,Selchert 1 Addition,Fairfax,6600,Unknown,Paid,8260.00,8260.00,0.00,06/03/2024
+185814,Selchert 1 Addition,Fairfax,6599,Unknown,Paid,33040.00,33040.00,0.00,06/03/2024
+185814,Selchert 1 Addition,Fairfax,6598,Unknown,Paid,61950.00,61950.00,0.00,06/03/2024
+185814,Selchert 1 Addition,Fairfax,6597,Unknown,Paid,82600.00,82600.00,0.00,06/03/2024
+185814,Selchert 1 Addition,Fairfax,6596,Unknown,Partly Paid,138040.00,118690.00,19350.00,06/03/2024
+185814,Selchert 1 Addition,Fairfax,6595,Unknown,Paid,20650.00,40000.00,0.00,06/03/2024
+185814,Selchert 1 Addition,Fairfax,6594,Unknown,Paid,20650.00,20650.00,0.00,06/03/2024
+185814,Selchert 1 Addition,Fairfax,6593,Unknown,Paid,20650.00,20650.00,0.00,06/03/2024
+185814,Selchert 1 Addition,Fairfax,6592,Unknown,Paid,20650.00,20650.00,0.00,06/03/2024
+185814,Selchert 1 Addition,Fairfax,6591,Unknown,Paid,20650.00,20650.00,0.00,06/03/2024
