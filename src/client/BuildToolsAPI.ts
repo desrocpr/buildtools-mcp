@@ -305,6 +305,30 @@ export class BuildToolsAPI {
   /** Decoded `XSRF-TOKEN` cookie value, sent as `X-XSRF-TOKEN` header. */
   private xsrfToken: string | null = null;
 
+  /**
+   * Cached `_token` form field, harvested opportunistically from any
+   * form HTML the client fetches. BT (Laravel) issues a session-bound
+   * CSRF token that's stable for the session lifetime. Caching saves
+   * a form fetch on calls that ONLY need the token (e.g.
+   * `transitionPurchaseOrderStatus` doesn't otherwise need the form
+   * body). Invalidated by `authenticate()` and by any 419 response.
+   */
+  private cachedFormToken: string | null = null;
+
+  /**
+   * Extract `_token` from form HTML and cache it. Called from any site
+   * that already fetched form HTML for other reasons, so subsequent
+   * token-only consumers can reuse without a second fetch.
+   */
+  private absorbFormToken(formHtml: string): string | null {
+    const m = formHtml.match(/name="_token"[^>]*value="([^"]+)"/);
+    if (m) {
+      this.cachedFormToken = m[1];
+      return m[1];
+    }
+    return null;
+  }
+
   /** Application host (default `https://moss.buildtools.app`). */
   public readonly baseUrl: string;
 
@@ -576,6 +600,10 @@ export class BuildToolsAPI {
     // followed by a manual `authenticate()` call would leave the
     // upload path using a stale token until the first failure.
     this.uploadToken = null;
+    // Same logic for the cached form-CSRF token (PR #62 — class-level
+    // token cache). Authentication invalidates any session-bound
+    // token; the next form fetch will re-populate.
+    this.cachedFormToken = null;
 
     // 1. GET login page (NO redirect follow) to harvest CSRF `_token`.
     const loginPage = await this.request(
@@ -3004,6 +3032,13 @@ export class BuildToolsAPI {
 
     const body = response.body;
 
+    // Opportunistically harvest the form's _token while we have it —
+    // saves a round-trip in transitionPurchaseOrderStatus when it's
+    // called shortly after (e.g. in the auto-transition path the
+    // outer handler does getPurchaseOrder for the pre-snapshot;
+    // transitionPurchaseOrderStatus then reuses the cached token).
+    this.absorbFormToken(body);
+
     const stripValue = decodeFormEntities;
 
     const inputValue = (fieldName: string): string => {
@@ -3685,33 +3720,45 @@ export class BuildToolsAPI {
       return { success: false, errors: "purchase_order_id is not a number" };
     }
 
-    // Harvest CSRF from the PO's edit form (cheap fetch; reuses the
-    // same path the other write methods use).
-    const formResp = await this.requestWithReauthRetry(
-      `${this.baseUrl}/purchase-orders/form/${poId}`,
-      { headers: { "X-Requested-With": "XMLHttpRequest" } },
-      false,
-    );
-    if (formResp.status !== 200) {
-      return {
-        success: false,
-        errors: `Could not fetch PO form to harvest CSRF (HTTP ${formResp.status})`,
-      };
-    }
-    const csrf = formResp.body.match(/name="_token"[^>]*value="([^"]+)"/)?.[1];
+    // CSRF token: use the class-level cache when populated (saves a
+    // form fetch in the auto-transition path which calls this method
+    // 2-3 times in succession). Fall back to a fresh form fetch.
+    // PR #62 — review LOW finding from PR #61.
+    let csrf = this.cachedFormToken;
     if (!csrf) {
-      return {
-        success: false,
-        errors: "Could not harvest CSRF _token from PO form",
-      };
+      const formResp = await this.requestWithReauthRetry(
+        `${this.baseUrl}/purchase-orders/form/${poId}`,
+        { headers: { "X-Requested-With": "XMLHttpRequest" } },
+        false,
+      );
+      if (formResp.status !== 200) {
+        return {
+          success: false,
+          errors: `Could not fetch PO form to harvest CSRF (HTTP ${formResp.status})`,
+        };
+      }
+      csrf = this.absorbFormToken(formResp.body);
+      if (!csrf) {
+        return {
+          success: false,
+          errors: "Could not harvest CSRF _token from PO form",
+        };
+      }
     }
 
-    const form = new URLSearchParams();
-    form.append("_token", csrf);
-    form.append("ids[]", String(poId));
-    form.append("status", String(opts.status));
+    const buildBody = (token: string) => {
+      const form = new URLSearchParams();
+      form.append("_token", token);
+      form.append("ids[]", String(poId));
+      form.append("status", String(opts.status));
+      return form.toString();
+    };
 
-    const resp = await this.request(
+    // Retry-once on 419 (Laravel's "Page expired" / CSRF mismatch).
+    // The cached token may have rotated since we last fetched a form;
+    // a fresh form fetch + retry gets us back to a working state
+    // without surfacing the failure to the caller.
+    let resp = await this.request(
       `${this.baseUrl}/purchase-orders/status/update`,
       {
         method: "POST",
@@ -3721,10 +3768,35 @@ export class BuildToolsAPI {
           Accept: "application/json",
           ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
         },
-        body: form.toString(),
+        body: buildBody(csrf),
       },
       false,
     );
+    if (resp.status === 419) {
+      this.cachedFormToken = null;
+      const refreshResp = await this.requestWithReauthRetry(
+        `${this.baseUrl}/purchase-orders/form/${poId}`,
+        { headers: { "X-Requested-With": "XMLHttpRequest" } },
+        false,
+      );
+      const fresh = this.absorbFormToken(refreshResp.body);
+      if (fresh) {
+        resp = await this.request(
+          `${this.baseUrl}/purchase-orders/status/update`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/x-www-form-urlencoded",
+              "X-Requested-With": "XMLHttpRequest",
+              Accept: "application/json",
+              ...(this.xsrfToken ? { "X-XSRF-TOKEN": this.xsrfToken } : {}),
+            },
+            body: buildBody(fresh),
+          },
+          false,
+        );
+      }
+    }
 
     // Response shape: `{r: 0|1, msg: string[], s: <success count>, f:
     // <failure count>, l: [singular, plural]}`. Non-numeric `r:1`

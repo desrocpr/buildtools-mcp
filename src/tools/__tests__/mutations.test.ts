@@ -1536,3 +1536,93 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
     expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("transition_purchase_order_status — standalone tool (PR #62)", () => {
+  function findTransitionTool(api: BuildToolsAPI, store: ConfirmationStore) {
+    const tools = createMutationTools(() => api, store);
+    const tool = tools.find((t) => t.name === "transition_purchase_order_status");
+    if (!tool) throw new Error("transition_purchase_order_status not registered");
+    return tool;
+  }
+
+  it("registered with the expected schema (purchase_order_id + status by label or code)", () => {
+    const api = fakeApi({});
+    const tool = findTransitionTool(api, mkStore());
+    const schema = tool.inputSchema as any;
+    expect(schema.properties.purchase_order_id).toBeDefined();
+    expect(schema.properties.status).toBeDefined();
+    expect(schema.properties.confirmation_id).toBeDefined();
+  });
+
+  it("resolves label → code and calls api.transitionPurchaseOrderStatus", async () => {
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      success: true, message: "Status updated.",
+    });
+    const api = fakeApi({
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findTransitionTool(api, mkStore());
+
+    const args = { purchase_order_id: 39752, status: "Sent" as const };
+    const prompt = await tool.handler(args, api);
+    const promptText = textOf(prompt);
+    // Prompt shows the resolved label + code so the user can verify intent
+    expect(promptText.toLowerCase()).toContain("transition purchase order #39752");
+    expect(promptText).toContain("Sent");
+
+    const confirmationId = promptText.match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const result = await tool.handler({ ...args, confirmation_id: confirmationId }, api);
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain("Sent");
+
+    expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(1);
+    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({
+      purchaseOrderId: 39752,
+      status: 2,
+    });
+  });
+
+  it("accepts numeric status codes", async () => {
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      success: true, message: "ok",
+    });
+    const api = fakeApi({
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findTransitionTool(api, mkStore());
+
+    const args = { purchase_order_id: 39752, status: 1 };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(transitionPurchaseOrderStatus.mock.calls[0][0].status).toBe(1);
+  });
+
+  it("surfaces transition errors from the API verbatim (e.g. signature requirement)", async () => {
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      success: false, errors: "The Signature field is required.",
+    });
+    const api = fakeApi({
+      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findTransitionTool(api, mkStore());
+
+    const args = { purchase_order_id: 39752, status: "Confirmed" as const };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const result = await tool.handler({ ...args, confirmation_id: cid }, api);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Signature field is required");
+  });
+
+  it("Zod rejects unknown status labels at the schema layer", async () => {
+    const api = fakeApi({});
+    const tool = findTransitionTool(api, mkStore());
+    const result = await tool.handler(
+      { purchase_order_id: 39752, status: "Bogus" },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result).toLowerCase()).toContain("status");
+  });
+});

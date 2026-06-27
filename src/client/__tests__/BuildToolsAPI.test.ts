@@ -2022,3 +2022,106 @@ describe("deleteBudgetItem() — CSRF + success check", () => {
     expect(out.succeeded).toBe(0);
   });
 });
+
+describe("BuildToolsAPI.transitionPurchaseOrderStatus — CSRF cache (PR #62)", () => {
+  // Helper: build a fake fetch that records every call and serves either
+  // PO form HTML (with embedded _token) or workflow-endpoint JSON.
+  function buildFetchHarness(opts: {
+    initialFormToken: string;
+    refreshedFormToken?: string;
+    firstResponseStatus?: number;
+  }) {
+    const formHtml = (token: string) =>
+      `<html><form id="edit_form"><input name="_token" value="${token}"></form></html>`;
+    const calls: Array<{ url: string; method: string; body?: string }> = [];
+    let formFetches = 0;
+    let has419Fired = false;
+    const fetchImpl: typeof fetch = (async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      calls.push({ url, method, body: init?.body as string | undefined });
+      if (url.includes("/purchase-orders/form/")) {
+        formFetches += 1;
+        // After a 419 has fired, subsequent form fetches return the
+        // refreshed token (BT's CSRF rotated, this is the
+        // post-rotation reality). Before any 419, the initial token
+        // is what's embedded in the form HTML.
+        const token = has419Fired
+          ? (opts.refreshedFormToken ?? opts.initialFormToken)
+          : opts.initialFormToken;
+        return new Response(formHtml(token), { status: 200 });
+      }
+      if (url.includes("/purchase-orders/status/update")) {
+        if (opts.firstResponseStatus === 419 && !has419Fired) {
+          has419Fired = true;
+          return new Response("Page expired", { status: 419 });
+        }
+        return new Response(
+          JSON.stringify({ r: 1, msg: [], s: 1, f: 0, l: ["Purchase Order", "Purchase Orders"] }),
+          { status: 200 },
+        );
+      }
+      return new Response("UNEXPECTED", { status: 500 });
+    }) as typeof fetch;
+    return { fetchImpl, calls, getFormFetches: () => formFetches };
+  }
+
+  it("first call fetches the form to harvest CSRF; subsequent call reuses the cached token (no second form fetch)", async () => {
+    const harness = buildFetchHarness({ initialFormToken: "token-A" });
+    const api = new BuildToolsAPI({ fetch: harness.fetchImpl } as any);
+    (api as unknown as { authenticated: boolean }).authenticated = true;
+
+    const r1 = await api.transitionPurchaseOrderStatus({ purchaseOrderId: 39752, status: 1 });
+    expect(r1.success).toBe(true);
+    expect(harness.getFormFetches()).toBe(1);
+
+    const r2 = await api.transitionPurchaseOrderStatus({ purchaseOrderId: 39752, status: 2 });
+    expect(r2.success).toBe(true);
+    // Cache hit: no additional form fetch.
+    expect(harness.getFormFetches()).toBe(1);
+
+    // Both POSTs used the cached token-A
+    const posts = harness.calls.filter((c) => c.url.includes("/status/update"));
+    expect(posts).toHaveLength(2);
+    expect(posts[0].body).toContain("_token=token-A");
+    expect(posts[1].body).toContain("_token=token-A");
+  });
+
+  it("on 419 (CSRF mismatch), refreshes the token via a fresh form fetch and retries the POST once", async () => {
+    const harness = buildFetchHarness({
+      initialFormToken: "stale-token",
+      refreshedFormToken: "fresh-token",
+      firstResponseStatus: 419,
+    });
+    const api = new BuildToolsAPI({ fetch: harness.fetchImpl } as any);
+    (api as unknown as { authenticated: boolean }).authenticated = true;
+    // Pre-seed the cache so we start with a stale token in cache.
+    (api as unknown as { cachedFormToken: string }).cachedFormToken = "stale-token";
+
+    const r = await api.transitionPurchaseOrderStatus({ purchaseOrderId: 39752, status: 1 });
+    expect(r.success).toBe(true);
+
+    // Form fetched once (for the refresh after 419), POST attempted twice.
+    expect(harness.getFormFetches()).toBe(1);
+    const posts = harness.calls.filter((c) => c.url.includes("/status/update"));
+    expect(posts).toHaveLength(2);
+    expect(posts[0].body).toContain("_token=stale-token");
+    expect(posts[1].body).toContain("_token=fresh-token");
+  });
+
+  it("getPurchaseOrder absorbs _token into the cache opportunistically", async () => {
+    const formHtml =
+      `<html><form id="edit_form" action="/purchase-orders/save/39752"><input name="_token" value="opportune-token"><input name="PurchaseOrder[name]" value="x"><input name="PurchaseOrder[project_id]" value="1"></form></html>`;
+    const fetchImpl: typeof fetch = (async () =>
+      new Response(formHtml, { status: 200 })) as typeof fetch;
+    const api = new BuildToolsAPI({ fetch: fetchImpl } as any);
+    (api as unknown as { authenticated: boolean }).authenticated = true;
+
+    await api.getPurchaseOrder(39752);
+    // Token cached without a second fetch
+    expect((api as unknown as { cachedFormToken: string | null }).cachedFormToken).toBe("opportune-token");
+  });
+});
