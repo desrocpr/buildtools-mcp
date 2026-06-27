@@ -21,6 +21,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
 import { ConfirmationStore } from "../../confirm/index.js";
 import { createMutationTools } from "../mutations.js";
+import { IdempotencyStore } from "../../idempotency/index.js";
 import type { ToolResult } from "../projects.js";
 
 function textOf(result: ToolResult): string {
@@ -901,5 +902,256 @@ describe("update_purchase_order — append mode + budget ID resolution", () => {
     // Replace path: itemsAppend must be undefined (mirror assertion to
     // the append test which checks the opposite direction).
     expect(passed.itemsAppend).toBeUndefined();
+  });
+});
+
+describe("update_purchase_order — idempotency guard (PR #60)", () => {
+  // Helper: build a tools registry with the idempotency store wired in.
+  function findToolWithIdem(
+    api: BuildToolsAPI,
+    store: ConfirmationStore,
+    idem: IdempotencyStore,
+  ) {
+    const tools = createMutationTools(() => api, store, undefined, idem);
+    const tool = tools.find((t) => t.name === "update_purchase_order");
+    if (!tool) throw new Error("update_purchase_order not registered");
+    return tool;
+  }
+
+  const baseDetail = {
+    id: 39752, projectId: 185936, name: "renamed", number: "", prefix: "PO",
+    status: 1, description: "",
+    companyId: 977, companyName: "Kai Muten, LLC",
+    items: [{ id: 1, budgetCategoryId: 1621, budgetCategoryCode: "6030", budgetCategoryName: "Plumbing Sub", total: "100", notes: "", internalNotes: "", invoiceRelated: "0.00", amounts: [], companyId: 977, companyName: "Kai Muten, LLC" }],
+    totalNumeric: 100,
+  };
+
+  it("caches the SUCCESS result on first call; replays it on the retry — no second BT call", async () => {
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const getPurchaseOrder = vi.fn().mockResolvedValue(baseDetail);
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const store = mkStore();
+    const idem = new IdempotencyStore();
+    const tool = findToolWithIdem(api, store, idem);
+
+    // verify: false because the focus of these tests is cache behavior,
+    // not the verify-after-write check (which would otherwise flag a
+    // mismatch when the mock's returned name differs from args.name).
+    const args = {
+      purchase_order_id: 39752,
+      name: "renamed",
+      idempotency_key: "test-key-2026-06-27-01",
+      verify: false,
+    };
+
+    // First call: prompt
+    const prompt1 = await tool.handler(args, api);
+    const confirmId = textOf(prompt1).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    // First call: execute
+    const exec1 = await tool.handler({ ...args, confirmation_id: confirmId }, api);
+    expect(exec1.isError).toBeFalsy();
+    expect(textOf(exec1)).toContain("updated");
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
+
+    // Retry: same idempotency_key + same semantic args → cached replay,
+    // no prompt phase, no second BT call.
+    const retry = await tool.handler(args, api);
+    expect(retry.isError).toBeFalsy();
+    expect(textOf(retry)).toContain("Idempotency replay");
+    expect(textOf(retry)).toContain("test-key-2026-06-27-01");
+    expect(textOf(retry)).toContain("updated"); // original result still there
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1); // STILL 1 — no re-execution
+  });
+
+  it("rejects retry with same idempotency_key but DIFFERENT args (key-reuse guard)", async () => {
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const getPurchaseOrder = vi.fn().mockResolvedValue(baseDetail);
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const store = mkStore();
+    const idem = new IdempotencyStore();
+    const tool = findToolWithIdem(api, store, idem);
+
+    // First call: rename to "X"
+    const args1 = {
+      purchase_order_id: 39752,
+      name: "X",
+      idempotency_key: "shared-key",
+      verify: false,
+    };
+    const prompt = await tool.handler(args1, api);
+    const confirmId = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args1, confirmation_id: confirmId }, api);
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
+
+    // Reuse key with DIFFERENT args (name: "Y")
+    const result = await tool.handler(
+      { purchase_order_id: 39752, name: "Y", idempotency_key: "shared-key", verify: false },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Idempotency key reused with different args");
+    expect(textOf(result)).toContain("shared-key");
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1); // first call only
+  });
+
+  it("does NOT cache failures — retries get a fresh BT attempt", async () => {
+    // First call fails (e.g. 403 lock). Retry should still hit BT, not
+    // return the cached failure.
+    const updatePurchaseOrder = vi.fn()
+      .mockResolvedValueOnce({ success: false, errors: "HTTP 403 — locked" })
+      .mockResolvedValueOnce({ success: true, purchaseOrderId: 39752, message: "saved" });
+    const getPurchaseOrder = vi.fn().mockResolvedValue(baseDetail);
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const store = mkStore();
+    const idem = new IdempotencyStore();
+    const tool = findToolWithIdem(api, store, idem);
+
+    const args = {
+      purchase_order_id: 39752,
+      name: "x",
+      idempotency_key: "retry-on-failure-key",
+      verify: false,
+    };
+    const prompt1 = await tool.handler(args, api);
+    const cid1 = textOf(prompt1).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec1 = await tool.handler({ ...args, confirmation_id: cid1 }, api);
+    expect(exec1.isError).toBe(true);
+    expect(textOf(exec1)).toContain("Failed");
+
+    // Retry: should NOT be a cached-replay (failure isn't cached). It
+    // goes through the confirmation flow again and the second BT call
+    // succeeds.
+    const prompt2 = await tool.handler(args, api);
+    expect(textOf(prompt2)).not.toContain("Idempotency replay");
+    expect(textOf(prompt2)).toContain("confirmation_id");
+    const cid2 = textOf(prompt2).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const exec2 = await tool.handler({ ...args, confirmation_id: cid2 }, api);
+    expect(exec2.isError).toBeFalsy();
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(2);
+  });
+
+  it("works when no idempotency_key is passed — historical behavior unchanged", async () => {
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const getPurchaseOrder = vi.fn().mockResolvedValue(baseDetail);
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const store = mkStore();
+    const idem = new IdempotencyStore();
+    const tool = findToolWithIdem(api, store, idem);
+
+    const args = { purchase_order_id: 39752, name: "x" };
+    const prompt1 = await tool.handler(args, api);
+    const cid1 = textOf(prompt1).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args, confirmation_id: cid1 }, api);
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
+
+    // Second call (no idempotency_key) is treated as a fresh write.
+    const prompt2 = await tool.handler(args, api);
+    expect(textOf(prompt2)).not.toContain("Idempotency");
+    const cid2 = textOf(prompt2).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args, confirmation_id: cid2 }, api);
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(2);
+    // Cache is empty — never touched.
+    expect(idem.size).toBe(0);
+  });
+
+  it("`verify` flag is EXCLUDED from the fingerprint (retrying with verify:false after a verify:true timeout still hits the cache)", async () => {
+    // This was the lead HIGH finding from the PR #60 review: if `verify`
+    // were included in the fingerprint, a caller who passed `verify:
+    // true` on the first (ambiguous-timeout) call and dropped to
+    // `verify: false` on the safe retry would get a key-reuse error
+    // instead of the cached replay. That defeats the whole point.
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const getPurchaseOrder = vi.fn().mockResolvedValue(baseDetail);
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const store = mkStore();
+    const idem = new IdempotencyStore();
+    const tool = findToolWithIdem(api, store, idem);
+
+    // First call: verify: false (cache populates)
+    const args1 = {
+      purchase_order_id: 39752,
+      name: "renamed",
+      idempotency_key: "verify-flag-exclusion-test",
+      verify: false,
+    };
+    const prompt1 = await tool.handler(args1, api);
+    const cid1 = textOf(prompt1).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args1, confirmation_id: cid1 }, api);
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
+
+    // Retry with verify:true → SAME write semantically, should hit cache.
+    const retry = await tool.handler(
+      { ...args1, verify: true },
+      api,
+    );
+    expect(retry.isError).toBeFalsy();
+    expect(textOf(retry)).toContain("Idempotency replay");
+    expect(updatePurchaseOrder).toHaveBeenCalledTimes(1); // no re-execution
+  });
+
+  it("does NOT populate the cache during the confirmation-prompt phase", async () => {
+    // The store check requires `data.confirmation_id && !result.isError`.
+    // The prompt phase has no confirmation_id, so the cache must remain
+    // empty until the execute phase. This test guards against accidental
+    // re-ordering or removal of that condition — if it regressed, every
+    // subsequent retry would replay a cached confirmation prompt instead
+    // of executing the actual write.
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({
+      success: true, purchaseOrderId: 39752, message: "saved",
+    });
+    const getPurchaseOrder = vi.fn().mockResolvedValue(baseDetail);
+    const api = fakeApi({
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      getPurchaseOrder: getPurchaseOrder as any,
+    });
+    const store = mkStore();
+    const idem = new IdempotencyStore();
+    const tool = findToolWithIdem(api, store, idem);
+
+    const args = {
+      purchase_order_id: 39752,
+      name: "x",
+      idempotency_key: "prompt-no-cache",
+      verify: false,
+    };
+    // Prompt only — no confirmation_id, no execute.
+    await tool.handler(args, api);
+    expect(idem.size).toBe(0);
+  });
+
+  it("Zod enforces idempotency_key min length 8 (prevents trivial collisions)", async () => {
+    const api = fakeApi({});
+    const store = mkStore();
+    const idem = new IdempotencyStore();
+    const tool = findToolWithIdem(api, store, idem);
+    const result = await tool.handler(
+      { purchase_order_id: 39752, name: "x", idempotency_key: "short" },
+      api,
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("idempotency_key");
   });
 });
