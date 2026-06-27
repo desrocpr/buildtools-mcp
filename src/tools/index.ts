@@ -87,3 +87,8 @@ export { listBudgetTool, budgetTools } from "./budget.js";
 export { createMutationTools } from "./mutations.js";
 
 export { createSessionCredentialsTool } from "./sessions.js";
+
+export {
+  projectStatusBriefTool,
+  briefTools,
+} from "./briefs.js";

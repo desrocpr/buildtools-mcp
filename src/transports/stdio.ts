@@ -23,6 +23,7 @@ import { ConfirmationStore } from "../confirm/index.js";
 import { IdempotencyStore } from "../idempotency/index.js";
 import {
   attachmentTools,
+  briefTools,
   budgetTools,
   companyTools,
   createMutationTools,
@@ -111,6 +112,7 @@ export async function startStdioTransport(): Promise<Server> {
     ...operationTools.map((t) => [t.name, t] as const),
     ...selectionTools.map((t) => [t.name, t] as const),
     ...budgetTools.map((t) => [t.name, t] as const),
+    ...briefTools.map((t) => [t.name, t] as const),
     ...mutationTools.map((t) => [t.name, t] as const),
   ]);
 
