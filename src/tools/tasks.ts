@@ -3,7 +3,6 @@
  *
  * Two tools:
  *   - list_tasks   — paged datatable, optionally filtered by status / project.
- *   - search_tasks — free-text fuzzy match across task rows.
  *
  * Design notes:
  *
@@ -162,7 +161,7 @@ const ListTasksInputSchema = z.object({
     .min(2)
     .optional()
     .describe(
-      "Free-text substring search across task name, project, assignee, and location. Min 2 chars. PR #71 unified the previous list_tasks (project filter) + search_tasks tools.",
+      "Free-text substring search across task name, project, assignee, and location. Min 2 chars. ",
     ),
   status: z
     .enum(["Open", "In Progress", "Complete", "All"])
@@ -233,7 +232,7 @@ export const listTasksTool: ToolDefinition = {
     "List or search BuildTools tasks. " +
     "Pass `query` for free-text search across task name, project, assignee, and location. " +
     "Combine `status` + `query` to filter Open/In Progress + match text. " +
-    "Returns up to 50 by default. PR #71 unified the previous `list_tasks` + `search_tasks` tools.",
+    "Returns up to 50 by default. ",
   inputSchema: zodToJsonSchema(ListTasksInputSchema),
   permission: "read",
   handler: listTasksHandler,

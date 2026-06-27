@@ -414,6 +414,57 @@ describe("list_users", () => {
 });
 
 // ---------------------------------------------------------------------------
-// search_users
+// list_users with query — PR #71 review MEDIUM 3
 // ---------------------------------------------------------------------------
+
+describe("list_users + query", () => {
+  it("forwards query via the datatable's search[value]", async () => {
+    const getUsers = vi.fn().mockResolvedValue({ data: [] });
+    const api = fakeApi({ getUsers: getUsers as BuildToolsAPI["getUsers"] });
+    await listUsersTool.handler({ query: "Smith" }, api);
+    const call = getUsers.mock.calls[0][0];
+    expect(call["search[value]"]).toBe("Smith");
+  });
+
+  it("PR #71 review HIGH 2: no-match message includes the query", async () => {
+    const getUsers = vi.fn().mockResolvedValue({ data: [] });
+    const api = fakeApi({ getUsers: getUsers as BuildToolsAPI["getUsers"] });
+    const result = await listUsersTool.handler(
+      { query: "nonesuch" },
+      api,
+    );
+    expect(textOf(result)).toContain('query: "nonesuch"');
+  });
+
+  it("Zod rejects query of length < 2", async () => {
+    const result = await listUsersTool.handler(
+      { query: "a" },
+      fakeApi({}),
+    );
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Invalid input for `list_users`");
+  });
+
+  it("role + query combined: role filter runs client-side, query filters server-side", async () => {
+    // Server returns users with various roles; tool then filters by role client-side.
+    const getUsers = vi.fn().mockResolvedValue({
+      data: [
+        { id: 1, first_name: "Alice", last_name: "Smith", role: "Employee", DT_RowId: "row_1" },
+        { id: 2, first_name: "Bob", last_name: "Smith", role: "Client", DT_RowId: "row_2" },
+      ],
+    });
+    const api = fakeApi({ getUsers: getUsers as BuildToolsAPI["getUsers"] });
+    const result = await listUsersTool.handler(
+      { query: "Smith", role: "Employee" },
+      api,
+    );
+    expect(result.isError).toBeFalsy();
+    const text = textOf(result);
+    expect(text).toContain("Alice Smith");
+    expect(text).not.toContain("Bob Smith"); // filtered out by role
+    // Confirm query reached the server
+    const call = getUsers.mock.calls[0][0];
+    expect(call["search[value]"]).toBe("Smith");
+  });
+});
 

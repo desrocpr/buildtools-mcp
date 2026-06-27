@@ -2,14 +2,13 @@
  * MCP read-only tools for BuildTools operations: RFIs, services, users
  * (MOS-294).
  *
- * Four tools:
+ * Three tools (PR #71: search_users folded into list_users with `query`):
  *   - list_rfis     — datatable wrapper over `getRFIs()`; optional project /
  *                     limit filters.
  *   - list_services — datatable wrapper over `getServices()`; optional project /
  *                     limit filters.
  *   - list_users    — datatable wrapper over `getUsers()` / `getEmployees()`;
- *                     optional `role` enum + `limit`.
- *   - search_users  — free-text search via `searchUsers()`.
+ *                     optional `role` enum + `query` + `limit`.
  *
  * Design notes:
  *
@@ -319,7 +318,7 @@ const ListUsersInputSchema = z.object({
     .min(2)
     .optional()
     .describe(
-      "Free-text substring search across user name, email, phone, and company. Min 2 chars. PR #71 unified the previous list_users + search_users tools.",
+      "Free-text substring search across user name, email, phone, and company. Min 2 chars. ",
     ),
   limit: z
     .number()
@@ -394,7 +393,11 @@ async function listUsersHandler(
     const rows = filtered.slice(0, targetLimit);
 
     if (rows.length === 0) {
-      return markdown(`No users matched the filter (role: ${effectiveRole}).`);
+      // PR #71 review HIGH 2: include query in the no-match message
+      // (mirrors list_projects / list_tasks / list_purchase_orders).
+      const filterDesc = [`role: ${effectiveRole}`];
+      if (query) filterDesc.push(`query: "${query}"`);
+      return markdown(`No users matched the filter (${filterDesc.join(", ")}).`);
     }
     const header =
       `**${rows.length} user${rows.length === 1 ? "" : "s"}** ` +
@@ -416,7 +419,7 @@ export const listUsersTool: ToolDefinition = {
     "List or search BuildTools users. " +
     "Pass `role` to filter by Core Admin / Employee / Client / Company Rep. " +
     "Pass `query` for free-text search across name, email, phone, company. " +
-    "PR #71 unified the previous `list_users` + `search_users` tools.",
+    "",
   inputSchema: zodToJsonSchema(ListUsersInputSchema),
   permission: "read",
   handler: listUsersHandler,

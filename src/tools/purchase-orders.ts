@@ -3,7 +3,6 @@
  *
  * Two tools:
  *   - list_purchase_orders   — paged datatable, optionally filtered by project name.
- *   - search_purchase_orders — free-text fuzzy match across PO rows.
  *
  * Design notes:
  *
@@ -182,7 +181,7 @@ const ListPurchaseOrdersInputSchema = z.object({
     .min(2)
     .optional()
     .describe(
-      "Free-text substring search across PO number, name, company, project, and relations. Min 2 chars. PR #71 unified what was previously `list_purchase_orders` (project filter) + `search_purchase_orders` (free-text) into this one tool.",
+      "Free-text substring search across PO number, name, company, project, and relations. Min 2 chars.",
     ),
   limit: z
     .number()
@@ -234,7 +233,7 @@ export const listPurchaseOrdersTool: ToolDefinition = {
   description:
     "List or search BuildTools purchase orders. " +
     "Pass `query` for free-text substring search across PO number, name, company, project, and relations. " +
-    "Returns up to 50 by default. PR #71 unified the previous `list_purchase_orders` + `search_purchase_orders` tools.",
+    "Returns up to 50 by default. ",
   inputSchema: zodToJsonSchema(ListPurchaseOrdersInputSchema),
   permission: "read",
   handler: listPurchaseOrdersHandler,
