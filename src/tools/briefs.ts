@@ -635,7 +635,11 @@ async function fetchSchedule(
   today: Date,
 ): Promise<ProjectDigest["schedule"] | null> {
   try {
-    const result = await api.getSchedule(projectId, "working");
+    // PR #77: published schedule (client-visible, committed version) —
+    // not working (editable draft). Per Moss workflow the published
+    // view is the authoritative "what we've actually committed to"
+    // timeline; working is an in-progress draft.
+    const result = await api.getSchedule(projectId, "published");
     const tasks = result?.tasks ?? [];
     // Compute Monday of this week (ISO Monday → 1)
     const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -1056,7 +1060,7 @@ function renderDigest(d: ProjectDigest): string {
     const s = d.schedule;
     lines.push("");
     lines.push(`### Schedule — last week vs this week`);
-    lines.push(`- ${s.totalTasks} task(s) on the working schedule.`);
+    lines.push(`- ${s.totalTasks} task(s) on the published schedule.`);
     const renderTask = (t: typeof s.activeThisWeek[number]) => {
       const cat = t.budgetCategory ? ` _(${escapeMarkdownInline(t.budgetCategory)})_` : "";
       const pct = t.progress > 0 ? ` · ${Math.round(t.progress * 100)}%` : "";
@@ -1267,7 +1271,7 @@ export const projectStatusBriefTool: ToolDefinition = {
   name: "project_status_brief",
   description:
     "Read-only one-call project summary aligned to the Moss workflow. Returns four analysis sections per project plus the header (contract value, address, PMs, team):\n\n" +
-    "1. **Schedule** — the actual BT working Gantt schedule, bucketed by week: overdue tasks (ended before this Monday with <100% progress), last week's tasks, this week's tasks, and a peek at next week.\n" +
+    "1. **Schedule** — the actual BT published Gantt schedule (the client-visible, committed timeline), bucketed by week: overdue tasks (ended before this Monday with <100% progress), last week's tasks, this week's tasks, and a peek at next week.\n" +
     "2. **Billing progress** — financial statements broken down as Sent/Paid (already billed) vs Draft (scheduled milestones not yet reached or not yet sent). Highlights last billed milestone and lists pending Draft FS for the PM to verify against the physical schedule.\n" +
     "3. **Change orders & unbilled exposure** — the authoritative unbilled $ figure computed as contract value (budget_revised) minus the sum of all financial-statement amounts (drafts + sent + paid), matching `find_unbilled_change_orders`. Plus per-CO list (approved + pending).\n" +
     "4. **Selections vs allowance budgets** — for each allowance category, whether the team's selections roll up to within the revised budget. Flags over/under and categories awaiting selections.\n" +

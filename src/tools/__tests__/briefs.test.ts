@@ -897,7 +897,7 @@ describe("project_status_brief — PR #75 real BT schedule section", () => {
     const text = textOf(result);
     expect(text).toContain("### Schedule — last week vs this week");
     // Excludes ROOT type=project from the count: 5 tasks
-    expect(text).toContain("5 task(s) on the working schedule");
+    expect(text).toContain("5 task(s) on the published schedule");
     // Overdue: Foundation
     expect(text).toContain("**1 overdue** task(s)");
     expect(text).toContain("Foundation");
