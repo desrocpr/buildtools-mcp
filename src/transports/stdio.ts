@@ -27,6 +27,7 @@ import {
   budgetTools,
   companyTools,
   createMutationTools,
+  forecastTools,
   customerTools,
   financialTools,
   operationTools,
@@ -113,6 +114,7 @@ export async function startStdioTransport(): Promise<Server> {
     ...selectionTools.map((t) => [t.name, t] as const),
     ...budgetTools.map((t) => [t.name, t] as const),
     ...briefTools.map((t) => [t.name, t] as const),
+    ...forecastTools.map((t) => [t.name, t] as const),
     ...mutationTools.map((t) => [t.name, t] as const),
   ]);
 

@@ -88,3 +88,8 @@ export {
   projectStatusBriefTool,
   briefTools,
 } from "./briefs.js";
+
+export {
+  cashFlowForecastTool,
+  forecastTools,
+} from "./forecasts.js";
