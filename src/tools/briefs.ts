@@ -256,8 +256,24 @@ interface ProjectDigest {
     windowNextWeek: { start: string; end: string };
   };
 
-  /** Approved CO total not yet on a Sent/Paid financial statement. */
+  /**
+   * Change orders + unbilled exposure.
+   *
+   * `unbilledGap` is the authoritative "unbilled" number (PR #76),
+   * computed the same way as the standalone `find_unbilled_change_orders`
+   * tool: contractValue (budget_revised) MINUS sum of all financial-
+   * statement amounts (drafts + sent + paid). What's left = approved CO
+   * value that hasn't been allocated to a draw yet.
+   *
+   * `pendingApprovedCount` / `pendingApprovedTotal` / `pendingCount` /
+   * `pendingTotal` / `approvedTotal` are listed for context — they
+   * describe the full CO landscape (counts + dollar values per status),
+   * not the unbilled gap itself.
+   */
   unbilledCos?: {
+    unbilledGap: number;            // PR #76: contract value - sum of all FS amounts
+    contractValue: number;
+    totalAllStatements: number;
     pendingApprovedCount: number;
     pendingApprovedTotal: number;
     pendingCount: number;
@@ -711,21 +727,24 @@ async function fetchSchedule(
 async function fetchUnbilledCos(
   api: BuildToolsAPI,
   projectId: number,
+  contractValue: number,
 ): Promise<ProjectDigest["unbilledCos"] | null> {
   try {
-    // PR #74 bugfix: the previous implementation passed a name via
-    // search[value] and filtered on `r.project` (which doesn't exist;
-    // BT exposes `project_name`). That returned 0 rows for every project
-    // and silently rendered "No approved or pending COs ✓" — a
-    // false-clean. Switch to the project-scoped DataTables filter that
-    // BT actually honors: `PR[]=<projectId>`. Live verified — Katchmark
-    // returns its real 9 COs this way. Also adopt the numeric status
-    // enum (1/2/3/4) since the row carries an int, not a label string.
-    const result = await api.getChangeOrders<{ data: Record<string, unknown>[] }>({
-      "PR[]": String(projectId),
-      length: 200,
-    });
-    const rows = result?.data ?? [];
+    // PR #76: the AUTHORITATIVE unbilled number is the project-level
+    // gap, computed the same way `find_unbilled_change_orders` does it:
+    //   unbilled = contract value (budget_revised) - sum(all FS amounts)
+    // Approved CO value lands on a financial statement when it gets
+    // billed; whatever's left in the gap is approved CO value waiting
+    // for a draw. Fetch in parallel with the CO list (which provides
+    // supporting per-CO context).
+    const [coResult, fs] = await Promise.all([
+      api.getChangeOrders<{ data: Record<string, unknown>[] }>({
+        "PR[]": String(projectId),
+        length: 200,
+      }),
+      api.getFinancialStatements(projectId),
+    ]);
+    const rows = coResult?.data ?? [];
     const round = (n: number) => Math.round(n * 100) / 100;
     const statusNum = (r: Record<string, unknown>) => Number(r.status);
     const approved = rows.filter((r) => statusNum(r) === 3);
@@ -739,11 +758,17 @@ async function fetchUnbilledCos(
       status: CO_STATUS_LABEL[statusNum(r)] ?? `status ${statusNum(r)}`,
       total: parseDollarAmount(r.total),
     });
-    // pendingApproved* keys retained for the existing renderer / digest
-    // type. Semantically these now hold approved-CO totals (the things
-    // the PM should verify against an upcoming FS); pendingTotal carries
-    // truly-pending; draftTotal is surfaced via rows.
+    const totalAllStatements = round(
+      (fs?.statements ?? []).reduce(
+        (a, s) => a + (typeof s.amount === "number" ? s.amount : 0),
+        0,
+      ),
+    );
+    const unbilledGap = round(contractValue - totalAllStatements);
     return {
+      unbilledGap,
+      contractValue: round(contractValue),
+      totalAllStatements,
       pendingApprovedCount: approved.length,
       pendingApprovedTotal: approvedTotal,
       pendingCount: pending.length + draft.length,
@@ -958,7 +983,8 @@ async function buildProjectDigest(
     include.has("schedule") ? fetchSchedule(api, projectId, today) : Promise.resolve(undefined),
     include.has("billing") ? fetchBilling(api, projectId, digest.contractValue) : Promise.resolve(undefined),
     // PR #74: now project-id scoped (was name-based which BT didn't honor).
-    include.has("unbilled_cos") ? fetchUnbilledCos(api, projectId) : Promise.resolve(undefined),
+    // PR #76: needs contractValue to compute the budget_revised - sum(FS) gap.
+    include.has("unbilled_cos") ? fetchUnbilledCos(api, projectId, digest.contractValue ?? 0) : Promise.resolve(undefined),
     include.has("selections_vs_allowances") ? fetchSelectionsVsAllowances(api, projectId, prefetchedBudget) : Promise.resolve(undefined),
     include.has("budget_vs_pos") ? fetchBudgetVsPos(api, projectId, prefetchedBudget) : Promise.resolve(undefined),
     include.has("rfis") && projectLookupOk ? fetchRfis(api, digest.name) : Promise.resolve(undefined),
@@ -1083,20 +1109,33 @@ function renderDigest(d: ProjectDigest): string {
   }
 
   // === Change orders ===
-  // PR #73 review HIGH fix: the original copy claimed "unbilled" status,
-  // which the list endpoint can't determine — the row schema doesn't
-  // include an invoiced amount. Honest wording: list approved + pending
-  // COs and ask the PM to confirm each lands on a future FS.
+  // PR #76: lead with the AUTHORITATIVE unbilled gap (same calc as the
+  // standalone find_unbilled_change_orders tool: contract value minus
+  // sum of all financial-statement amounts). Per-CO list is supporting
+  // context — the gap is what the PM acts on.
   if (d.unbilledCos) {
     const u = d.unbilledCos;
     lines.push("");
-    lines.push(`### Change orders`);
+    lines.push(`### Change orders & unbilled exposure`);
+    if (u.unbilledGap > 0.01) {
+      lines.push(
+        `- ⚠️ **${fmtUsd(u.unbilledGap)} unbilled** = contract value ${fmtUsd(u.contractValue)} − financial statements (drafts + sent + paid) ${fmtUsd(u.totalAllStatements)}. This much approved CO value is not yet on any draw.`,
+      );
+    } else if (u.unbilledGap < -0.01) {
+      lines.push(
+        `- _Overbilled by ${fmtUsd(Math.abs(u.unbilledGap))}_ — financial statements (${fmtUsd(u.totalAllStatements)}) exceed contract value (${fmtUsd(u.contractValue)}). Worth verifying with accounting.`,
+      );
+    } else {
+      lines.push(
+        `- Fully allocated ✓ — financial statements (${fmtUsd(u.totalAllStatements)}) match contract value (${fmtUsd(u.contractValue)}).`,
+      );
+    }
     if (u.pendingApprovedCount === 0 && u.pendingCount === 0) {
-      lines.push(`- No approved or pending COs ✓`);
+      lines.push(`- No approved or pending COs on file.`);
     } else {
       if (u.pendingApprovedCount > 0) {
         lines.push(
-          `- **${u.pendingApprovedCount} approved CO(s)**, total ${fmtUsd(u.approvedTotal)} — verify each appears on a current or upcoming financial statement.`,
+          `- ${u.pendingApprovedCount} approved CO(s) on file, total ${fmtUsd(u.approvedTotal)}.`,
         );
       }
       if (u.pendingCount > 0) {
@@ -1230,7 +1269,7 @@ export const projectStatusBriefTool: ToolDefinition = {
     "Read-only one-call project summary aligned to the Moss workflow. Returns four analysis sections per project plus the header (contract value, address, PMs, team):\n\n" +
     "1. **Schedule** — the actual BT working Gantt schedule, bucketed by week: overdue tasks (ended before this Monday with <100% progress), last week's tasks, this week's tasks, and a peek at next week.\n" +
     "2. **Billing progress** — financial statements broken down as Sent/Paid (already billed) vs Draft (scheduled milestones not yet reached or not yet sent). Highlights last billed milestone and lists pending Draft FS for the PM to verify against the physical schedule.\n" +
-    "3. **Unbilled change orders** — approved COs that haven't been added to a financial statement yet (count + $ total) plus pending COs awaiting client approval.\n" +
+    "3. **Change orders & unbilled exposure** — the authoritative unbilled $ figure computed as contract value (budget_revised) minus the sum of all financial-statement amounts (drafts + sent + paid), matching `find_unbilled_change_orders`. Plus per-CO list (approved + pending).\n" +
     "4. **Selections vs allowance budgets** — for each allowance category, whether the team's selections roll up to within the revised budget. Flags over/under and categories awaiting selections.\n" +
     "5. **Budget vs Sent POs** — for each category that has at least one Sent PO (no PO = no buyout = budget undetermined per Moss workflow), revised budget vs PO total, flagging over-budget categories.\n\n" +
     "Pass EITHER `project_ids` (1-30 explicit IDs) OR `team` (filter active-team projects). Up to 30 projects per call. " +
