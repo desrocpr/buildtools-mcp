@@ -168,3 +168,42 @@ describe("cash_flow_forecast — end-to-end (single project)", () => {
     expect(textOf(result)).toContain("Exactly one of");
   });
 });
+
+describe("cash_flow_forecast — PR #79 horizon + limit caps", () => {
+  it("rejects quarterly horizon > 8", async () => {
+    const api = fakeApi();
+    const result = await cashFlowForecastTool.handler(
+      { project_ids: [1], granularity: "quarterly", horizon_periods: 12 },
+      api,
+    );
+    expect(result.isError).toBeTruthy();
+    expect(textOf(result)).toContain("quarterly");
+    expect(textOf(result)).toContain("exceeds 8");
+  });
+
+  it("rejects monthly horizon > 24", async () => {
+    const api = fakeApi();
+    const result = await cashFlowForecastTool.handler(
+      { project_ids: [1], granularity: "monthly", horizon_periods: 30 },
+      api,
+    );
+    expect(result.isError).toBeTruthy();
+    expect(textOf(result)).toContain("monthly");
+    expect(textOf(result)).toContain("exceeds 24");
+  });
+
+  it("accepts weekly horizon up to 52", async () => {
+    const getProject = vi.fn().mockResolvedValue({ id: 1, name: "T", status_id: 6 });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getBudget: vi.fn().mockResolvedValue({ columns: [], items: [] }) as any,
+      getFinancialStatements: vi.fn().mockResolvedValue({ statusCount: {}, statements: [] }) as any,
+      getSchedule: vi.fn().mockResolvedValue({ tasks: [], links: [] }) as any,
+    });
+    const result = await cashFlowForecastTool.handler(
+      { project_ids: [1], granularity: "weekly", horizon_periods: 52 },
+      api,
+    );
+    expect(result.isError).toBeFalsy();
+  });
+});

@@ -96,13 +96,23 @@ function teamLabel(statusCode: number | undefined): string {
 // Input schema
 // ---------------------------------------------------------------------------
 
+// PR #79: per-granularity horizon caps. Single max of 52 was awkward
+// (52 weeks = 1 year, 52 months ≈ 4 years, 52 quarters = 13 years —
+// the quarterly case in particular was absurd). The per-granularity
+// caps below align horizons to "what a PM would actually want to see":
+const HORIZON_MAX: Record<"weekly" | "monthly" | "quarterly", number> = {
+  weekly: 52,    // 1 year
+  monthly: 24,   // 2 years
+  quarterly: 8,  // 2 years
+};
+
 const CashFlowForecastSchema = z.object({
   project_ids: z
     .array(z.number().int().positive())
     .min(1)
-    .max(60)
+    .max(200)
     .optional()
-    .describe("Explicit project IDs to forecast (1-60). Mutually exclusive with `team`."),
+    .describe("Explicit project IDs to forecast (1-200). Mutually exclusive with `team`."),
   team: z
     .enum(["Nexus", "Omega", "Invicta", "Alpha", "all_active"])
     .optional()
@@ -117,18 +127,20 @@ const CashFlowForecastSchema = z.object({
     .number()
     .int()
     .min(1)
-    .max(52)
+    .max(52)  // outer ceiling; per-granularity cap enforced via refine below
     .optional()
     .describe(
-      "How many periods (weeks / months / quarters) forward to forecast. Defaults: weekly=12, monthly=6, quarterly=4.",
+      "How many periods forward to forecast. Per-granularity max: weekly=52 (1yr), monthly=24 (2yr), quarterly=8 (2yr). Defaults: weekly=12, monthly=6, quarterly=4.",
     ),
   limit: z
     .number()
     .int()
     .min(1)
-    .max(60)
+    .max(200)
     .optional()
-    .describe("When `team` is set, cap the number of projects fetched. Default 30, max 60."),
+    .describe(
+      "When `team` is set, cap the number of projects fetched. Default 100, max 200. Concurrency is internally throttled to 5 in-flight, so larger caps mainly affect wall-clock time, not BT burst load.",
+    ),
 })
   .refine(
     (data) => (data.project_ids === undefined) !== (data.team === undefined),
@@ -136,6 +148,17 @@ const CashFlowForecastSchema = z.object({
       message: "Exactly one of `project_ids` or `team` must be provided.",
       path: ["project_ids"],
     },
+  )
+  .refine(
+    (data) => {
+      if (data.horizon_periods === undefined) return true;
+      const max = HORIZON_MAX[data.granularity];
+      return data.horizon_periods <= max;
+    },
+    (data) => ({
+      message: `horizon_periods exceeds ${HORIZON_MAX[data.granularity]} for granularity=${data.granularity} (weekly max 52, monthly max 24, quarterly max 8)`,
+      path: ["horizon_periods"],
+    }),
   );
 type CashFlowForecastArgs = z.infer<typeof CashFlowForecastSchema>;
 
@@ -584,7 +607,7 @@ export const cashFlowForecastTool: ToolDefinition = {
   name: "cash_flow_forecast",
   description:
     "Projects expected cash inflows over the next N weeks / months / quarters. Joins Draft financial statements to the published schedule via name match, buckets by task end date. Sent-but-unpaid FS surfaced separately as receivables (AR). " +
-    "Scope via EITHER `project_ids` (1-60) OR `team` (`all_active` = whole company). Granularity: weekly | monthly | quarterly. " +
+    "Scope via EITHER `project_ids` (1-200) OR `team` (`all_active` = whole company; `limit` default 100, max 200). Granularity: weekly | monthly | quarterly (horizon caps: weekly 52, monthly 24, quarterly 8). " +
     "Returns a markdown table: portfolio total per bucket, per-team subtotals (when scope crosses teams), per-project breakdown, plus a list of Draft FS that couldn't be matched to a schedule task. " +
     "No payment-lag modeling yet — Sent-unpaid shown as immediate AR.",
   inputSchema: zodToJsonSchema(CashFlowForecastSchema),
@@ -627,7 +650,9 @@ export const cashFlowForecastTool: ToolDefinition = {
         const code = Number(p.status_id ?? p.status);
         return Number.isFinite(code) && wantedCodes.includes(code);
       });
-      const cap = data.limit ?? 30;
+      // PR #79: default 100 (was 30) so `all_active` actually returns the
+      // whole company in typical Moss-size portfolios. Max 200.
+      const cap = data.limit ?? 100;
       targetIds = matched.slice(0, cap).map((p) =>
         Number(p.id ?? (p.DT_RowId ?? "").replace(/^row_/, "")),
       );
