@@ -2,7 +2,7 @@
  * Tests for the project_status_brief read-only digest tool (PR #66).
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
 import { briefTools, projectStatusBriefTool } from "../briefs.js";
@@ -18,6 +18,8 @@ interface FakeApiOverrides {
   // PR #73 new sections use budget + selections.
   getBudget?: BuildToolsAPI["getBudget"];
   getSelections?: BuildToolsAPI["getSelections"];
+  // PR #75: new section pulls the real BT Gantt schedule.
+  getSchedule?: BuildToolsAPI["getSchedule"];
 }
 
 function fakeApi(overrides: FakeApiOverrides = {}): BuildToolsAPI {
@@ -671,11 +673,11 @@ describe("project_status_brief — PR #73 Moss-actual semantics", () => {
       getChangeOrders: stubEmpty as any,
     });
     const result = await projectStatusBriefTool.handler(
-      { project_ids: [100002], include: ["schedule"] },
+      { project_ids: [100002], include: ["billing"] },
       api,
     );
     const text = textOf(result);
-    expect(text).toContain("### Schedule / billing progress");
+    expect(text).toContain("### Billing progress (financial statements)");
     expect(text).toContain("Billed (Sent + Paid): $225,000.00 (**45.0%** of contract)");
     expect(text).toContain("received $150,000.00");
     expect(text).toContain("Last billed milestone: **PP2 - Framing**");
@@ -844,12 +846,91 @@ describe("project_status_brief — PR #73 Moss-actual semantics", () => {
     });
     const result = await projectStatusBriefTool.handler({ project_ids: [100002] }, api);
     const text = textOf(result);
-    expect(text).toContain("### Schedule / billing progress");
+    expect(text).toContain("### Billing progress (financial statements)");
     expect(text).toContain("### Change orders");
     expect(text).toContain("### Selections vs allowance budgets");
     expect(text).toContain("### Categories with POs");
     expect(text).not.toContain("Open RFIs");
     expect(text).not.toContain("Open tasks");
     expect(text).not.toContain("Open POs");
+  });
+});
+
+describe("project_status_brief — PR #75 real BT schedule section", () => {
+  beforeEach(() => {
+    // Pin "today" to Wednesday 2026-07-01 so the windowing is deterministic.
+    // ISO Mon of that week is 2026-06-29; Sun 2026-07-05.
+    // Last week: 2026-06-22 → 2026-06-28.
+    // Next week: 2026-07-06 → 2026-07-12.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-01T12:00:00Z"));
+  });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("buckets tasks by overdue / last week / this week / next week", async () => {
+    const getProject = vi.fn().mockResolvedValue({ id: 100002, name: "Test", status_id: 6 });
+    const getSchedule = vi.fn().mockResolvedValue({
+      tasks: [
+        // Project root — filtered out by type !== "project"
+        { id: 1, project_id: 100002, parent: null, text: "ROOT", type: "project", start_date: "2026-05-01 00:00:00", duration: 100, progress: 0, hide_client: 0 },
+        // Overdue: ended 2026-06-20, progress 0.5
+        { id: 2, project_id: 100002, parent: 1, text: "Foundation", type: "task", start_date: "2026-06-15 00:00:00", duration: 6, progress: 0.5, hide_client: 0 },
+        // Active last week (2026-06-22 → 2026-06-28), completed → not overdue
+        { id: 3, project_id: 100002, parent: 1, text: "Framing", type: "task", start_date: "2026-06-23 00:00:00", duration: 5, progress: 1, hide_client: 0 },
+        // Active this week (2026-06-29 → 2026-07-05)
+        { id: 4, project_id: 100002, parent: 1, text: "Plumbing Rough In", type: "task", start_date: "2026-07-01 00:00:00", duration: 3, progress: 0, hide_client: 0, budget_category_full_name: "5520 - Plumbing" },
+        // Upcoming next week (2026-07-06 → 2026-07-12)
+        { id: 5, project_id: 100002, parent: 1, text: "Drywall", type: "task", start_date: "2026-07-08 00:00:00", duration: 4, progress: 0, hide_client: 0 },
+        // Far future — not in any window
+        { id: 6, project_id: 100002, parent: 1, text: "Punchlist", type: "task", start_date: "2026-09-01 00:00:00", duration: 5, progress: 0, hide_client: 0 },
+      ],
+      links: [],
+      hide_client: 0,
+    });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getSchedule: getSchedule as any,
+    });
+    const result = await projectStatusBriefTool.handler(
+      { project_ids: [100002], include: ["schedule"] },
+      api,
+    );
+    const text = textOf(result);
+    expect(text).toContain("### Schedule — last week vs this week");
+    // Excludes ROOT type=project from the count: 5 tasks
+    expect(text).toContain("5 task(s) on the working schedule");
+    // Overdue: Foundation
+    expect(text).toContain("**1 overdue** task(s)");
+    expect(text).toContain("Foundation");
+    // Last week window
+    expect(text).toContain("Last week (2026-06-22 → 2026-06-28): 1 task(s)");
+    expect(text).toContain("Framing");
+    // This week window
+    expect(text).toContain("This week (2026-06-29 → 2026-07-05): 1 task(s)");
+    expect(text).toContain("Plumbing Rough In");
+    expect(text).toContain("5520 - Plumbing");
+    // Next week window
+    expect(text).toContain("Next week (2026-07-06 → 2026-07-12): 1 task(s)");
+    expect(text).toContain("Drywall");
+    // Far-future task NOT shown
+    expect(text).not.toContain("Punchlist");
+    // ROOT (type=project) not rendered as a task line
+    expect(text).not.toContain("ROOT");
+  });
+
+  it("api.getSchedule failure degrades to caveat instead of breaking the digest", async () => {
+    const getProject = vi.fn().mockResolvedValue({ id: 100002, name: "Test", status_id: 6 });
+    const getSchedule = vi.fn().mockRejectedValue(new Error("boom"));
+    const api = fakeApi({
+      getProject: getProject as any,
+      getSchedule: getSchedule as any,
+    });
+    const result = await projectStatusBriefTool.handler(
+      { project_ids: [100002], include: ["schedule"] },
+      api,
+    );
+    const text = textOf(result);
+    expect(text).toContain("Schedule unavailable");
+    expect(result.isError).toBeFalsy();
   });
 });
