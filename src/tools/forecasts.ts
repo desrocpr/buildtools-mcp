@@ -141,6 +141,12 @@ const CashFlowForecastSchema = z.object({
     .describe(
       "When `team` is set, cap the number of projects fetched. Default 100, max 200. Concurrency is internally throttled to 5 in-flight, so larger caps mainly affect wall-clock time, not BT burst load.",
     ),
+  require_published_schedule: z
+    .boolean()
+    .default(true)
+    .describe(
+      "When true (default) and `team` is set, skip projects that don't have a published schedule. Projects in the design phase typically lack one and would otherwise contribute $0 to every bucket while their Drafts pile up under Unscheduled, drowning the signal. Set to false to include design-phase projects too.",
+    ),
 })
   .refine(
     (data) => (data.project_ids === undefined) !== (data.team === undefined),
@@ -321,7 +327,23 @@ type ProjectRow = {
   status_id?: string | number;
   status?: string | number;
   budget_revised?: string;
+  // PR #80: BT's projects datatable carries a "schedule_published_*"
+  // family of columns. `schedule_published_duration` is "-" when the
+  // project has no published schedule (typically still in design),
+  // otherwise a string like "73 days". We filter on this to avoid
+  // dragging design-phase projects into the forecast.
+  schedule_published_duration?: string;
+  schedule_published_progress?: string;
+  schedule_published_start_date?: string;
 };
+
+function hasPublishedSchedule(p: ProjectRow): boolean {
+  const v = String(p.schedule_published_duration ?? "").trim();
+  if (!v) return false;
+  if (v === "-" || v === "0" || v === "0 days") return false;
+  // Anything else (e.g. "33 days") indicates a published schedule.
+  return /\d/.test(v);
+}
 
 async function buildProjectForecast(
   api: BuildToolsAPI,
@@ -459,10 +481,17 @@ function renderForecast(
   granularity: "weekly" | "monthly" | "quarterly",
   bucketKeys: Array<{ key: string; label: string }>,
   scopeLabel: string,
+  excludedDesignPhaseCount: number = 0,
 ): string {
   const lines: string[] = [];
   lines.push(`# Cash flow forecast — ${escapeMarkdownInline(scopeLabel)} — ${granularity}`);
   lines.push("");
+  if (excludedDesignPhaseCount > 0) {
+    lines.push(
+      `_Scope: ${forecasts.length} project(s) with a published schedule. **${excludedDesignPhaseCount} design-phase project(s) excluded** (no published schedule yet). Pass \`require_published_schedule: false\` to include them._`,
+    );
+    lines.push("");
+  }
 
   // Aggregate per-bucket totals across all projects + per-team subtotals.
   const totalsByBucket = new Map<string, number>();
@@ -627,6 +656,7 @@ export const cashFlowForecastTool: ToolDefinition = {
     // === Resolve project IDs ===
     let targetIds: number[];
     let scopeLabel: string;
+    let excludedDesignPhaseCount = 0;
     if (data.project_ids) {
       targetIds = data.project_ids;
       scopeLabel = `${data.project_ids.length} project(s) by id`;
@@ -650,16 +680,28 @@ export const cashFlowForecastTool: ToolDefinition = {
         const code = Number(p.status_id ?? p.status);
         return Number.isFinite(code) && wantedCodes.includes(code);
       });
+      // PR #80: filter to projects with a published schedule (default).
+      // BT's project row carries `schedule_published_duration` which is
+      // "-" for design-phase projects and "N days" once published.
+      // Without this filter, design projects pile their Drafts under
+      // Unscheduled and drown the signal.
+      const filteredBySchedule = data.require_published_schedule
+        ? matched.filter(hasPublishedSchedule)
+        : matched;
+      excludedDesignPhaseCount = matched.length - filteredBySchedule.length;
       // PR #79: default 100 (was 30) so `all_active` actually returns the
       // whole company in typical Moss-size portfolios. Max 200.
       const cap = data.limit ?? 100;
-      targetIds = matched.slice(0, cap).map((p) =>
+      targetIds = filteredBySchedule.slice(0, cap).map((p) =>
         Number(p.id ?? (p.DT_RowId ?? "").replace(/^row_/, "")),
       );
       targetIds = targetIds.filter((id) => Number.isFinite(id) && id > 0);
       if (targetIds.length === 0) {
+        const suffix = excludedDesignPhaseCount > 0
+          ? ` (${excludedDesignPhaseCount} excluded as design-phase; pass \`require_published_schedule: false\` to include)`
+          : "";
         return markdown(
-          `# Cash flow forecast\n\nNo active projects matched filter \`team=${teamFilter}\`.`,
+          `# Cash flow forecast\n\nNo active projects matched filter \`team=${teamFilter}\`${suffix}.`,
         );
       }
     }
@@ -681,7 +723,7 @@ export const cashFlowForecastTool: ToolDefinition = {
       buckets.push({ key: b.key, label: b.label });
     }
 
-    return markdown(renderForecast(forecasts, granularity, buckets, scopeLabel));
+    return markdown(renderForecast(forecasts, granularity, buckets, scopeLabel, excludedDesignPhaseCount));
   },
 };
 

@@ -192,6 +192,64 @@ describe("cash_flow_forecast — PR #79 horizon + limit caps", () => {
     expect(textOf(result)).toContain("exceeds 24");
   });
 
+  it("require_published_schedule (default true): filters out design-phase projects", async () => {
+    const getProjects = vi.fn().mockResolvedValue({
+      data: [
+        { id: 1, name: "Has Schedule", status_id: 6, schedule_published_duration: "33 days" },
+        { id: 2, name: "Design Phase", status_id: 6, schedule_published_duration: "-" },
+        { id: 3, name: "Also Design", status_id: 6, schedule_published_duration: "" },
+        { id: 4, name: "Construction", status_id: 6, schedule_published_duration: "100 days" },
+      ],
+    });
+    // Only projects 1 and 4 should reach the per-project forecast path.
+    const getProject = vi.fn().mockImplementation((id: any) => Promise.resolve({
+      id, name: id === 1 ? "Has Schedule" : "Construction", status_id: 6,
+    }));
+    const api = fakeApi({
+      getProjects: getProjects as any,
+      getProject: getProject as any,
+      getBudget: vi.fn().mockResolvedValue({ columns: [], items: [] }) as any,
+      getFinancialStatements: vi.fn().mockResolvedValue({ statusCount: {}, statements: [] }) as any,
+      getSchedule: vi.fn().mockResolvedValue({ tasks: [], links: [] }) as any,
+    });
+    const result = await cashFlowForecastTool.handler(
+      { team: "Omega", granularity: "monthly", horizon_periods: 3 },
+      api,
+    );
+    expect(result.isError).toBeFalsy();
+    const text = textOf(result);
+    expect(text).toContain("2 design-phase project(s) excluded");
+    // Only the 2 with-schedule projects fed buildProjectForecast → getProject called for them.
+    expect(getProject).toHaveBeenCalledTimes(2);
+  });
+
+  it("require_published_schedule=false: includes design-phase projects too", async () => {
+    const getProjects = vi.fn().mockResolvedValue({
+      data: [
+        { id: 1, name: "Has Schedule", status_id: 6, schedule_published_duration: "33 days" },
+        { id: 2, name: "Design Phase", status_id: 6, schedule_published_duration: "-" },
+      ],
+    });
+    const getProject = vi.fn().mockImplementation((id: any) =>
+      Promise.resolve({ id, name: `Project ${id}`, status_id: 6 }),
+    );
+    const api = fakeApi({
+      getProjects: getProjects as any,
+      getProject: getProject as any,
+      getBudget: vi.fn().mockResolvedValue({ columns: [], items: [] }) as any,
+      getFinancialStatements: vi.fn().mockResolvedValue({ statusCount: {}, statements: [] }) as any,
+      getSchedule: vi.fn().mockResolvedValue({ tasks: [], links: [] }) as any,
+    });
+    const result = await cashFlowForecastTool.handler(
+      { team: "Omega", granularity: "monthly", horizon_periods: 3, require_published_schedule: false },
+      api,
+    );
+    expect(result.isError).toBeFalsy();
+    const text = textOf(result);
+    expect(text).not.toContain("design-phase project(s) excluded");
+    expect(getProject).toHaveBeenCalledTimes(2);
+  });
+
   it("accepts weekly horizon up to 52", async () => {
     const getProject = vi.fn().mockResolvedValue({ id: 1, name: "T", status_id: 6 });
     const api = fakeApi({
