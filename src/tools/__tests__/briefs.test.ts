@@ -720,11 +720,10 @@ describe("project_status_brief — PR #73 Moss-actual semantics", () => {
       expect.objectContaining({ "search[value]": expect.anything() }),
     );
     const text = textOf(result);
-    expect(text).toContain("### Change orders");
-    // Both approved COs are listed — we don't try to infer which is unbilled
-    // from the list endpoint (PR #73 review HIGH fix).
-    expect(text).toContain("**2 approved CO(s)**, total $5,500.00");
-    expect(text).toContain("verify each appears on a current or upcoming financial statement");
+    // PR #76: section renamed; copy now leads with the gap calculation
+    // and lists approved + pending COs as supporting context.
+    expect(text).toContain("### Change orders & unbilled exposure");
+    expect(text).toContain("2 approved CO(s) on file, total $5,500.00");
     expect(text).toContain("1 pending CO(s) totalling $800.00");
     expect(text).toContain("Skylight upgrade");
     expect(text).toContain("Window addition");
@@ -932,5 +931,80 @@ describe("project_status_brief — PR #75 real BT schedule section", () => {
     const text = textOf(result);
     expect(text).toContain("Schedule unavailable");
     expect(result.isError).toBeFalsy();
+  });
+});
+
+describe("project_status_brief — PR #76 unbilled gap = contract value − sum(FS)", () => {
+  it("surfaces the unbilled gap leading the change-orders section", async () => {
+    const getProject = vi.fn().mockResolvedValue({
+      id: 100002, name: "Test", status_id: 6,
+      budget_revised: "$ 665,124.94",
+    });
+    const getChangeOrders = vi.fn().mockResolvedValue({
+      data: [
+        { info: 1, name: "Approved CO", total: "$ 5,000.00", status: 3, project_name: "Test" },
+      ],
+    });
+    const getFinancialStatements = vi.fn().mockResolvedValue({
+      statusCount: {},
+      statements: [
+        // Drafts + Sent + Paid → sum = 631,000 (Katchmark-shaped fixture)
+        { id: "1", name: "PP1", status: "Paid", amount: 200000, paid: 200000, balance: 0, date: "2025-01-01" },
+        { id: "2", name: "PP2", status: "Sent", amount: 174750, paid: 0, balance: 174750, date: "2025-02-01" },
+        { id: "3", name: "PP3", status: "Draft", amount: 115000, paid: 0, balance: 115000, date: "2025-03-01" },
+        { id: "4", name: "PP4", status: "Draft", amount: 86250, paid: 0, balance: 86250, date: "2025-04-01" },
+        { id: "5", name: "PP5", status: "Draft", amount: 46000, paid: 0, balance: 46000, date: "2025-05-01" },
+        { id: "6", name: "PP6", status: "Draft", amount: 9000, paid: 0, balance: 9000, date: "2025-06-01" },
+      ],
+    });
+    const stubEmpty = vi.fn().mockResolvedValue({ data: [] });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getChangeOrders: getChangeOrders as any,
+      getFinancialStatements: getFinancialStatements as any,
+      getRFIs: stubEmpty as any,
+      getTasks: stubEmpty as any,
+      getPurchaseOrders: stubEmpty as any,
+    });
+    const result = await projectStatusBriefTool.handler(
+      { project_ids: [100002], include: ["unbilled_cos"] },
+      api,
+    );
+    const text = textOf(result);
+    // Contract $665,124.94 - all FS $631,000 = $34,124.94 unbilled
+    expect(text).toContain("### Change orders & unbilled exposure");
+    expect(text).toContain("**$34,124.94 unbilled**");
+    expect(text).toContain("contract value $665,124.94");
+    expect(text).toContain("financial statements (drafts + sent + paid) $631,000.00");
+  });
+
+  it("no unbilled gap (drafts fully cover contract) → fully allocated", async () => {
+    const getProject = vi.fn().mockResolvedValue({
+      id: 100002, name: "Test", status_id: 6,
+      budget_revised: "$ 100,000.00",
+    });
+    const getChangeOrders = vi.fn().mockResolvedValue({ data: [] });
+    const getFinancialStatements = vi.fn().mockResolvedValue({
+      statusCount: {},
+      statements: [
+        { id: "1", name: "PP1", status: "Sent", amount: 100000, paid: 0, balance: 100000, date: "2025-01-01" },
+      ],
+    });
+    const stubEmpty = vi.fn().mockResolvedValue({ data: [] });
+    const api = fakeApi({
+      getProject: getProject as any,
+      getChangeOrders: getChangeOrders as any,
+      getFinancialStatements: getFinancialStatements as any,
+      getRFIs: stubEmpty as any,
+      getTasks: stubEmpty as any,
+      getPurchaseOrders: stubEmpty as any,
+    });
+    const result = await projectStatusBriefTool.handler(
+      { project_ids: [100002], include: ["unbilled_cos"] },
+      api,
+    );
+    const text = textOf(result);
+    expect(text).toContain("Fully allocated ✓");
+    expect(text).not.toContain("unbilled** =");  // no gap headline
   });
 });
