@@ -569,58 +569,57 @@ async function fetchSchedule(
   }
 }
 
+// PR #74: CO status enum from docs/BUSINESS_LOGIC.md
+// 1=Draft, 2=Pending, 3=Approved, 4=Rejected (no string labels on the row).
+const CO_STATUS_LABEL: Record<number, string> = {
+  1: "Draft",
+  2: "Pending",
+  3: "Approved",
+  4: "Rejected",
+};
+
 async function fetchUnbilledCos(
   api: BuildToolsAPI,
-  projectName: string,
+  projectId: number,
 ): Promise<ProjectDigest["unbilledCos"] | null> {
   try {
-    const result = await api.getChangeOrders<{ data: (Record<string, unknown> & { project?: string })[] }>({
-      "search[value]": projectName,
-      length: 100,
+    // PR #74 bugfix: the previous implementation passed a name via
+    // search[value] and filtered on `r.project` (which doesn't exist;
+    // BT exposes `project_name`). That returned 0 rows for every project
+    // and silently rendered "No approved or pending COs ✓" — a
+    // false-clean. Switch to the project-scoped DataTables filter that
+    // BT actually honors: `PR[]=<projectId>`. Live verified — Katchmark
+    // returns its real 9 COs this way. Also adopt the numeric status
+    // enum (1/2/3/4) since the row carries an int, not a label string.
+    const result = await api.getChangeOrders<{ data: Record<string, unknown>[] }>({
+      "PR[]": String(projectId),
+      length: 200,
     });
     const rows = result?.data ?? [];
-    const targetProjectKey = projectName.toLowerCase();
-    const projectRows = rows.filter((r) => {
-      const rowProject = stripHtml((r.project as string | undefined) ?? "").toLowerCase();
-      return !rowProject || rowProject === targetProjectKey;
-    });
-    // PR #73 review HIGH fix: the CO datatable row does NOT expose an
-    // `invoiced_amount` field — that lives on the single-CO detail and
-    // on PO rows. Per docs/API_REFERENCE.md the CO row carries only
-    // status, info, name, total, dates, relations, created_at. The
-    // original `total > invoiced + 0.005` heuristic compared total
-    // against undefined → 0, marking EVERY approved CO as unbilled.
-    // Detected only because the test mock supplied the invented field.
-    //
-    // Honest replacement: list all Approved + Pending COs with totals
-    // and label the section as "approved COs to verify against the next
-    // financial statement". The PM is the one who can confirm whether
-    // each approved CO has actually been billed yet — we don't have
-    // that join from the list endpoint alone.
     const round = (n: number) => Math.round(n * 100) / 100;
-    const approved = projectRows.filter((r) =>
-      stripHtml((r.status as string | undefined) ?? "").toLowerCase().includes("approved"),
-    );
-    const pending = projectRows.filter((r) =>
-      stripHtml((r.status as string | undefined) ?? "").toLowerCase().includes("pending"),
-    );
+    const statusNum = (r: Record<string, unknown>) => Number(r.status);
+    const approved = rows.filter((r) => statusNum(r) === 3);
+    const pending = rows.filter((r) => statusNum(r) === 2);
+    const draft = rows.filter((r) => statusNum(r) === 1);
     const approvedTotal = round(approved.reduce((a, r) => a + parseDollarAmount(r.total), 0));
     const pendingTotal = round(pending.reduce((a, r) => a + parseDollarAmount(r.total), 0));
+    const draftTotal = round(draft.reduce((a, r) => a + parseDollarAmount(r.total), 0));
     const fmtRow = (r: Record<string, unknown>) => ({
       name: stripHtml((r.name as string | undefined) ?? "(unnamed CO)"),
-      status: stripHtml((r.status as string | undefined) ?? ""),
+      status: CO_STATUS_LABEL[statusNum(r)] ?? `status ${statusNum(r)}`,
       total: parseDollarAmount(r.total),
     });
-    // Field names retained for back-compat; semantics shift from
-    // "unbilled" to "approved, needs verification". The renderer is
-    // updated to label this honestly.
+    // pendingApproved* keys retained for the existing renderer / digest
+    // type. Semantically these now hold approved-CO totals (the things
+    // the PM should verify against an upcoming FS); pendingTotal carries
+    // truly-pending; draftTotal is surfaced via rows.
     return {
       pendingApprovedCount: approved.length,
       pendingApprovedTotal: approvedTotal,
-      pendingCount: pending.length,
-      pendingTotal,
+      pendingCount: pending.length + draft.length,
+      pendingTotal: pendingTotal + draftTotal,
       approvedTotal,
-      rows: [...approved, ...pending].map(fmtRow),
+      rows: [...approved, ...pending, ...draft].map(fmtRow),
     };
   } catch (err) {
     process.stderr.write(
@@ -796,7 +795,8 @@ async function buildProjectDigest(
     rfis, tasks, pos, cos, draws,
   ] = await Promise.all([
     include.has("schedule") ? fetchSchedule(api, projectId, digest.contractValue) : Promise.resolve(undefined),
-    include.has("unbilled_cos") && projectLookupOk ? fetchUnbilledCos(api, digest.name) : Promise.resolve(undefined),
+    // PR #74: now project-id scoped (was name-based which BT didn't honor).
+    include.has("unbilled_cos") ? fetchUnbilledCos(api, projectId) : Promise.resolve(undefined),
     include.has("selections_vs_allowances") ? fetchSelectionsVsAllowances(api, projectId) : Promise.resolve(undefined),
     include.has("budget_vs_pos") ? fetchBudgetVsPos(api, projectId) : Promise.resolve(undefined),
     include.has("rfis") && projectLookupOk ? fetchRfis(api, digest.name) : Promise.resolve(undefined),
