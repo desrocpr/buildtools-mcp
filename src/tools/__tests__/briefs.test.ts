@@ -684,13 +684,16 @@ describe("project_status_brief — PR #73 Moss-actual semantics", () => {
     expect(text).toContain("verify each against the schedule before billing");
   });
 
-  it("change orders: lists approved + pending with totals (HIGH-fix: no invented `invoiced_amount` check)", async () => {
+  it("change orders: project-scoped via ?PR[]= + numeric status enum (PR #74 fix)", async () => {
     const getProject = vi.fn().mockResolvedValue({ id: 100002, name: "Test", status_id: 6 });
     const getChangeOrders = vi.fn().mockResolvedValue({
       data: [
-        { info: 1, name: "Skylight upgrade", total: "$ 2,000.00", status: "Approved", project: "Test" },
-        { info: 2, name: "Window addition", total: "$ 3,500.00", status: "Approved", project: "Test" },
-        { info: 3, name: "Tile change", total: "$ 800.00", status: "Pending", project: "Test" },
+        // PR #74: BT exposes numeric status on CO datatable rows
+        // (1=Draft, 2=Pending, 3=Approved, 4=Rejected), and the
+        // project_name field (not `project`). Both honored here.
+        { info: 1, name: "Skylight upgrade", total: "$ 2,000.00", status: 3, project_name: "Test" },
+        { info: 2, name: "Window addition", total: "$ 3,500.00", status: 3, project_name: "Test" },
+        { info: 3, name: "Tile change", total: "$ 800.00", status: 2, project_name: "Test" },
       ],
     });
     const stubEmpty = vi.fn().mockResolvedValue({ data: [] });
@@ -706,6 +709,13 @@ describe("project_status_brief — PR #73 Moss-actual semantics", () => {
     const result = await projectStatusBriefTool.handler(
       { project_ids: [100002], include: ["unbilled_cos"] },
       api,
+    );
+    // PR #74: verify the call site used PR[]=projectId, not search[value]=name.
+    expect(getChangeOrders).toHaveBeenCalledWith(
+      expect.objectContaining({ "PR[]": "100002" }),
+    );
+    expect(getChangeOrders).not.toHaveBeenCalledWith(
+      expect.objectContaining({ "search[value]": expect.anything() }),
     );
     const text = textOf(result);
     expect(text).toContain("### Change orders");
