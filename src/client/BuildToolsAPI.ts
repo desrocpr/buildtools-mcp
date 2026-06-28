@@ -1708,6 +1708,68 @@ export class BuildToolsAPI {
    * value (cell[8] second amount), which reflects the current allowance
    * after change orders.
    */
+  /**
+   * Fetch the DHTMLX-format Gantt schedule for a project.
+   *
+   * Endpoint pattern: `GET /schedule/{kind}/data?projects=<id>` where kind
+   * is `working` (the active editable schedule) or `published` (the
+   * client-visible version). NOTE: the BT app's other project-scoping
+   * convention `?PR[]=` returns empty data here — only `?projects=`
+   * (singular query param) returns task rows. Verified live 2026-06-28.
+   *
+   * Each task row carries:
+   *   - id, project_id, parent (nullable, for nested grouping)
+   *   - text (task name)
+   *   - type ("project" | "task" | "milestone")
+   *   - start_date (ISO datetime), duration (integer days)
+   *   - progress (0..1), color_index, hide_client (0|1)
+   *   - budget_category, locations_room, owner_id (nullable)
+   *
+   * `end_date` is NOT included — DHTMLX convention; callers compute
+   * it as start_date + duration days.
+   */
+  async getSchedule(
+    projectId: string | number,
+    kind: "working" | "published" = "working",
+  ): Promise<{
+    tasks: Array<Record<string, unknown> & {
+      id: number;
+      project_id: number;
+      parent: number | null;
+      text: string;
+      type: string;
+      start_date: string;
+      duration: number;
+      progress: number;
+      hide_client: number;
+    }>;
+    links: Array<Record<string, unknown>>;
+    hide_client?: number;
+  }> {
+    await this.ensureAuthenticated();
+    const response = await this.request(
+      `${this.baseUrl}/schedule/${kind}/data?projects=${encodeURIComponent(String(projectId))}`,
+      {
+        headers: {
+          Accept: "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      },
+      false,
+    );
+    if (response.status !== 200) return { tasks: [], links: [] };
+    try {
+      const data = JSON.parse(response.body);
+      return {
+        tasks: data?.data ?? [],
+        links: data?.links ?? [],
+        hide_client: data?.hide_client,
+      };
+    } catch {
+      return { tasks: [], links: [] };
+    }
+  }
+
   async getAllowances(
     projectId: string | number,
   ): Promise<Array<{

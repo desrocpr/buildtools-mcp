@@ -113,7 +113,8 @@ const ProjectStatusBriefSchema = z.object({
   include: z
     .array(
       z.enum([
-        "schedule",
+        "schedule",         // PR #75: real BT schedule (working/published Gantt)
+        "billing",          // PR #75: was `schedule` pre-#75 — FS-derived billing progress
         "unbilled_cos",
         "selections_vs_allowances",
         "budget_vs_pos",
@@ -218,21 +219,41 @@ interface ProjectDigest {
   // === PR #73 — Moss-actual sections ===
 
   /**
-   * Schedule / billing progress derived from financial statements.
-   * Per the Moss workflow: Draft FS = milestones scheduled at project
-   * creation; status flips to Sent when the milestone is reached and
-   * billed. Last Sent/Paid FS is the "current position" anchor; pending
-   * Drafts are upcoming milestones the PM must judge against the
-   * physical schedule.
+   * Billing progress derived from financial statements (PR #75 rename;
+   * was `schedule` pre-PR-#75). Per the Moss workflow: Draft FS =
+   * milestones scheduled at project creation; status flips to Sent
+   * when the milestone is reached and billed. Last Sent/Paid FS is
+   * the "current position" anchor; pending Drafts are upcoming
+   * milestones the PM must judge against the physical schedule.
+   *
+   * The NEW `schedule` field (below) carries the actual BT Gantt
+   * schedule for that judgment.
    */
-  schedule?: {
+  billing?: {
     contractValue?: number;
-    totalBilledExclDraft: number;    // sum of Sent/Paid amounts
+    totalBilledExclDraft: number;
     totalPaid: number;
-    pctBilled?: number;              // % of contract billed (if contract value known)
+    pctBilled?: number;
     lastBilled?: { name: string; amount: number; status: string; date: string };
     pendingDrafts: Array<{ name: string; amount: number; date: string }>;
     fullHistory: Array<{ name: string; amount: number; paid: number; balance: number; status: string; date: string }>;
+  };
+
+  /**
+   * PR #75: Real BT schedule (DHTMLX-Gantt format). Sourced from
+   * `/schedule/working/data?projects=<id>`. Compares what was on the
+   * schedule last week vs this week + flags overdue items.
+   */
+  schedule?: {
+    totalTasks: number;
+    activeLastWeek: Array<{ id: number; text: string; type: string; startDate: string; endDate: string; progress: number; budgetCategory?: string }>;
+    activeThisWeek: Array<{ id: number; text: string; type: string; startDate: string; endDate: string; progress: number; budgetCategory?: string }>;
+    upcomingNextWeek: Array<{ id: number; text: string; type: string; startDate: string; endDate: string; progress: number; budgetCategory?: string }>;
+    overdue: Array<{ id: number; text: string; type: string; startDate: string; endDate: string; progress: number; budgetCategory?: string }>;
+    // Window dates for the "last/this/next" boundaries.
+    windowLastWeek: { start: string; end: string };
+    windowThisWeek: { start: string; end: string };
+    windowNextWeek: { start: string; end: string };
   };
 
   /** Approved CO total not yet on a Sent/Paid financial statement. */
@@ -517,11 +538,14 @@ async function fetchDraws(api: BuildToolsAPI, projectId: number): Promise<Projec
 // PR #73 Moss-actual section assemblers
 // ---------------------------------------------------------------------------
 
-async function fetchSchedule(
+// PR #75: was fetchSchedule pre-rename — this is the FS-derived billing
+// progress section. The new fetchSchedule (below) pulls the real BT
+// Gantt schedule.
+async function fetchBilling(
   api: BuildToolsAPI,
   projectId: number,
   contractValue?: number,
-): Promise<ProjectDigest["schedule"] | null> {
+): Promise<ProjectDigest["billing"] | null> {
   try {
     const result = await api.getFinancialStatements(projectId);
     const statements = result?.statements ?? [];
@@ -578,6 +602,112 @@ const CO_STATUS_LABEL: Record<number, string> = {
   4: "Rejected",
 };
 
+// PR #75: pull the real BT Gantt schedule and bucket tasks by:
+//   - overdue (end before today, progress < 100%)
+//   - active last week
+//   - active this week
+//   - upcoming next week
+// Tasks "overlap" a window if [task.start, task.end] intersects
+// [window.start, window.end]. DHTMLX rows don't carry end_date — we
+// compute it as start_date + duration days.
+// `weekStart` = the most recent Monday at 00:00 *as a date string*
+// (no actual Date.now() — that's banned in workflows; we accept
+// "today" in YYYY-MM-DD via the caller).
+async function fetchSchedule(
+  api: BuildToolsAPI,
+  projectId: number,
+  today: Date,
+): Promise<ProjectDigest["schedule"] | null> {
+  try {
+    const result = await api.getSchedule(projectId, "working");
+    const tasks = result?.tasks ?? [];
+    // Compute Monday of this week (ISO Monday → 1)
+    const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const today0 = startOfDay(today);
+    const dow = today0.getDay(); // 0..6 (Sun..Sat)
+    const offsetToMonday = (dow === 0 ? -6 : 1 - dow); // back to Monday
+    const thisMonday = new Date(today0);
+    thisMonday.setDate(thisMonday.getDate() + offsetToMonday);
+    const thisSunday = new Date(thisMonday);
+    thisSunday.setDate(thisSunday.getDate() + 6);
+    const lastMonday = new Date(thisMonday); lastMonday.setDate(lastMonday.getDate() - 7);
+    const lastSunday = new Date(thisMonday); lastSunday.setDate(lastSunday.getDate() - 1);
+    const nextMonday = new Date(thisMonday); nextMonday.setDate(nextMonday.getDate() + 7);
+    const nextSunday = new Date(nextMonday); nextSunday.setDate(nextSunday.getDate() + 6);
+    const ymd = (d: Date) =>
+      `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+    const enriched = tasks.map((t) => {
+      const start = t.start_date ? new Date(t.start_date) : null;
+      const duration = Number(t.duration ?? 0);
+      const end = start
+        ? new Date(start.getFullYear(), start.getMonth(), start.getDate() + Math.max(duration - 1, 0))
+        : null;
+      const progress = Number(t.progress ?? 0);
+      return {
+        id: Number(t.id),
+        text: stripHtml(String(t.text ?? "")),
+        type: String(t.type ?? "task"),
+        startDate: start ? ymd(start) : "",
+        endDate: end ? ymd(end) : "",
+        progress,
+        budgetCategory: t.budget_category_full_name
+          ? stripHtml(String(t.budget_category_full_name))
+          : t.budget_category
+            ? stripHtml(String(t.budget_category))
+            : undefined,
+        _start: start,
+        _end: end,
+      };
+    });
+
+    const overlaps = (taskStart: Date | null, taskEnd: Date | null, winStart: Date, winEnd: Date) => {
+      if (!taskStart || !taskEnd) return false;
+      return taskStart <= winEnd && taskEnd >= winStart;
+    };
+
+    // PR #75 v2: DHTMLX uses type="project" for both the root row AND any
+    // task that has children (phase groupings like "Foundation",
+    // "Framing"). Naively filtering `type !== "project"` drops the phase
+    // headers we want to surface. Exclude ONLY the top-level row instead
+    // (parent is null/0/undefined and duration spans the project life).
+    // Also drop the synthetic "duration child" placeholder BT sometimes
+    // injects (id starts with "c" and text contains "=> duration child").
+    const filtered = enriched.filter((t) => {
+      const raw = tasks.find((x) => Number(x.id) === t.id);
+      const parent = raw?.parent as unknown;
+      if (parent == null || String(parent) === "0") return false;
+      if (String(raw?.id ?? "").startsWith("c") && t.text.includes("=> duration child")) return false;
+      return true;
+    });
+
+    const activeLastWeek = filtered.filter((t) => overlaps(t._start, t._end, lastMonday, lastSunday));
+    const activeThisWeek = filtered.filter((t) => overlaps(t._start, t._end, thisMonday, thisSunday));
+    const upcomingNextWeek = filtered.filter((t) => overlaps(t._start, t._end, nextMonday, nextSunday));
+    const overdue = filtered.filter(
+      (t) => t._end && t._end < thisMonday && t.progress < 0.999,
+    );
+
+    const strip = ({ _start: _s, _end: _e, ...rest }: typeof filtered[number]) => rest;
+
+    return {
+      totalTasks: filtered.length,
+      activeLastWeek: activeLastWeek.map(strip),
+      activeThisWeek: activeThisWeek.map(strip),
+      upcomingNextWeek: upcomingNextWeek.map(strip),
+      overdue: overdue.map(strip),
+      windowLastWeek: { start: ymd(lastMonday), end: ymd(lastSunday) },
+      windowThisWeek: { start: ymd(thisMonday), end: ymd(thisSunday) },
+      windowNextWeek: { start: ymd(nextMonday), end: ymd(nextSunday) },
+    };
+  } catch (err) {
+    process.stderr.write(
+      `[project_status_brief] schedule fetch failed: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return null;
+  }
+}
+
 async function fetchUnbilledCos(
   api: BuildToolsAPI,
   projectId: number,
@@ -632,10 +762,14 @@ async function fetchUnbilledCos(
 async function fetchSelectionsVsAllowances(
   api: BuildToolsAPI,
   projectId: number,
+  prefetchedBudget?: Awaited<ReturnType<BuildToolsAPI["getBudget"]>>,
 ): Promise<ProjectDigest["selectionsVsAllowances"] | null> {
   try {
+    // PR #75: budget is fetched ONCE in buildProjectDigest and passed
+    // through; eliminates the double-getBudget called out in PR #73
+    // review LOW. Falls back to fetching if not provided.
     const [budget, sel] = await Promise.all([
-      api.getBudget(projectId),
+      prefetchedBudget ? Promise.resolve(prefetchedBudget) : api.getBudget(projectId),
       api.getSelections(projectId),
     ]);
     const allowances = (budget?.items ?? []).filter((i) => i.isAllowance);
@@ -692,9 +826,10 @@ async function fetchSelectionsVsAllowances(
 async function fetchBudgetVsPos(
   api: BuildToolsAPI,
   projectId: number,
+  prefetchedBudget?: Awaited<ReturnType<BuildToolsAPI["getBudget"]>>,
 ): Promise<ProjectDigest["budgetVsPos"] | null> {
   try {
-    const budget = await api.getBudget(projectId);
+    const budget = prefetchedBudget ?? (await api.getBudget(projectId));
     const round = (n: number) => Math.round(n * 100) / 100;
     // PR #73 review MEDIUM fix: look up the SENT PO'S column index from
     // the columns header dynamically rather than hardcoding cells[9].
@@ -750,6 +885,7 @@ async function buildProjectDigest(
   api: BuildToolsAPI,
   projectId: number,
   include: Set<string>,
+  today_?: Date,
 ): Promise<ProjectDigest> {
   const digest: ProjectDigest = { id: projectId, name: `#${projectId}`, errors: [] };
 
@@ -790,15 +926,41 @@ async function buildProjectDigest(
   // PR #73: parallel fetches for the new Moss-actual sections (schedule,
   // unbilled_cos, selections_vs_allowances, budget_vs_pos) + the legacy
   // ones for back-compat. All best-effort; failures degrade to caveats.
+  // PR #75: caller's "today" is captured here so the schedule windowing
+  // is reproducible inside tests. Default to NOW at digest time.
+  const today = today_ ?? new Date();
+
+  // PR #75: hoist budget fetch out of fetchSelectionsVsAllowances +
+  // fetchBudgetVsPos (deduplication; fixes PR #73 review LOW), and use
+  // it to PRIME the BT session for the schedule endpoint. Live probe
+  // 2026-06-28 confirmed: /schedule/working/data only returns the full
+  // task list AFTER /budget has been requested for the project. Without
+  // priming the schedule endpoint returns just a project-root stub.
+  const wantsBudget =
+    include.has("selections_vs_allowances") ||
+    include.has("budget_vs_pos") ||
+    include.has("schedule");
+  let prefetchedBudget: Awaited<ReturnType<BuildToolsAPI["getBudget"]>> | undefined;
+  if (wantsBudget) {
+    try {
+      prefetchedBudget = await api.getBudget(projectId);
+    } catch (err) {
+      process.stderr.write(
+        `[project_status_brief] budget prefetch failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
   const [
-    schedule, unbilledCos, sva, bvp,
+    schedule, billing, unbilledCos, sva, bvp,
     rfis, tasks, pos, cos, draws,
   ] = await Promise.all([
-    include.has("schedule") ? fetchSchedule(api, projectId, digest.contractValue) : Promise.resolve(undefined),
+    include.has("schedule") ? fetchSchedule(api, projectId, today) : Promise.resolve(undefined),
+    include.has("billing") ? fetchBilling(api, projectId, digest.contractValue) : Promise.resolve(undefined),
     // PR #74: now project-id scoped (was name-based which BT didn't honor).
     include.has("unbilled_cos") ? fetchUnbilledCos(api, projectId) : Promise.resolve(undefined),
-    include.has("selections_vs_allowances") ? fetchSelectionsVsAllowances(api, projectId) : Promise.resolve(undefined),
-    include.has("budget_vs_pos") ? fetchBudgetVsPos(api, projectId) : Promise.resolve(undefined),
+    include.has("selections_vs_allowances") ? fetchSelectionsVsAllowances(api, projectId, prefetchedBudget) : Promise.resolve(undefined),
+    include.has("budget_vs_pos") ? fetchBudgetVsPos(api, projectId, prefetchedBudget) : Promise.resolve(undefined),
     include.has("rfis") && projectLookupOk ? fetchRfis(api, digest.name) : Promise.resolve(undefined),
     include.has("tasks") && projectLookupOk ? fetchTasks(api, digest.name) : Promise.resolve(undefined),
     include.has("purchase_orders") && projectLookupOk ? fetchPOs(api, digest.name) : Promise.resolve(undefined),
@@ -807,6 +969,8 @@ async function buildProjectDigest(
   ]);
   if (schedule === null) digest.errors.push("Schedule unavailable");
   else if (schedule !== undefined) digest.schedule = schedule;
+  if (billing === null) digest.errors.push("Billing unavailable");
+  else if (billing !== undefined) digest.billing = billing;
   if (unbilledCos === null) digest.errors.push("Unbilled COs unavailable");
   else if (unbilledCos !== undefined) digest.unbilledCos = unbilledCos;
   if (sva === null) digest.errors.push("Selections-vs-allowances unavailable");
@@ -861,15 +1025,49 @@ function renderDigest(d: ProjectDigest): string {
   // PR #73 — Moss-actual sections (the things a PM actually checks)
   // ====================================================================
 
-  // === Schedule / billing progress ===
+  // === Schedule (PR #75): the actual BT Gantt schedule ===
+  if (d.schedule) {
+    const s = d.schedule;
+    lines.push("");
+    lines.push(`### Schedule — last week vs this week`);
+    lines.push(`- ${s.totalTasks} task(s) on the working schedule.`);
+    const renderTask = (t: typeof s.activeThisWeek[number]) => {
+      const cat = t.budgetCategory ? ` _(${escapeMarkdownInline(t.budgetCategory)})_` : "";
+      const pct = t.progress > 0 ? ` · ${Math.round(t.progress * 100)}%` : "";
+      const span = t.startDate === t.endDate ? t.startDate : `${t.startDate} → ${t.endDate}`;
+      return `  - ${escapeMarkdownInline(t.text)} — ${span}${pct}${cat}`;
+    };
+    // Overdue first — anything ending before this Monday with progress < 100%.
+    if (s.overdue.length > 0) {
+      lines.push(`- ⚠️ **${s.overdue.length} overdue** task(s) (ended before ${s.windowThisWeek.start} with progress < 100%):`);
+      for (const t of s.overdue.slice(0, 10)) lines.push(renderTask(t));
+      if (s.overdue.length > 10) lines.push(`  - … ${s.overdue.length - 10} more`);
+    }
+    // Last week
+    lines.push(`- Last week (${s.windowLastWeek.start} → ${s.windowLastWeek.end}): ${s.activeLastWeek.length} task(s)`);
+    for (const t of s.activeLastWeek.slice(0, 8)) lines.push(renderTask(t));
+    if (s.activeLastWeek.length > 8) lines.push(`  - … ${s.activeLastWeek.length - 8} more`);
+    // This week
+    lines.push(`- This week (${s.windowThisWeek.start} → ${s.windowThisWeek.end}): ${s.activeThisWeek.length} task(s)`);
+    for (const t of s.activeThisWeek.slice(0, 8)) lines.push(renderTask(t));
+    if (s.activeThisWeek.length > 8) lines.push(`  - … ${s.activeThisWeek.length - 8} more`);
+    // Next week peek
+    if (s.upcomingNextWeek.length > 0) {
+      lines.push(`- Next week (${s.windowNextWeek.start} → ${s.windowNextWeek.end}): ${s.upcomingNextWeek.length} task(s)`);
+      for (const t of s.upcomingNextWeek.slice(0, 5)) lines.push(renderTask(t));
+      if (s.upcomingNextWeek.length > 5) lines.push(`  - … ${s.upcomingNextWeek.length - 5} more`);
+    }
+  }
+
+  // === Billing progress (PR #75: renamed from `schedule`) ===
   // Per Moss workflow: Draft FS = scheduled milestones; status flips to
   // Sent when the milestone is reached and billed. Last Sent/Paid anchors
   // current position; pending Drafts are upcoming milestones.
-  if (d.schedule) {
-    const sc = d.schedule;
+  if (d.billing) {
+    const sc = d.billing;
     const pct = sc.pctBilled !== undefined ? ` (**${sc.pctBilled.toFixed(1)}%** of contract)` : "";
     lines.push("");
-    lines.push(`### Schedule / billing progress`);
+    lines.push(`### Billing progress (financial statements)`);
     lines.push(`- Billed (Sent + Paid): ${fmtUsd(sc.totalBilledExclDraft)}${pct} · received ${fmtUsd(sc.totalPaid)}`);
     if (sc.lastBilled) {
       lines.push(`- Last billed milestone: **${escapeMarkdownInline(sc.lastBilled.name)}** — ${fmtUsd(sc.lastBilled.amount)} — _${escapeMarkdownInline(sc.lastBilled.status)}_ on ${escapeMarkdownInline(sc.lastBilled.date)}`);
@@ -1030,10 +1228,11 @@ export const projectStatusBriefTool: ToolDefinition = {
   name: "project_status_brief",
   description:
     "Read-only one-call project summary aligned to the Moss workflow. Returns four analysis sections per project plus the header (contract value, address, PMs, team):\n\n" +
-    "1. **Schedule / billing progress** — financial statements broken down as Sent/Paid (already billed) vs Draft (scheduled milestones not yet reached or not yet sent). Highlights last billed milestone and lists pending Draft FS for the PM to verify against the physical schedule.\n" +
-    "2. **Unbilled change orders** — approved COs that haven't been added to a financial statement yet (count + $ total) plus pending COs awaiting client approval.\n" +
-    "3. **Selections vs allowance budgets** — for each allowance category, whether the team's selections roll up to within the revised budget. Flags over/under and categories awaiting selections.\n" +
-    "4. **Budget vs Sent POs** — for each category that has at least one Sent PO (no PO = no buyout = budget undetermined per Moss workflow), revised budget vs PO total, flagging over-budget categories.\n\n" +
+    "1. **Schedule** — the actual BT working Gantt schedule, bucketed by week: overdue tasks (ended before this Monday with <100% progress), last week's tasks, this week's tasks, and a peek at next week.\n" +
+    "2. **Billing progress** — financial statements broken down as Sent/Paid (already billed) vs Draft (scheduled milestones not yet reached or not yet sent). Highlights last billed milestone and lists pending Draft FS for the PM to verify against the physical schedule.\n" +
+    "3. **Unbilled change orders** — approved COs that haven't been added to a financial statement yet (count + $ total) plus pending COs awaiting client approval.\n" +
+    "4. **Selections vs allowance budgets** — for each allowance category, whether the team's selections roll up to within the revised budget. Flags over/under and categories awaiting selections.\n" +
+    "5. **Budget vs Sent POs** — for each category that has at least one Sent PO (no PO = no buyout = budget undetermined per Moss workflow), revised budget vs PO total, flagging over-budget categories.\n\n" +
     "Pass EITHER `project_ids` (1-30 explicit IDs) OR `team` (filter active-team projects). Up to 30 projects per call. " +
     "Default `include` covers the four sections above; legacy sections (rfis, tasks, purchase_orders, change_orders, draws) are still accepted for backward compat but are NOT in the default set. No mutations.",
   inputSchema: zodToJsonSchema(ProjectStatusBriefSchema),
@@ -1048,7 +1247,7 @@ export const projectStatusBriefTool: ToolDefinition = {
     }
     const data = parsed.data;
     const include = new Set(
-      data.include ?? ["schedule", "unbilled_cos", "selections_vs_allowances", "budget_vs_pos"],
+      data.include ?? ["schedule", "billing", "unbilled_cos", "selections_vs_allowances", "budget_vs_pos"],
     );
 
     // === Resolve project IDs ===
