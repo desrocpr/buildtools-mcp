@@ -1014,6 +1014,187 @@ export class MossDb {
     return { data, recordsTotal: data.length } as T;
   }
 
+  // -------------------------------------------------------------------------
+  // PR #84: detail fetchers + findUnbilledChangeOrders (single-query rewrite)
+  // -------------------------------------------------------------------------
+
+  /** Single CO record (matches the datatable row shape used by getChangeOrder). */
+  async getChangeOrder<T = Record<string, unknown>>(id: string | number): Promise<T | null> {
+    const cid = Number(id);
+    if (!Number.isFinite(cid) || cid <= 0) return null;
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT co.id, co.project_id, co.status, co.name, co.number, co.approved_number,
+              co.total, co.approved_date, co.created_at, co.due_date,
+              co.description, co.notes,
+              p.name AS project_name
+         FROM change_orders co
+         JOIN projects p ON p.id = co.project_id
+        WHERE co.id = ? AND co.deleted_at IS NULL
+        LIMIT 1`,
+      [cid],
+    );
+    const r = rows[0];
+    if (!r) return null;
+    return {
+      DT_RowId: `row_${r.id}`,
+      info: r.id,
+      id: r.id,
+      project_id: r.project_id,
+      project_name: r.project_name,
+      status: r.status,
+      number: r.number,
+      approved_number: r.approved_number,
+      name: r.name ?? "",
+      total: fmtUsdStr(Number(r.total ?? 0)),
+      dates: r.approved_date ? mmddyyyy(r.approved_date) : "-",
+      due_date: r.due_date ? mmddyyyy(r.due_date) : "",
+      description: r.description ?? "",
+      notes: r.notes ?? "",
+    } as T;
+  }
+
+  /** Single PO with line items. Mirrors PurchaseOrderDetail. */
+  async getPurchaseOrder(id: string | number): Promise<{
+    id: number;
+    projectId: number | null;
+    name: string;
+    number: string;
+    prefix: string;
+    status: number | null;
+    description: string;
+    companyId: number | null;
+    companyName: string;
+    items: Array<{
+      id: number | null;
+      budgetCategoryId: number | null;
+      budgetCategoryCode: string;
+      budgetCategoryName: string;
+      total: string;
+      notes: string;
+      internalNotes: string;
+      invoiceRelated: string;
+      amounts: Array<Record<string, unknown>>;
+      companyId: number | null;
+      companyName: string;
+    }>;
+    totalNumeric: number;
+  } | null> {
+    const pid = Number(id);
+    if (!Number.isFinite(pid) || pid <= 0) return null;
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT po.id, po.project_id, po.name, po.number, po.prefix, po.status,
+              po.description, po.company_id, c.name AS company_name, po.total
+         FROM purchase_orders po
+         LEFT JOIN companies c ON c.id = po.company_id
+        WHERE po.id = ?
+        LIMIT 1`,
+      [pid],
+    );
+    const r = rows[0];
+    if (!r) return null;
+    const [itemRows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT poi.id, poi.budget_category_id, bc.code AS bc_code, bc.name AS bc_name,
+              poi.total, poi.notes, poi.internal_notes, poi.invoice_related, poi.amounts,
+              poi.company_id, c.name AS company_name
+         FROM purchase_orders_items poi
+         LEFT JOIN budget_categories bc ON bc.id = poi.budget_category_id
+         LEFT JOIN companies c ON c.id = poi.company_id
+        WHERE poi.purchase_order_id = ?
+        ORDER BY poi.id ASC`,
+      [pid],
+    );
+    let totalNumeric = 0;
+    const items = itemRows.map((it) => {
+      const itTotal = Number(it.total ?? 0);
+      totalNumeric += itTotal;
+      let amounts: Array<Record<string, unknown>> = [];
+      if (it.amounts && typeof it.amounts === "string") {
+        try { amounts = JSON.parse(it.amounts); } catch { amounts = []; }
+      }
+      return {
+        id: it.id != null ? Number(it.id) : null,
+        budgetCategoryId: it.budget_category_id != null ? Number(it.budget_category_id) : null,
+        budgetCategoryCode: it.bc_code ?? "",
+        budgetCategoryName: it.bc_name ?? "",
+        total: fmtUsdStr(itTotal),
+        notes: it.notes ?? "",
+        internalNotes: it.internal_notes ?? "",
+        invoiceRelated: fmtUsdStr(Number(it.invoice_related ?? 0)),
+        amounts,
+        companyId: it.company_id != null ? Number(it.company_id) : null,
+        companyName: it.company_name ?? "",
+      };
+    });
+    return {
+      id: Number(r.id),
+      projectId: r.project_id != null ? Number(r.project_id) : null,
+      name: r.name ?? "",
+      number: String(r.number ?? ""),
+      prefix: r.prefix ?? "",
+      status: r.status != null ? Number(r.status) : null,
+      description: r.description ?? "",
+      companyId: r.company_id != null ? Number(r.company_id) : null,
+      companyName: r.company_name ?? "",
+      items,
+      totalNumeric: Math.round(totalNumeric * 100) / 100,
+    };
+  }
+
+  /**
+   * Portfolio-wide unbilled-CO analysis in a single SQL query — matches
+   * the gap formula in BuildToolsAPI.findUnbilledChangeOrders:
+   *   unbilled_gap = (budget_total + approved_co_total) - sum(all_FS_amounts)
+   *
+   * The HTTP wrapper does this with a per-project FS fetch — ~50 HTTPS
+   * calls for a typical portfolio. DB does it in ONE query.
+   */
+  async findUnbilledChangeOrders(
+    filters: { min_amount?: number; older_than_days?: number } = {},
+  ): Promise<Array<Record<string, unknown> & { total_value: number }>> {
+    const minAmount = filters.min_amount ?? 0.01;
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT
+         p.id, p.name, p.status,
+         p.address, p.city, p.state,
+         p.budget_total,
+         COALESCE(co_sum.approved_total, 0) AS approved_co_total,
+         (p.budget_total + COALESCE(co_sum.approved_total, 0)) AS budget_revised_value,
+         COALESCE(fs_sum.fs_total, 0) AS requested_amount,
+         ((p.budget_total + COALESCE(co_sum.approved_total, 0)) - COALESCE(fs_sum.fs_total, 0)) AS unbilled_gap
+       FROM projects p
+       LEFT JOIN (
+         SELECT project_id, SUM(total) AS approved_total
+           FROM change_orders
+          WHERE status = 3 AND deleted_at IS NULL
+          GROUP BY project_id
+       ) co_sum ON co_sum.project_id = p.id
+       LEFT JOIN (
+         SELECT project_id, SUM(amount) AS fs_total
+           FROM financial_statements
+          GROUP BY project_id
+       ) fs_sum ON fs_sum.project_id = p.id
+       WHERE p.status BETWEEN 5 AND 8
+         AND COALESCE(co_sum.approved_total, 0) > 0
+         AND ((p.budget_total + COALESCE(co_sum.approved_total, 0)) - COALESCE(fs_sum.fs_total, 0)) >= ?
+       ORDER BY unbilled_gap DESC`,
+      [minAmount],
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name ?? "",
+      status: r.status,
+      address: r.address ?? "",
+      city: r.city ?? "",
+      state: r.state ?? "",
+      budget_revised: fmtUsdStr(Number(r.budget_revised_value)),
+      budget_revised_value: Number(r.budget_revised_value),
+      change_orders_approved: fmtUsdStr(Number(r.approved_co_total)),
+      requested_amount: Number(r.requested_amount),
+      unbilled_gap: Math.round(Number(r.unbilled_gap) * 100) / 100,
+      total_value: Math.round(Number(r.unbilled_gap) * 100) / 100,
+    }));
+  }
+
   async getWorkDays<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
     opts: Record<string, unknown> = {},
   ): Promise<T> {
