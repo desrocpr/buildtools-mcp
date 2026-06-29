@@ -200,7 +200,7 @@ async function collectProjectInvoices(
 
   let rows: UncollectedInvoice[] = [];
   try {
-    const result = await (api.db ?? api).getFinancialStatements(projectId);
+    const result = await api.getFinancialStatements(projectId);
     for (const s of result?.statements ?? []) {
       if (!UNCOLLECTED_STATUSES.has(s.status)) continue;
       if (s.balance <= 0.005) continue;

@@ -87,7 +87,7 @@ async function listSelectionsHandler(
   const { project_id, status } = parsed.data;
 
   try {
-    const result = await api.getSelections(project_id);
+    const result = await (api.db ?? api).getSelections(project_id);
     let selections = result.selections;
 
     if (status && status !== "All") {
@@ -281,8 +281,8 @@ async function listAllowancesHandler(
   try {
     // Get allowance categories from budget + selections for reconciliation
     const [allowances, selData] = await Promise.all([
-      api.getAllowances(project_id),
-      api.getSelections(project_id),
+      (api.db ?? api).getAllowances(project_id),
+      (api.db ?? api).getSelections(project_id),
     ]);
 
     if (allowances.length === 0) {
@@ -482,7 +482,7 @@ async function exportSelectionsHandler(
 
   try {
     // ONE bulk fetch for project names; then per-project selections in parallel.
-    const projectsResp = await api.getProjects<{
+    const projectsResp = await (api.db ?? api).getProjects<{
       data?: Array<{ id: number | string; name?: string }>;
     }>({ length: 5000 });
     const nameById = new Map<string, string>();
@@ -513,7 +513,7 @@ async function exportSelectionsHandler(
         const id = String(pid);
         const projectName = nameById.get(id) ?? "";
         try {
-          const result = await api.getSelections(id);
+          const result = await (api.db ?? api).getSelections(id);
           for (const sel of result.selections) {
             if (canonicalStatuses && !canonicalStatuses.has(sel.status)) continue;
             lines.push(

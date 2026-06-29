@@ -285,7 +285,7 @@ async function listProjectsHandler(
   }
 
   try {
-    const result = await api.getProjects<ProjectsDatatable>(params);
+    const result = await (api.db ?? api).getProjects<ProjectsDatatable>(params);
     const rows = result?.data ?? [];
     if (rows.length === 0) {
       return markdown(
@@ -391,7 +391,7 @@ async function getProjectHandler(
   const { project_id } = parsed.data;
 
   try {
-    const project = await api.getProject<ProjectDetail>(project_id);
+    const project = await (api.db ?? api).getProject<ProjectDetail>(project_id);
     if (!project) {
       return markdown(`No project found with ID #${project_id}.`);
     }
