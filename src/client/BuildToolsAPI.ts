@@ -296,6 +296,17 @@ function parseDualAmount(s: string): [number, number] {
 // ---------------------------------------------------------------------------
 
 export class BuildToolsAPI {
+  /**
+   * Optional DB fast-path adapter (PR #82). When set, opt-in tools
+   * (project_status_brief, cash_flow_forecast, uncollected_invoices)
+   * read from MySQL replica instead of fanning HTTP per project,
+   * collapsing portfolio-wide queries from minutes to ~seconds.
+   * Wired up by the transport layer when `MYSQL_*` env vars are set.
+   * Falls back to HTTP read methods on this same class if `db` is null.
+   * Writes always go through the HTTP API regardless.
+   */
+  public db: import("../db/MossDb.js").MossDb | null = null;
+
   /** Hostname-keyed cookie jar: { hostname → { cookieName → cookieValue } }. */
   private cookies: Record<string, Record<string, string>> = {};
 
