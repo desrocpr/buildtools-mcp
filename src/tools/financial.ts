@@ -545,7 +545,7 @@ async function getFinancialStatementHandler(
   const { project_id } = parsed.data;
 
   try {
-    const statement = await api.getFinancialStatement<FinancialStatementDetail>(
+    const statement = await (api.db ?? api).getFinancialStatement<FinancialStatementDetail>(
       project_id,
     );
     if (!statement) {
