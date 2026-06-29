@@ -55,6 +55,7 @@ import {
   companyTools,
   createMutationTools,
   forecastTools,
+  invoiceTools,
   createSessionCredentialsTool,
   customerTools,
   financialTools,
@@ -200,6 +201,7 @@ function buildPerSessionServer(opts: {
     ...budgetTools.map((t) => [t.name, t] as const),
     ...briefTools.map((t) => [t.name, t] as const),
     ...forecastTools.map((t) => [t.name, t] as const),
+    ...invoiceTools.map((t) => [t.name, t] as const),
     ...mutationTools.map((t) => [t.name, t] as const),
   ]);
 

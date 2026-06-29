@@ -28,6 +28,7 @@ import {
   companyTools,
   createMutationTools,
   forecastTools,
+  invoiceTools,
   customerTools,
   financialTools,
   operationTools,
@@ -115,6 +116,7 @@ export async function startStdioTransport(): Promise<Server> {
     ...budgetTools.map((t) => [t.name, t] as const),
     ...briefTools.map((t) => [t.name, t] as const),
     ...forecastTools.map((t) => [t.name, t] as const),
+    ...invoiceTools.map((t) => [t.name, t] as const),
     ...mutationTools.map((t) => [t.name, t] as const),
   ]);
 
