@@ -11,3 +11,9 @@ coverage/
 # Local data dumps / scratch
 omega_financial_statements.csv
 *.csv
+
+# Throwaway smoke/probe scripts created during dev
+smoke-*.ts
+smoke*.ts
+probe-*.ts
+run-*.ts
