@@ -162,11 +162,11 @@ async function listCertificatesHandler(
 
   try {
     const result = query
-      ? await api.searchCertificates<WorkTrackingDatatable>(
+      ? await (api.db ?? api).searchCertificates<WorkTrackingDatatable>(
           query,
           effectiveLimit,
         )
-      : await api.getCertificates<WorkTrackingDatatable>({
+      : await (api.db ?? api).getCertificates<WorkTrackingDatatable>({
           length: effectiveLimit,
         });
     const rows = result?.data ?? [];
@@ -232,7 +232,7 @@ async function listDailyLogsHandler(
   const effectiveLimit = parsed.data.limit ?? 50;
 
   try {
-    const result = await api.getDailyLogs<WorkTrackingDatatable>({
+    const result = await (api.db ?? api).getDailyLogs<WorkTrackingDatatable>({
       length: effectiveLimit,
     });
     const rows = result?.data ?? [];
@@ -285,7 +285,7 @@ async function listWeeklyReportsHandler(
   const effectiveLimit = parsed.data.limit ?? 50;
 
   try {
-    const result = await api.getWeeklyReports<WorkTrackingDatatable>({
+    const result = await (api.db ?? api).getWeeklyReports<WorkTrackingDatatable>({
       length: effectiveLimit,
     });
     const rows = result?.data ?? [];
@@ -334,7 +334,7 @@ async function listWorkDaysHandler(
   const effectiveLimit = parsed.data.limit ?? 50;
 
   try {
-    const result = await api.getWorkDays<WorkTrackingDatatable>({
+    const result = await (api.db ?? api).getWorkDays<WorkTrackingDatatable>({
       length: effectiveLimit,
     });
     const rows = result?.data ?? [];

@@ -208,7 +208,7 @@ async function listPurchaseOrdersHandler(
   }
 
   try {
-    const result = await api.getPurchaseOrders<PurchaseOrdersDatatable>(params);
+    const result = await (api.db ?? api).getPurchaseOrders<PurchaseOrdersDatatable>(params);
     const rows = result?.data ?? [];
     if (rows.length === 0) {
       const filter = input.query

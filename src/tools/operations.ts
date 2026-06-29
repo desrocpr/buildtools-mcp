@@ -193,7 +193,7 @@ async function listRfisHandler(
   }
 
   try {
-    const result = await api.getRFIs<Datatable>(params);
+    const result = await (api.db ?? api).getRFIs<Datatable>(params);
     const rows = result?.data ?? [];
     if (rows.length === 0) {
       const trailer = project_name ? ` (project_name: "${project_name}")` : "";
@@ -271,7 +271,7 @@ async function listServicesHandler(
   }
 
   try {
-    const result = await api.getServices<Datatable>(params);
+    const result = await (api.db ?? api).getServices<Datatable>(params);
     const rows = result?.data ?? [];
     if (rows.length === 0) {
       const trailer = project_name ? ` (project_name: "${project_name}")` : "";
@@ -382,7 +382,7 @@ async function listUsersHandler(
     if (query) {
       params["search[value]"] = query;
     }
-    const result = await api.getUsers<Datatable>(params);
+    const result = await (api.db ?? api).getUsers<Datatable>(params);
     const allRows = result?.data ?? [];
     const filtered =
       effectiveRole === "All"

@@ -82,7 +82,7 @@ async function listBudgetHandler(
   const { project_id, allowances_only } = parsed.data;
 
   try {
-    const result = await api.getBudget(project_id);
+    const result = await (api.db ?? api).getBudget(project_id);
     let items = result.items;
     if (allowances_only) {
       items = items.filter((i) => i.isAllowance);

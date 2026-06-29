@@ -568,6 +568,485 @@ export class MossDb {
     });
     return { statusCount, selections };
   }
+
+  // -------------------------------------------------------------------------
+  // PR #83: list-style methods for the broader sweep.
+  // Each mirrors the HTTP wrapper's return shape so tool handlers can swap
+  // via `(api.db ?? api).getX(...)` with no other changes.
+  // -------------------------------------------------------------------------
+
+  /** companies — used by list_customers (type-filtered), search_companies, get_company. */
+  async getCompanies<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
+    opts: Record<string, unknown> = {},
+  ): Promise<T> {
+    const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
+    const search = String(opts["search[value]"] ?? "").trim();
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (search) {
+      where.push("(c.name LIKE ? OR c.email LIKE ?)");
+      params.push(`%${search}%`, `%${search}%`);
+    }
+    // type filter (1=Customer, 2=Subcontractor, 3=Vendor per CLAUDE.md)
+    if (opts["columns[1][search][value]"] !== undefined) {
+      const typeFilter = String(opts["columns[1][search][value]"]);
+      where.push("c.type = ?");
+      params.push(Number(typeFilter));
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT c.id, c.name, c.type, c.type_name, c.email, c.phone, c.address, c.city, c.state, c.status
+         FROM companies c
+         ${whereSql}
+         ORDER BY c.id DESC
+         LIMIT ?`,
+      [...params, length],
+    );
+    const data = rows.map((r) => ({
+      DT_RowId: `row_${r.id}`,
+      id: r.id,
+      name: r.name ?? "",
+      type: r.type,
+      type_name: r.type_name ?? "",
+      email: r.email ?? "",
+      phone: r.phone ?? "",
+      address: r.address ?? "",
+      city: r.city ?? "",
+      state: r.state ?? "",
+      status: r.status,
+    }));
+    return { data, recordsTotal: data.length } as T;
+  }
+
+  /** searchCompanies — thin alias around getCompanies with the same `search[value]` shape. */
+  async searchCompanies<T = unknown>(query: string, opts: Record<string, unknown> = {}): Promise<T> {
+    return this.getCompanies<T>({ ...opts, "search[value]": query });
+  }
+
+  /** Single company detail row. */
+  async getCompany<T = Record<string, unknown>>(id: number | string): Promise<T | null> {
+    const cid = Number(id);
+    if (!Number.isFinite(cid) || cid <= 0) return null;
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT id, name, type, type_name, email, phone, fax, address, city, state, zip, country, website, rating, status, created_at, updated_at
+         FROM companies WHERE id = ? LIMIT 1`,
+      [cid],
+    );
+    return (rows[0] as T) ?? null;
+  }
+
+  /** customers = companies of type 1. */
+  async getCustomer<T = Record<string, unknown>>(id: number | string): Promise<T | null> {
+    return this.getCompany<T>(id);
+  }
+
+  /** tasks datatable. */
+  async getTasks<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
+    opts: Record<string, unknown> = {},
+  ): Promise<T> {
+    const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
+    const projectId = opts["PR[]"] ?? opts["project_id"];
+    const search = String(opts["search[value]"] ?? "").trim();
+    const where: string[] = ["t.deleted_at IS NULL"];
+    const params: unknown[] = [];
+    if (projectId !== undefined && projectId !== null) {
+      where.push("t.project_id = ?");
+      params.push(Number(projectId));
+    }
+    if (search) {
+      where.push("(t.name LIKE ? OR t.description LIKE ?)");
+      params.push(`%${search}%`, `%${search}%`);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT t.id, t.project_id, t.priority, t.status, t.name, t.due_date,
+              t.created_at, t.updated_at,
+              p.name AS project_name
+         FROM tasks t
+         JOIN projects p ON p.id = t.project_id
+         ${whereSql}
+         ORDER BY t.id DESC
+         LIMIT ?`,
+      [...params, length],
+    );
+    const data = rows.map((r) => ({
+      DT_RowId: `row_${r.id}`,
+      id: r.id,
+      project_id: r.project_id,
+      project_name: r.project_name,
+      priority: r.priority,
+      status: r.status,
+      name: r.name ?? "",
+      due_date: r.due_date ? mmddyyyy(r.due_date) : "",
+      created_at: r.created_at ? mmddyyyy(r.created_at) : "",
+    }));
+    return { data, recordsTotal: data.length } as T;
+  }
+
+  async searchTasks<T = unknown>(query: string, limit: number = 50): Promise<T> {
+    return this.getTasks<T>({ "search[value]": query, length: limit });
+  }
+
+  /** RFIs datatable. */
+  async getRFIs<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
+    opts: Record<string, unknown> = {},
+  ): Promise<T> {
+    const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
+    const projectId = opts["PR[]"] ?? opts["project_id"];
+    const search = String(opts["search[value]"] ?? "").trim();
+    const where: string[] = ["r.deleted_at IS NULL"];
+    const params: unknown[] = [];
+    if (projectId !== undefined && projectId !== null) {
+      where.push("r.project_id = ?");
+      params.push(Number(projectId));
+    }
+    if (search) {
+      where.push("(r.subject LIKE ? OR r.description LIKE ?)");
+      params.push(`%${search}%`, `%${search}%`);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT r.id, r.project_id, r.priority, r.status, r.subject, r.due_date,
+              r.created_at, r.number,
+              p.name AS project_name
+         FROM rfis r
+         JOIN projects p ON p.id = r.project_id
+         ${whereSql}
+         ORDER BY r.id DESC
+         LIMIT ?`,
+      [...params, length],
+    );
+    const data = rows.map((r) => ({
+      DT_RowId: `row_${r.id}`,
+      id: r.id,
+      project_id: r.project_id,
+      project_name: r.project_name,
+      priority: r.priority,
+      status: r.status,
+      number: r.number,
+      subject: r.subject ?? "",
+      due_date: r.due_date ? mmddyyyy(r.due_date) : "",
+      created_at: r.created_at ? mmddyyyy(r.created_at) : "",
+    }));
+    return { data, recordsTotal: data.length } as T;
+  }
+
+  /** services datatable. */
+  async getServices<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
+    opts: Record<string, unknown> = {},
+  ): Promise<T> {
+    const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
+    const projectId = opts["PR[]"] ?? opts["project_id"];
+    const where: string[] = ["s.deleted_at IS NULL"];
+    const params: unknown[] = [];
+    if (projectId !== undefined && projectId !== null) {
+      where.push("s.project_id = ?");
+      params.push(Number(projectId));
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT s.id, s.project_id, s.status, s.name, s.number, s.due_date, s.created_at,
+              p.name AS project_name
+         FROM services s
+         JOIN projects p ON p.id = s.project_id
+         ${whereSql}
+         ORDER BY s.id DESC
+         LIMIT ?`,
+      [...params, length],
+    );
+    const data = rows.map((r) => ({
+      DT_RowId: `row_${r.id}`,
+      id: r.id,
+      project_id: r.project_id,
+      project_name: r.project_name,
+      status: r.status,
+      number: r.number,
+      name: r.name ?? "",
+      due_date: r.due_date ? mmddyyyy(r.due_date) : "",
+      created_at: r.created_at ? mmddyyyy(r.created_at) : "",
+    }));
+    return { data, recordsTotal: data.length } as T;
+  }
+
+  /** users datatable. */
+  async getUsers<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
+    opts: Record<string, unknown> = {},
+  ): Promise<T> {
+    const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
+    const search = String(opts["search[value]"] ?? "").trim();
+    const where: string[] = ["u.deleted_at IS NULL"];
+    const params: unknown[] = [];
+    if (search) {
+      where.push("(u.first_name LIKE ? OR u.last_name LIKE ? OR u.email LIKE ?)");
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT u.id, u.first_name, u.last_name, u.email, u.role, u.status, u.phone, u.title_name
+         FROM users u
+         ${whereSql}
+         ORDER BY u.id DESC
+         LIMIT ?`,
+      [...params, length],
+    );
+    const data = rows.map((r) => ({
+      DT_RowId: `row_${r.id}`,
+      id: r.id,
+      first_name: r.first_name ?? "",
+      last_name: r.last_name ?? "",
+      email: r.email ?? "",
+      role: r.role,
+      status: r.status,
+      phone: r.phone ?? "",
+      title_name: r.title_name ?? "",
+    }));
+    return { data, recordsTotal: data.length } as T;
+  }
+
+  async searchUsers<T = unknown>(query: string, limit: number = 50): Promise<T> {
+    return this.getUsers<T>({ "search[value]": query, length: limit });
+  }
+
+  async getEmployees<T = unknown>(opts: Record<string, unknown> = {}): Promise<T> {
+    // Employees are users with role=2.
+    const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT id, first_name, last_name, email, role, status, phone, title_name
+         FROM users
+        WHERE deleted_at IS NULL AND role = 2
+        ORDER BY first_name ASC
+        LIMIT ?`,
+      [length],
+    );
+    const data = rows.map((r) => ({
+      DT_RowId: `row_${r.id}`,
+      id: r.id,
+      first_name: r.first_name ?? "",
+      last_name: r.last_name ?? "",
+      email: r.email ?? "",
+      role: r.role,
+      status: r.status,
+      phone: r.phone ?? "",
+      title_name: r.title_name ?? "",
+    }));
+    return { data, recordsTotal: data.length } as T;
+  }
+
+  /** purchase_orders datatable. */
+  async getPurchaseOrders<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
+    opts: Record<string, unknown> = {},
+  ): Promise<T> {
+    const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
+    const projectId = opts["PR[]"] ?? opts["project_id"];
+    const search = String(opts["search[value]"] ?? "").trim();
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (projectId !== undefined && projectId !== null) {
+      where.push("po.project_id = ?");
+      params.push(Number(projectId));
+    }
+    if (search) {
+      where.push("(po.name LIKE ? OR p.name LIKE ? OR c.name LIKE ?)");
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT po.id, po.project_id, po.status, po.name, po.number, po.prefix, po.total,
+              po.confirmed_date, po.created_at, po.change_order_id,
+              p.name AS project_name,
+              c.name AS company_name
+         FROM purchase_orders po
+         JOIN projects p ON p.id = po.project_id
+         LEFT JOIN companies c ON c.id = po.company_id
+         ${whereSql}
+         ORDER BY po.id DESC
+         LIMIT ?`,
+      [...params, length],
+    );
+    const data = rows.map((r) => ({
+      DT_RowId: `row_${r.id}`,
+      id: r.id,
+      project_id: r.project_id,
+      project_name: r.project_name,
+      company_name: r.company_name,
+      status: r.status,
+      number: r.number,
+      prefix: r.prefix ?? "",
+      name: r.name ?? "",
+      total: fmtUsdStr(Number(r.total ?? 0)),
+      confirmed_date: r.confirmed_date ? mmddyyyy(r.confirmed_date) : "",
+      created_at: r.created_at ? mmddyyyy(r.created_at) : "",
+      change_order_id: r.change_order_id,
+    }));
+    return { data, recordsTotal: data.length } as T;
+  }
+
+  async searchPurchaseOrders<T = unknown>(query: string, limit: number = 50): Promise<T> {
+    return this.getPurchaseOrders<T>({ "search[value]": query, length: limit });
+  }
+
+  /** allowances — budgets where allowance=1, similar shape to getBudget items. */
+  async getAllowances(projectId: string | number): Promise<Array<{
+    id: string;
+    categoryId: string;
+    name: string;
+    publishedBudget: number;
+    workingBudget: number;
+    approvedCOs: number;
+    publishedRevised: number;
+    workingRevised: number;
+    cells: string[];
+  }>> {
+    const full = await this.getBudget(projectId);
+    return full.items
+      .filter((i) => i.isAllowance)
+      .map(({ isAllowance: _i, ...rest }) => rest);
+  }
+
+  // -------------------------------------------------------------------------
+  // Work-tracking: certificates, daily_logs, weekly_reports, work_days
+  // -------------------------------------------------------------------------
+
+  async getCertificates<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
+    opts: Record<string, unknown> = {},
+  ): Promise<T> {
+    const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
+    const search = String(opts["search[value]"] ?? "").trim();
+    const where: string[] = ["c.deleted_at IS NULL"];
+    const params: unknown[] = [];
+    if (search) {
+      where.push("(c.policy_number LIKE ? OR co.name LIKE ?)");
+      params.push(`%${search}%`, `%${search}%`);
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT c.id, c.status, c.policy_number, c.amount, c.expiration_date,
+              co.name AS company_name, ct.name AS certificate_type
+         FROM certificates c
+         LEFT JOIN companies co ON co.id = c.company_id
+         LEFT JOIN certificates_types ct ON ct.id = c.certificates_type_id
+         ${whereSql}
+         ORDER BY c.id DESC
+         LIMIT ?`,
+      [...params, length],
+    );
+    const data = rows.map((r) => ({
+      DT_RowId: `row_${r.id}`,
+      id: r.id,
+      status: r.status,
+      policy_number: r.policy_number ?? "",
+      amount: fmtUsdStr(Number(r.amount ?? 0)),
+      expiration_date: r.expiration_date ? mmddyyyy(r.expiration_date) : "",
+      company_name: r.company_name ?? "",
+      certificate_type: r.certificate_type ?? "",
+    }));
+    return { data, recordsTotal: data.length } as T;
+  }
+
+  async searchCertificates<T = unknown>(query: string, limit: number = 50): Promise<T> {
+    return this.getCertificates<T>({ "search[value]": query, length: limit });
+  }
+
+  async getDailyLogs<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
+    opts: Record<string, unknown> = {},
+  ): Promise<T> {
+    const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
+    const projectId = opts["PR[]"] ?? opts["project_id"];
+    const where: string[] = ["d.deleted_at IS NULL"];
+    const params: unknown[] = [];
+    if (projectId !== undefined && projectId !== null) {
+      where.push("d.project_id = ?");
+      params.push(Number(projectId));
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT d.id, d.project_id, d.date, d.created_at,
+              p.name AS project_name
+         FROM daily_logs d
+         JOIN projects p ON p.id = d.project_id
+         ${whereSql}
+         ORDER BY d.date DESC, d.id DESC
+         LIMIT ?`,
+      [...params, length],
+    );
+    const data = rows.map((r) => ({
+      DT_RowId: `row_${r.id}`,
+      id: r.id,
+      project_id: r.project_id,
+      project_name: r.project_name,
+      date: r.date ? mmddyyyy(r.date) : "",
+      created_at: r.created_at ? mmddyyyy(r.created_at) : "",
+    }));
+    return { data, recordsTotal: data.length } as T;
+  }
+
+  async getWeeklyReports<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
+    opts: Record<string, unknown> = {},
+  ): Promise<T> {
+    const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
+    const projectId = opts["PR[]"] ?? opts["project_id"];
+    const where: string[] = ["w.deleted_at IS NULL"];
+    const params: unknown[] = [];
+    if (projectId !== undefined && projectId !== null) {
+      where.push("w.project_id = ?");
+      params.push(Number(projectId));
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT w.id, w.project_id, w.name, w.status, w.created_at,
+              p.name AS project_name
+         FROM weekly_reports w
+         JOIN projects p ON p.id = w.project_id
+         ${whereSql}
+         ORDER BY w.id DESC
+         LIMIT ?`,
+      [...params, length],
+    );
+    const data = rows.map((r) => ({
+      DT_RowId: `row_${r.id}`,
+      id: r.id,
+      project_id: r.project_id,
+      project_name: r.project_name,
+      name: r.name ?? "",
+      status: r.status,
+      created_at: r.created_at ? mmddyyyy(r.created_at) : "",
+    }));
+    return { data, recordsTotal: data.length } as T;
+  }
+
+  async getWorkDays<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
+    opts: Record<string, unknown> = {},
+  ): Promise<T> {
+    const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
+    const projectId = opts["PR[]"] ?? opts["project_id"];
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (projectId !== undefined && projectId !== null) {
+      where.push("project_id = ?");
+      params.push(Number(projectId));
+    }
+    const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+    const [rows] = await this.pool.query<RowDataPacket[]>(
+      `SELECT id, project_id, is_working_day, type, start_date, end_date, description, notes
+         FROM work_days
+         ${whereSql}
+         ORDER BY start_date DESC
+         LIMIT ?`,
+      [...params, length],
+    );
+    const data = rows.map((r) => ({
+      DT_RowId: `row_${r.id}`,
+      id: r.id,
+      project_id: r.project_id,
+      is_working_day: r.is_working_day,
+      type: r.type,
+      start_date: r.start_date ? mmddyyyy(r.start_date) : "",
+      end_date: r.end_date ? mmddyyyy(r.end_date) : "",
+      description: r.description ?? "",
+      notes: r.notes ?? "",
+    }));
+    return { data, recordsTotal: data.length } as T;
+  }
 }
 
 // ---------------------------------------------------------------------------

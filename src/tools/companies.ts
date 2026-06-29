@@ -301,7 +301,7 @@ async function getCompanyHandler(
   const { company_id }: GetCompanyInput = parsed.data;
 
   try {
-    const row = (await api.getCompany<CompanyRow>(company_id)) ?? null;
+    const row = (await (api.db ?? api).getCompany<CompanyRow>(company_id)) ?? null;
     if (!row) {
       return markdown(`No company found for ID **${company_id}**.`);
     }

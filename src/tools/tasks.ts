@@ -208,7 +208,7 @@ async function listTasksHandler(
   }
 
   try {
-    const result = await api.getTasks<TasksDatatable>(params);
+    const result = await (api.db ?? api).getTasks<TasksDatatable>(params);
     const rows = result?.data ?? [];
     if (rows.length === 0) {
       const filterDesc: string[] = [`status: ${status}`];

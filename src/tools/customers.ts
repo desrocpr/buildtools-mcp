@@ -156,7 +156,7 @@ async function listCustomersHandler(
   }
 
   try {
-    const result = await api.getCompanies<CustomersDatatable>(params);
+    const result = await (api.db ?? api).getCompanies<CustomersDatatable>(params);
     let rows = result?.data ?? [];
 
     if (has_active_project === true) {
@@ -339,7 +339,7 @@ async function getCustomerHandler(
   const { customer_id } = parsed.data;
 
   try {
-    const customer = await api.getCustomer<CustomerDetailPayload>(customer_id);
+    const customer = await (api.db ?? api).getCustomer<CustomerDetailPayload>(customer_id);
     if (!customer) {
       return markdown(`No customer found with ID #${customer_id}.`);
     }

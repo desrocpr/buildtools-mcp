@@ -397,7 +397,7 @@ async function buildProjectForecast(
   //    Fall back to working schedule when published returns empty so
   //    we don't drop those projects' Drafts to "unscheduled" entirely.
   const [fsResult, publishedResult] = await Promise.all([
-    (api.db ?? api).getFinancialStatements(projectId).catch(() => null),
+    api.getFinancialStatements(projectId).catch(() => null),
     (api.db ?? api).getSchedule(projectId, "published").catch(() => null),
   ]);
   if (fsResult === null) forecast.errors.push("financial statements unavailable");

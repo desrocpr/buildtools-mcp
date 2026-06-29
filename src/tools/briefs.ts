@@ -478,7 +478,7 @@ async function fetchPOs(api: BuildToolsAPI, projectName: string): Promise<{ coun
 
 async function fetchCOs(api: BuildToolsAPI, projectName: string): Promise<ProjectDigest["cos"] | null> {
   try {
-    const result = await (api.db ?? api).getChangeOrders<{ data: (CoRow & { project?: string })[] }>({
+    const result = await api.getChangeOrders<{ data: (CoRow & { project?: string })[] }>({
       "search[value]": projectName,
       length: 30,
     });
@@ -521,7 +521,7 @@ async function fetchCOs(api: BuildToolsAPI, projectName: string): Promise<Projec
 
 async function fetchDraws(api: BuildToolsAPI, projectId: number): Promise<ProjectDigest["draws"] | null> {
   try {
-    const result = await (api.db ?? api).getFinancialStatements(projectId);
+    const result = await api.getFinancialStatements(projectId);
     const statements = result?.statements ?? [];
     // Reverse-chronological for display.
     const sorted = [...statements].sort(
@@ -563,7 +563,7 @@ async function fetchBilling(
   contractValue?: number,
 ): Promise<ProjectDigest["billing"] | null> {
   try {
-    const result = await (api.db ?? api).getFinancialStatements(projectId);
+    const result = await api.getFinancialStatements(projectId);
     const statements = result?.statements ?? [];
     const round = (n: number) => Math.round(n * 100) / 100;
     const fullHistory = [...statements]
@@ -742,11 +742,11 @@ async function fetchUnbilledCos(
     // for a draw. Fetch in parallel with the CO list (which provides
     // supporting per-CO context).
     const [coResult, fs] = await Promise.all([
-      (api.db ?? api).getChangeOrders<{ data: Record<string, unknown>[] }>({
+      api.getChangeOrders<{ data: Record<string, unknown>[] }>({
         "PR[]": String(projectId),
         length: 200,
       }),
-      (api.db ?? api).getFinancialStatements(projectId),
+      api.getFinancialStatements(projectId),
     ]);
     const rows = coResult?.data ?? [];
     const round = (n: number) => Math.round(n * 100) / 100;
