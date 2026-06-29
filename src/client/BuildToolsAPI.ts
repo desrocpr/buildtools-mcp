@@ -2777,7 +2777,27 @@ export class BuildToolsAPI {
       amount: number;
       paid: number;
       balance: number;
+      /**
+       * Formatted MM/DD/YYYY string — rendered by BT from the row's
+       * `to_pay_at` column.
+       *
+       * For Drafts: typically the default due date set at project creation.
+       * For Sent / Paid / Partial / Partly Paid: when the FS was sent
+       * (verified live 2026-06-28 against the financial_statements DB —
+       * 246 of 251 Sent FS have `to_pay_at` distinct from `created_at`,
+       * confirming `to_pay_at` is updated at send time).
+       *
+       * Use `sent_date` (below) when you want "sent date" semantics that
+       * are null for Drafts.
+       */
       date: string;
+      /**
+       * Same value as `date` when the FS has been sent (status ∈
+       * {Sent, Paid, Partial, Partly Paid, To Pay}); empty string when
+       * the FS is still a Draft / Pending. Convenient for "uncollected
+       * within last N days" filters that should ignore Drafts.
+       */
+      sent_date: string;
     }>;
   }> {
     await this.ensureAuthenticated();
@@ -2814,7 +2834,19 @@ export class BuildToolsAPI {
       paid: number;
       balance: number;
       date: string;
+      sent_date: string;
     }> = [];
+
+    // PR #81: statuses that mean "this FS has been sent." The wrapper
+    // populates sent_date from `date` only for these — for Drafts/Pending
+    // the date is the scheduled-due date, not a real "sent" event.
+    const SENT_STATUSES = new Set([
+      "Sent",
+      "Paid",
+      "Partial",
+      "Partly Paid",
+      "To Pay",
+    ]);
 
     const strip = (s: string): string =>
       s.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
@@ -2879,6 +2911,7 @@ export class BuildToolsAPI {
         paid,
         balance,
         date,
+        sent_date: SENT_STATUSES.has(status) ? date : "",
       });
     }
 

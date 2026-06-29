@@ -8,6 +8,7 @@ describe("buildtools-mcp", () => {
     const { attachmentTools } = await import("../tools/attachments.js");
     const { briefTools } = await import("../tools/briefs.js");
     const { forecastTools } = await import("../tools/forecasts.js");
+    const { invoiceTools } = await import("../tools/invoices.js");
 
     const allNames = [
       ...projectTools,
@@ -16,6 +17,7 @@ describe("buildtools-mcp", () => {
       ...attachmentTools,
       ...briefTools,
       ...forecastTools,
+      ...invoiceTools,
     ].map((t) => t.name);
 
     expect(allNames).toContain("list_projects");
@@ -32,7 +34,8 @@ describe("buildtools-mcp", () => {
     expect(allNames).toContain("list_financial_statements");
     expect(allNames).toContain("project_status_brief");
     expect(allNames).toContain("cash_flow_forecast");
-    expect(allNames.length).toBe(14);
+    expect(allNames).toContain("uncollected_invoices");
+    expect(allNames.length).toBe(15);
   });
 
   it("mutation tool factory produces all confirmed tools", async () => {

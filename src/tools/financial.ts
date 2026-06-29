@@ -617,14 +617,20 @@ async function listFinancialStatementsHandler(
 
     const summaryLine = `Totals: ${formatUsd(totalAmount)} billed, ${formatUsd(totalPaid)} paid, ${formatUsd(totalBalance)} outstanding`;
 
+    // PR #81: surface `sent_date` alongside `date`. They differ in
+    // semantics: `date` is the raw `to_pay_at` from BT (set at create
+    // time and updated when sent); `sent_date` is the same value but
+    // populated ONLY when the status indicates the FS has actually been
+    // sent (Sent / Paid / Partial / Partly Paid / To Pay). Useful for
+    // "uncollected in last N days" workflows.
     const tableHeader = [
-      "| ID | Status | Name | Amount | Paid | Balance | Date |",
-      "|---|---|---|---|---|---|---|",
+      "| ID | Status | Name | Amount | Paid | Balance | Date | Sent date |",
+      "|---|---|---|---|---|---|---|---|",
     ].join("\n");
 
     const tableBody = statements
       .map((s) =>
-        `| ${s.id} | ${s.status} | ${s.name.substring(0, 50).replace(/\|/g, "\\|")} | ${formatUsd(s.amount)} | ${formatUsd(s.paid)} | ${formatUsd(s.balance)} | ${s.date || "—"} |`,
+        `| ${s.id} | ${s.status} | ${s.name.substring(0, 50).replace(/\|/g, "\\|")} | ${formatUsd(s.amount)} | ${formatUsd(s.paid)} | ${formatUsd(s.balance)} | ${s.date || "—"} | ${s.sent_date || "—"} |`,
       )
       .join("\n");
 
