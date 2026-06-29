@@ -157,8 +157,8 @@ async function getSelectionHandler(
     // not the parent. `getSelectionName` is best-effort — degrades to
     // null without blocking the rest of the render.
     const [detail, parentName] = await Promise.all([
-      api.getSelectionDetail(selection_id, project_id),
-      api.getSelectionName(selection_id, project_id),
+      (api.db ?? api).getSelectionDetail(selection_id, project_id),
+      (api.db ?? api).getSelectionName(selection_id, project_id),
     ]);
     if (!detail || detail.items.length === 0) {
       return markdown(`No detail found for selection #${selection_id} on project #${project_id}.`);
@@ -378,7 +378,7 @@ async function listSelectionCategoriesHandler(
   const { project_id } = parsed.data;
 
   try {
-    const categories = await api.getSelectionBudgetCategories(project_id);
+    const categories = await (api.db ?? api).getSelectionBudgetCategories(project_id);
     if (categories.length === 0) {
       return markdown(`No budget categories available for selections on project #${project_id}.`);
     }
