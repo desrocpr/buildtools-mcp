@@ -366,7 +366,7 @@ async function buildProjectForecast(
 
   // 1. Project header — name, team, contract value
   try {
-    const project = await api.getProject<ProjectRow>(projectId);
+    const project = await (api.db ?? api).getProject<ProjectRow>(projectId);
     if (project) {
       forecast.name = stripHtml(String(project.name ?? `#${projectId}`));
       const statusCode = Number(project.status_id ?? project.status);
@@ -383,7 +383,7 @@ async function buildProjectForecast(
 
   // 2. Prime schedule session-state with /budget (required, per PR #75).
   try {
-    await api.getBudget(projectId);
+    await (api.db ?? api).getBudget(projectId);
   } catch (err) {
     // Non-fatal — schedule may still work; record the issue if it doesn't.
     process.stderr.write(
@@ -397,14 +397,14 @@ async function buildProjectForecast(
   //    Fall back to working schedule when published returns empty so
   //    we don't drop those projects' Drafts to "unscheduled" entirely.
   const [fsResult, publishedResult] = await Promise.all([
-    api.getFinancialStatements(projectId).catch(() => null),
-    api.getSchedule(projectId, "published").catch(() => null),
+    (api.db ?? api).getFinancialStatements(projectId).catch(() => null),
+    (api.db ?? api).getSchedule(projectId, "published").catch(() => null),
   ]);
   if (fsResult === null) forecast.errors.push("financial statements unavailable");
   let scheduleResult = publishedResult;
   if (!scheduleResult?.tasks || scheduleResult.tasks.length <= 1) {
     // Empty / stub published — try working as fallback.
-    scheduleResult = await api.getSchedule(projectId, "working").catch(() => null);
+    scheduleResult = await (api.db ?? api).getSchedule(projectId, "working").catch(() => null);
     if (scheduleResult?.tasks && scheduleResult.tasks.length > 1) {
       forecast.errors.push("using working schedule (no published)");
     }
@@ -667,7 +667,7 @@ export const cashFlowForecastTool: ToolDefinition = {
         teamFilter === "all_active" ? ACTIVE_TEAM_CODES : [TEAM_STATUS_MAP[teamFilter]];
       let allProjects: ProjectRow[] = [];
       try {
-        const result = await api.getProjects<{ data: ProjectRow[] }>({
+        const result = await (api.db ?? api).getProjects<{ data: ProjectRow[] }>({
           length: 300,
         });
         allProjects = result?.data ?? [];

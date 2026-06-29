@@ -188,7 +188,7 @@ async function collectProjectInvoices(
   let projectName = `#${projectId}`;
   let team = 0;
   try {
-    const project = await api.getProject<ProjectRow>(projectId);
+    const project = await (api.db ?? api).getProject<ProjectRow>(projectId);
     if (project) {
       projectName = stripHtml(String(project.name ?? projectName));
       const c = Number(project.status_id ?? project.status);
@@ -200,7 +200,7 @@ async function collectProjectInvoices(
 
   let rows: UncollectedInvoice[] = [];
   try {
-    const result = await api.getFinancialStatements(projectId);
+    const result = await (api.db ?? api).getFinancialStatements(projectId);
     for (const s of result?.statements ?? []) {
       if (!UNCOLLECTED_STATUSES.has(s.status)) continue;
       if (s.balance <= 0.005) continue;
@@ -356,7 +356,7 @@ export const uncollectedInvoicesTool: ToolDefinition = {
         teamFilter === "all_active" ? ACTIVE_TEAM_CODES : [TEAM_STATUS_MAP[teamFilter]];
       let allProjects: (ProjectRow & { schedule_published_duration?: string })[] = [];
       try {
-        const result = await api.getProjects<{ data: typeof allProjects }>({ length: 300 });
+        const result = await (api.db ?? api).getProjects<{ data: typeof allProjects }>({ length: 300 });
         allProjects = result?.data ?? [];
       } catch (err) {
         return errorMarkdown(

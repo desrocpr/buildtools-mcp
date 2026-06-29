@@ -478,7 +478,7 @@ async function fetchPOs(api: BuildToolsAPI, projectName: string): Promise<{ coun
 
 async function fetchCOs(api: BuildToolsAPI, projectName: string): Promise<ProjectDigest["cos"] | null> {
   try {
-    const result = await api.getChangeOrders<{ data: (CoRow & { project?: string })[] }>({
+    const result = await (api.db ?? api).getChangeOrders<{ data: (CoRow & { project?: string })[] }>({
       "search[value]": projectName,
       length: 30,
     });
@@ -521,7 +521,7 @@ async function fetchCOs(api: BuildToolsAPI, projectName: string): Promise<Projec
 
 async function fetchDraws(api: BuildToolsAPI, projectId: number): Promise<ProjectDigest["draws"] | null> {
   try {
-    const result = await api.getFinancialStatements(projectId);
+    const result = await (api.db ?? api).getFinancialStatements(projectId);
     const statements = result?.statements ?? [];
     // Reverse-chronological for display.
     const sorted = [...statements].sort(
@@ -563,7 +563,7 @@ async function fetchBilling(
   contractValue?: number,
 ): Promise<ProjectDigest["billing"] | null> {
   try {
-    const result = await api.getFinancialStatements(projectId);
+    const result = await (api.db ?? api).getFinancialStatements(projectId);
     const statements = result?.statements ?? [];
     const round = (n: number) => Math.round(n * 100) / 100;
     const fullHistory = [...statements]
@@ -639,7 +639,7 @@ async function fetchSchedule(
     // not working (editable draft). Per Moss workflow the published
     // view is the authoritative "what we've actually committed to"
     // timeline; working is an in-progress draft.
-    const result = await api.getSchedule(projectId, "published");
+    const result = await (api.db ?? api).getSchedule(projectId, "published");
     const tasks = result?.tasks ?? [];
     // Compute Monday of this week (ISO Monday → 1)
     const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -742,11 +742,11 @@ async function fetchUnbilledCos(
     // for a draw. Fetch in parallel with the CO list (which provides
     // supporting per-CO context).
     const [coResult, fs] = await Promise.all([
-      api.getChangeOrders<{ data: Record<string, unknown>[] }>({
+      (api.db ?? api).getChangeOrders<{ data: Record<string, unknown>[] }>({
         "PR[]": String(projectId),
         length: 200,
       }),
-      api.getFinancialStatements(projectId),
+      (api.db ?? api).getFinancialStatements(projectId),
     ]);
     const rows = coResult?.data ?? [];
     const round = (n: number) => Math.round(n * 100) / 100;
@@ -798,8 +798,8 @@ async function fetchSelectionsVsAllowances(
     // through; eliminates the double-getBudget called out in PR #73
     // review LOW. Falls back to fetching if not provided.
     const [budget, sel] = await Promise.all([
-      prefetchedBudget ? Promise.resolve(prefetchedBudget) : api.getBudget(projectId),
-      api.getSelections(projectId),
+      prefetchedBudget ? Promise.resolve(prefetchedBudget) : (api.db ?? api).getBudget(projectId),
+      (api.db ?? api).getSelections(projectId),
     ]);
     const allowances = (budget?.items ?? []).filter((i) => i.isAllowance);
     const round = (n: number) => Math.round(n * 100) / 100;
@@ -858,7 +858,7 @@ async function fetchBudgetVsPos(
   prefetchedBudget?: Awaited<ReturnType<BuildToolsAPI["getBudget"]>>,
 ): Promise<ProjectDigest["budgetVsPos"] | null> {
   try {
-    const budget = prefetchedBudget ?? (await api.getBudget(projectId));
+    const budget = prefetchedBudget ?? (await (api.db ?? api).getBudget(projectId));
     const round = (n: number) => Math.round(n * 100) / 100;
     // PR #73 review MEDIUM fix: look up the SENT PO'S column index from
     // the columns header dynamically rather than hardcoding cells[9].
@@ -930,7 +930,7 @@ async function buildProjectDigest(
   // surfacing the underlying message — eliminates the differential
   // between "404 vs 403 vs timeout" that could leak project existence.
   try {
-    const project = await api.getProject<ProjectRow>(projectId);
+    const project = await (api.db ?? api).getProject<ProjectRow>(projectId);
     if (project) {
       digest.name = stripHtml(String(project.name ?? `#${projectId}`));
       const statusCode = Number(project.status_id ?? project.status);
@@ -972,7 +972,7 @@ async function buildProjectDigest(
   let prefetchedBudget: Awaited<ReturnType<BuildToolsAPI["getBudget"]>> | undefined;
   if (wantsBudget) {
     try {
-      prefetchedBudget = await api.getBudget(projectId);
+      prefetchedBudget = await (api.db ?? api).getBudget(projectId);
     } catch (err) {
       process.stderr.write(
         `[project_status_brief] budget prefetch failed: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -1305,7 +1305,7 @@ export const projectStatusBriefTool: ToolDefinition = {
       // status code, then trim to `limit`.
       let allProjects: ProjectRow[] = [];
       try {
-        const result = await api.getProjects<{ data: ProjectRow[] }>({
+        const result = await (api.db ?? api).getProjects<{ data: ProjectRow[] }>({
           length: 200,
         });
         allProjects = result?.data ?? [];

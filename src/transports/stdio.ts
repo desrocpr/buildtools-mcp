@@ -20,6 +20,7 @@ import {
 import { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { loadConfigFromEnv } from "../client/config.js";
 import { ConfirmationStore } from "../confirm/index.js";
+import { buildMossDbFromEnv } from "../db/MossDb.js";
 import { IdempotencyStore } from "../idempotency/index.js";
 import {
   attachmentTools,
@@ -63,6 +64,9 @@ export async function startStdioTransport(): Promise<Server> {
   // -------------------------------------------------------------------------
   // Lazy singleton client
   // -------------------------------------------------------------------------
+  // PR #82: shared DB fast-path pool, opt-in via MYSQL_* env vars.
+  const sharedDb = buildMossDbFromEnv();
+
   let apiSingleton: BuildToolsAPI | null = null;
   function getApi(): BuildToolsAPI {
     if (apiSingleton) return apiSingleton;
@@ -74,6 +78,7 @@ export async function startStdioTransport(): Promise<Server> {
       password: config.password,
       sessionTimeoutMinutes: config.sessionTimeoutMinutes,
     });
+    apiSingleton.db = sharedDb;
     return apiSingleton;
   }
 

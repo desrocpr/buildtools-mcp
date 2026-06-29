@@ -47,6 +47,7 @@ import type { Server as HttpServer } from "node:http";
 
 import { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { ConfirmationStore } from "../confirm/index.js";
+import { buildMossDbFromEnv, type MossDb } from "../db/MossDb.js";
 import { IdempotencyStore } from "../idempotency/index.js";
 import {
   attachmentTools,
@@ -136,6 +137,11 @@ function buildPerSessionServer(opts: {
     { capabilities: { tools: { listChanged: true } } },
   );
 
+  // PR #82: shared MossDb pool (process-scoped). Built once from env at
+  // first session; null when MYSQL_* env vars aren't set, in which case
+  // the opt-in fast-path tools fall back to HTTP per-project fetches.
+  const sharedDb: MossDb | null = buildMossDbFromEnv();
+
   // Lazy per-session BuildToolsAPI; constructed once credentials are set.
   let apiInstance: BuildToolsAPI | null = null;
   function resolveApi(): BuildToolsAPI {
@@ -153,6 +159,7 @@ function buildPerSessionServer(opts: {
       username: creds.username,
       password: creds.password,
     });
+    apiInstance.db = sharedDb;
     return apiInstance;
   }
 
