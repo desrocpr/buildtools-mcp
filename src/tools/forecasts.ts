@@ -381,14 +381,20 @@ async function buildProjectForecast(
     return forecast;
   }
 
-  // 2. Prime schedule session-state with /budget (required, per PR #75).
-  try {
-    await (api.db ?? api).getBudget(projectId);
-  } catch (err) {
-    // Non-fatal — schedule may still work; record the issue if it doesn't.
-    process.stderr.write(
-      `[cash_flow_forecast] budget prime failed for ${projectId}: ${err instanceof Error ? err.message : String(err)}\n`,
-    );
+  // PR #84: budget-prime only needed for HTTP — the BT session has to
+  // "select" the project before /schedule/published/data returns rows.
+  // DB-backed getSchedule is project-scoped via SQL and doesn't need
+  // priming. Skip the prime when api.db is set; saves ~2s/project on
+  // team-wide forecasts (the prime triggers getBudget's expensive
+  // per-category subqueries).
+  if (!api.db) {
+    try {
+      await api.getBudget(projectId);
+    } catch (err) {
+      process.stderr.write(
+        `[cash_flow_forecast] budget prime failed for ${projectId}: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
   }
 
   // 3. Parallel: FS + schedule.
@@ -396,8 +402,9 @@ async function buildProjectForecast(
   //    timeline, but projects mid-design may not have one published yet.
   //    Fall back to working schedule when published returns empty so
   //    we don't drop those projects' Drafts to "unscheduled" entirely.
+  // PR #84: also flip the FS fetch to DB (was missed by earlier sed).
   const [fsResult, publishedResult] = await Promise.all([
-    api.getFinancialStatements(projectId).catch(() => null),
+    (api.db ?? api).getFinancialStatements(projectId).catch(() => null),
     (api.db ?? api).getSchedule(projectId, "published").catch(() => null),
   ]);
   if (fsResult === null) forecast.errors.push("financial statements unavailable");

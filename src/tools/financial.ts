@@ -323,7 +323,7 @@ async function getChangeOrderHandler(
   const { change_order_id } = parsed.data;
 
   try {
-    const co = await api.getChangeOrder<ChangeOrderDetail>(change_order_id);
+    const co = await (api.db ?? api).getChangeOrder<ChangeOrderDetail>(change_order_id);
     if (!co) {
       return markdown(`No change order found with ID #${change_order_id}.`);
     }
@@ -368,7 +368,7 @@ async function findUnbilledChangeOrdersHandler(
   const { min_amount } = parsed.data;
 
   try {
-    const matches = await api.findUnbilledChangeOrders({ min_amount });
+    const matches = await (api.db ?? api).findUnbilledChangeOrders({ min_amount });
 
     if (matches.length === 0) {
       const filterText = min_amount !== undefined ? ` (min ${formatUsd(min_amount)})` : "";

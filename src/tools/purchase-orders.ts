@@ -268,7 +268,7 @@ async function getPurchaseOrderHandler(
   const { purchase_order_id }: GetPurchaseOrderInput = parsed.data;
 
   try {
-    const detail = await api.getPurchaseOrder(purchase_order_id);
+    const detail = await (api.db ?? api).getPurchaseOrder(purchase_order_id);
     if (!detail) {
       return markdown(`No detail found for purchase order #${purchase_order_id}.`);
     }
