@@ -11,10 +11,10 @@ see [TOOLS.md](./TOOLS.md).
 
 ```
 ┌──────────────────┐   stdio       ┌─────────────────────┐   HTTPS    ┌─────────────────────┐
-│  Claude Desktop  │ ◀──────────▶  │   buildtools-mcp    │ ◀───────▶  │ moss.buildtools.app │
-│  (or other MCP   │               │   (this repo)       │            │ (BuildTools tenant) │
-│   stdio client)  │               │                     │            │                     │
-└──────────────────┘               │  ┌───────────────┐  │            └─────────────────────┘
+│  Claude Desktop  │ ◀──────────▶  │   buildtools-mcp    │ ◀────────▶ │ moss.buildtools.app │
+│  (or other MCP   │               │   (this repo)       │  (writes)  │ (BuildTools tenant) │
+│   stdio client)  │               │                     │            └─────────────────────┘
+└──────────────────┘               │  ┌───────────────┐  │
                                    │  │ MCP transport │  │
                                    │  │  stdio  │ http│  │
                                    │  └───────┬───────┘  │
@@ -25,10 +25,15 @@ see [TOOLS.md](./TOOLS.md).
 │  (HTTP/SSE)      │               │  └───────┬───────┘  │
 └──────────────────┘               │          │          │
                                    │  ┌───────▼───────┐  │
-                                   │  │ BuildToolsAPI │  │
-                                   │  │ (typed client)│  │
-                                   │  └───────────────┘  │
-                                   └─────────────────────┘
+                                   │  │ BuildToolsAPI │  │   reads (fast path)
+                                   │  │ + api.db ref  │──┼──────────────────────┐
+                                   │  └───────────────┘  │                      │
+                                   └─────────────────────┘                      ▼
+                                                                     ┌─────────────────────┐
+                                                                     │  MossDb (mysql2)    │
+                                                                     │  → RDS read replica │
+                                                                     │  moss-online-replica│
+                                                                     └─────────────────────┘
 ```
 
 The server is a thin layer:
@@ -40,7 +45,59 @@ The server is a thin layer:
    `tools/call` request goes through the same dispatch.
 3. **BuildToolsAPI** is the typed client — it owns session cookies, CSRF
    tokens, and the URL-encoded form bodies BuildTools' Rails app expects.
-   Every tool handler delegates to a method on this class.
+   Every mutation tool delegates to a method on this class.
+4. **MossDb** (Phase 8, PR #82-#85) is an opt-in read-only adapter against
+   the BuildTools MySQL read replica. It mirrors `BuildToolsAPI`'s read
+   method signatures, so tool handlers can swap via
+   `(api.db ?? api).getX(...)` with no other changes. Built at startup
+   from `MYSQL_*` env vars; null when those are absent (local dev, tests).
+
+## Read fast path (Phase 8)
+
+The HTTP wrapper is shape-preserving but slow: BuildTools renders its
+datatables as HTML, so every list-style read requires fetching + regex-
+parsing an HTML page. Portfolio rollups across 50+ projects (e.g.
+`uncollected_invoices`, `cash_flow_forecast` over a team) compound the
+per-call latency into multi-minute waits.
+
+The `MossDb` adapter sidesteps this with direct SQL against the
+project's read replica:
+
+| Tool | Scope | Before (HTTP) | After (DB) |
+|---|---|---:|---:|
+| `project_status_brief` | Katchmark — all 5 sections | 5-10s | ~1s |
+| `uncollected_invoices` | `team: all_active, window_days: 7` | 4 min | 7s |
+| `cash_flow_forecast` | `team: all_active, quarterly, 3q` | 4+ min | ~13s |
+| `findUnbilledChangeOrders` | portfolio | minutes | 25ms |
+| `getBudget` | per project | 2s | 250ms |
+
+Key invariants of the fast path:
+
+- **Shape parity.** `MossDb.getX(...)` returns the same structure as
+  `BuildToolsAPI.getX(...)` so the same downstream formatters and
+  consumers work unchanged. New consumers don't know which backend
+  they're hitting.
+- **Read-only.** The DB connection is opened with the replica user;
+  every write tool continues to authenticate as the calling user and
+  hit `moss.buildtools.app` over HTTPS. There is no path from a write
+  tool to the DB.
+- **Graceful fallback.** Tools call `(api.db ?? api).getX(...)`. When
+  `MYSQL_*` env vars are unset, the pool is never built and the
+  handlers transparently fall through to the HTTP path. Local dev
+  doesn't need DB credentials.
+- **Pool, not per-call connections.** `MossDb` uses a `mysql2`
+  connection pool (8 connections by default) shared across the
+  process. Both transports build it once at startup.
+- **Per-user permissions are not enforced at the DB layer.** The MCP
+  itself is OAuth-gated to Moss employees, and the BuildTools
+  permission model is too complex to reconstruct in SQL. This is an
+  explicit trade-off — fast portfolio analytics in exchange for
+  uniform read access for any authenticated MCP caller.
+
+Tools that opt in: every read tool except attachment download paths
+(which need signed file URLs from BT's file service),
+`searchChangeOrders` (rare), and `searchCompanies` (different
+signature). See `src/db/MossDb.ts` for the canonical method list.
 
 ## Mutation / confirmation flow (Phase 4)
 
@@ -101,14 +158,16 @@ Key invariants:
 | Concern | Location |
 |---|---|
 | HTTP entrypoint, BuildTools session cookies, CSRF token, fetch wrappers, datatable / form / search helpers, all per-domain methods used by tools (`getProjects`, `createChangeOrder`, `findUnbilledChangeOrders`, etc.) | `src/client/` |
-| One file per MCP tool domain (projects, financial, customers, attachments, tasks, purchase orders, work-tracking, operations, selections, mutations, sessions) plus `index.ts` barrel. Each domain owns its Zod input schemas, Markdown rendering, error mapping. | `src/tools/` |
-| Transport selection (`stdio` vs `http`), tool dispatch, audit log, the special-cased `ping` tool, HTTP bearer-token middleware, per-SSE-session credential store. | `src/transports/` |
+| DB fast-path adapter (Phase 8) — `MossDb` class wrapping a `mysql2` pool against the BuildTools read replica. Method signatures mirror `BuildToolsAPI`'s read methods exactly so tool handlers can swap via `(api.db ?? api).getX(...)`. Env-gated factory `buildMossDbFromEnv` returns null when `MYSQL_*` is unset. | `src/db/` |
+| One file per MCP tool domain (projects, financial, customers, attachments, tasks, purchase orders, work-tracking, operations, selections, budget, mutations, sessions, briefs, forecasts, invoices) plus `index.ts` barrel. Each domain owns its Zod input schemas, Markdown rendering, error mapping. Analytics tools (Phase 8) — `project_status_brief` (briefs.ts), `cash_flow_forecast` (forecasts.ts), `uncollected_invoices` (invoices.ts) — opt in to the DB fast path. | `src/tools/` |
+| Transport selection (`stdio` vs `http`), tool dispatch, audit log, the special-cased `ping` / `refresh_tools` tools, HTTP bearer-token middleware, per-SSE-session credential store. Both transports build the shared `MossDb` pool at startup and attach it to each `BuildToolsAPI` instance as `api.db`. | `src/transports/` |
 | Confirmation framework: `ConfirmationStore`, `requiresConfirmation()` wrapper, TTL sweep timer wired from `src/index.ts`. Every mutation tool composes through this module. | `src/confirm/` |
+| Idempotency helpers (PR #67) — `IdempotencyStore`, `checkIdempotency`, `storeIdempotencyResult`. Mutations with an `idempotency_key` cache results to deduplicate retries. | `src/idempotency/` |
 | Process bootstrap — picks a transport from `MCP_TRANSPORT`, validates `HTTP_BEARER_TOKEN` when `http`, wires the confirmation sweep, then hands off. | `src/index.ts` |
 | Multi-user auth: encryption, OAuth/service tokens, bearer resolver, Supabase store, Microsoft Entra OIDC, RBAC + rate limits, audit log. See [AUTH.md](./AUTH.md). | `src/auth/` |
 | Browser surfaces (when `MCP_OAUTH_ENABLED=true`): `/enroll/*`, `/oauth/*`, `/admin/*`, `/.well-known/oauth-authorization-server`. See [ENROLL.md](./ENROLL.md) for user flow. | `src/web/` |
 | Supabase schema for the multi-user store: users, roles, encrypted credentials, OAuth clients/codes/tokens, service tokens, audit log, rate buckets, plus atomic RPCs + sweep. | `supabase/migrations/` |
-| Unit + fixture tests for the client and tool registries; smoke test for the stdio transport. | `src/**/__tests__/`, `tests/` |
+| Unit + fixture tests for the client and tool registries; smoke test for the stdio transport. Tests run without `MYSQL_*` set so `api.db` is null and the HTTP fallback path is exercised. | `src/**/__tests__/`, `tests/` |
 
 ## Design choices worth knowing
 
