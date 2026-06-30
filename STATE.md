@@ -1,8 +1,92 @@
 # State
 
-## 🟢 2026-06-27 — `update_purchase_order` brief overhaul complete
+## 🟢 2026-06-29 — DB fast path + analytics tools complete (Phase 8)
 
-The brief that kicked off PRs #57–#62 is **fully shipped and deployed**.
+PRs #66-#85 ship a full analytics layer plus a MySQL read-replica fast
+path. The MCP is live in production at
+`https://buildtools-mcp.mossbuildinganddesign.com`.
+
+### What landed
+
+| PR | Scope |
+|---|---|
+| #66 | `project_status_brief` — read-only per-project digest tool |
+| #67 | Idempotency helper extraction (mutations) |
+| #68 | Repo cleanup (coverage / generated files gitignored) |
+| #69 | Bulk PO status transition + partial-failure error surfacing |
+| #70 | Token cache consolidation in `BuildToolsAPI` |
+| #71 | Consolidated `search_X` tools into `list_X` with `query` arg |
+| #72 | Richer per-project brief sections |
+| #73 | Brief restructured around Moss workflow (schedule, billing, COs, selections vs allowances, budget vs PO) |
+| #74 | Fixed CO filter — was matching wrong field, rendered false-clean |
+| #75 | Real BT schedule integration (`schedule/published/data?projects=`) |
+| #76 | Unbilled CO gap = contract value − sum(FS), matches `find_unbilled_change_orders` |
+| #77 | Brief schedule defaults to published (not working) |
+| #78 | `cash_flow_forecast` tool — weekly/monthly/quarterly buckets |
+| #79 | Forecast cap tuning (per-granularity horizon caps) |
+| #80 | Forecast skips design-phase projects (no published schedule) |
+| #81 | `sent_date` on financial statements + `uncollected_invoices` tool |
+| #82 | **MossDb adapter + DB fast path for 3 slow tools** |
+| #83 | DB sweep — list-style read tools migrated (~17 methods) |
+| #84 | DB detail fetchers (`getChangeOrder`, `getPurchaseOrder`) + `findUnbilledChangeOrders` single-SQL rewrite |
+| #85 | Budget query optimization (8× faster) + remaining selection detail fetchers |
+| #86 | Documentation update (this PR) |
+
+### Speedups (live verified against the production MCP)
+
+| Tool | Scope | Before (HTTP) | After (DB) |
+|---|---|---:|---:|
+| `project_status_brief` | Katchmark — all 5 sections | 5-10s | ~1s |
+| `uncollected_invoices` | `team: all_active, window_days: 7` | 4 min (and buggy → 0) | 7s (correct: $387k / 7 invoices) |
+| `cash_flow_forecast` | `team: all_active, quarterly, 3q` | 4+ min | ~13s |
+| `findUnbilledChangeOrders` | portfolio | minutes | 25ms |
+| `getBudget` | per project | 2s | 250ms |
+
+### DB fast path design (PR #82)
+
+- `src/db/MossDb.ts` is a `mysql2` connection pool adapter
+- It mirrors the read shape of `BuildToolsAPI` exactly — `getProject`,
+  `getProjects`, `getFinancialStatements`, `getChangeOrders`,
+  `getBudget`, `getSelections`, `getSchedule`, `getCompanies`,
+  `getTasks`, `getRFIs`, `getUsers`, `getPurchaseOrders`,
+  `getCertificates`, `getDailyLogs`, `getWeeklyReports`,
+  `getWorkDays`, `getAllowances`, `findUnbilledChangeOrders`,
+  `getChangeOrder`, `getPurchaseOrder`, `getFinancialStatement`,
+  `getSelectionDetail`, `getSelectionName`,
+  `getSelectionBudgetCategories`
+- Env-gated factory `buildMossDbFromEnv` returns null when
+  `MYSQL_HOST/USER/PASSWORD/DATABASE` aren't set — local dev and tests
+  fall back to HTTP transparently
+- Both transports attach the shared pool to each `BuildToolsAPI`
+  instance as `api.db` at startup
+- Opt-in tools use `(api.db ?? api).getX(...)` — DB preferred, HTTP
+  fallback on connection failure
+- Writes never touch the DB; they go through authenticated HTTPS with
+  the calling user's credentials
+- DB credentials live in Doppler `buildtools-mcp/prd` (synced from
+  `buildtools/dev`)
+- Per-user BT permission filtering is bypassed — acceptable because
+  the MCP itself is OAuth-gated to Moss employees
+
+### Not on DB (intentional)
+
+- `getProjectAttachments` / `getChangeOrderAttachments` — need signed
+  file URLs from BT's file service
+- `searchChangeOrders` — rarely used; left HTTP for parity
+- `searchCompanies` — different signature (role enum) than other
+  search* methods; kept HTTP to avoid signature mismatch risk
+- All mutation/write tools — by design
+
+### Tests
+
+1012 / 1012 pass. Test mocks still cover the HTTP fallback path
+(`api.db` is null in test runs).
+
+---
+
+## 🟢 2026-06-27 — `update_purchase_order` brief overhaul complete (Phase 7)
+
+The brief that kicked off PRs #57-#62 is fully shipped and deployed.
 
 | Brief item | PR | Status |
 |---|---|---|
@@ -17,55 +101,37 @@ The brief that kicked off PRs #57–#62 is **fully shipped and deployed**.
 | 9. Attachment upload | #59 | ✅ |
 | + Standalone status transition + CSRF cache | #62 | ✅ |
 
-**Key discovery**: BT exposes `POST /purchase-orders/status/update` as a workflow endpoint distinct from `/save`. It accepts transitions /save 403s for (notably Confirmed → Draft). This enabled the auto-transition path documented as item 5 above — which the original brief had assumed was impossible.
+**Key discovery**: BT exposes `POST /purchase-orders/status/update` as
+a workflow endpoint distinct from `/save`. It accepts transitions
+`/save` 403s for (notably Confirmed → Draft). This enabled the
+auto-transition path documented as item 5 above.
 
-**Brief's golden test case (PO #39201)**: shipped on 2026-06-27 with all four targets met (vendor preserved, items updated to $19,533.81, attachment ADMO55739-F.pdf attached, status moved to Sent). See `~/code/buildtools/STATE.md` for the final state record.
-
-**Tool surface**: 16 mutation tools + 13 read tools deployed via stdio AND HTTP/SSE at `https://buildtools-mcp.mossbuildinganddesign.com`. See `docs/TOOLS.md` for the full inventory including the three additions from this overhaul (`update_purchase_order` with new args, `transition_purchase_order_status`, `upload_attachment`).
-
-**Tests**: 884 / 884 pass. Live verified end-to-end against `moss.buildtools.app` PO #39752.
-
-**What's left**: optional polish only — multi-id batch status workflows, signature support for promote-to-Confirmed (deferred — programmatic eSig has audit-trail implications).
+**Brief's golden test case (PO #39201)**: shipped on 2026-06-27 with
+all four targets met (vendor preserved, items updated to $19,533.81,
+attachment ADMO55739-F.pdf attached, status moved to Sent).
 
 ---
 
 ## Phase 1-3 (Read-only MVP) — DONE
 
-All read tools implemented. Server runs over stdio, ready for Claude Desktop.
+All read tools implemented. Server runs over stdio + HTTP/SSE.
 
-Tools shipped:
-- ping
-- list_projects, get_project, search_projects
-- list_change_orders, get_change_order, find_unbilled_change_orders, get_financial_statement
-- list_customers, get_customer
-- list_project_attachments
+Installation: see `docs/INSTALL.md`.
 
-Installation: see docs/INSTALL.md.
+## Phase 4 (Confirmation framework) — DONE
 
-## Phase 4 (Confirmation framework) — DONE (MOS-217)
+In-memory `ConfirmationStore` + `requiresConfirmation` helper live
+under `src/confirm/`. Wired into `src/index.ts` with an `.unref()`ed
+sweep timer.
 
-In-memory `ConfirmationStore` + `requiresConfirmation` helper live under
-`src/confirm/`. Wired into `src/index.ts` with an `.unref()`ed sweep timer.
-No mutation tools yet — Phase 5 (MOS-218 / MOS-219) will register them.
+## Phase 5-7 — DONE
 
-## Phase 5-7 (Mutations + HTTP/SSE + install polish) — NOT STARTED
+- Phase 5: 19 mutation tools registered, each behind the confirmation
+  handshake.
+- Phase 6: HTTP/SSE transport with bearer-token auth + Microsoft Entra
+  OAuth 2.1 enrollment for end-users.
+- Phase 7: install / tool reference / architecture docs shipped.
 
-Filed as separate Linear issues, deferred until Phase 1-3 is validated in production.
+## Phase 8 (Analytics + DB fast path) — DONE 2026-06-29
 
-## First production run (PENDING — template only)
-
-> **Status: NOT YET RUN.** This section is a template to be filled in by the
-> operator (Paul) after running `tests/integration/full-smoke.test.ts`
-> against the live BuildTools tenant with `BUILDTOOLS_INTEGRATION_TESTS=1`,
-> `BUILDTOOLS_DESTRUCTIVE_TESTS=1`, and (optionally) `BUILDTOOLS_HTTP_TESTS=1`.
-> Replace the placeholders below with the real numbers from that run; do NOT
-> invent values ahead of time. Update the heading to the actual run date
-> (`## First production run (YYYY-MM-DD)`) once the values are in.
-
-- Stdio transport: TBD — operator to fill in after running the test suite
-- HTTP transport: TBD — operator to fill in after running the test suite
-- Read tools tested: list_projects (TBD results), get_project (TBD), find_unbilled_change_orders (TBD COs)
-- Write tools tested: create_project (test project #TBD created; cleanup via direct `BuildToolsAPI.updateProject(..., status: 12 /* Cancelled */)` in test `afterAll` — a follow-up issue should promote `update_project` to a first-class MCP tool)
-- Confirmation flow: TBD — operator to fill in after running the test suite
-- Total roundtrip latency: stdio TBD ms median, HTTP TBD ms median
-- Cost: $0 (server is free; BuildTools API calls are unmetered)
+See top-of-file section.

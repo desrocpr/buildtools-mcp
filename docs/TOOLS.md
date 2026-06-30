@@ -1,10 +1,12 @@
 # buildtools-mcp — Tool Reference
 
-This MCP server exposes 40 tools that Claude Desktop (and other MCP clients
+This MCP server exposes ~45 tools that Claude Desktop (and other MCP clients
 running over HTTP/SSE) can invoke against the BuildTools
-(`moss.buildtools.app`) tenant. Phase 1-7 of the project plan is complete:
+(`moss.buildtools.app`) tenant. Phase 1-8 of the project plan is complete:
 read tools, write tools, the confirmation framework, the HTTP/SSE transport,
-and the install / docs polish are all shipped.
+the install / docs polish, and the analytics tools (`project_status_brief`,
+`cash_flow_forecast`, `uncollected_invoices`) backed by the MySQL replica
+fast path are all shipped.
 
 All tool responses are returned as Markdown text. Claude Desktop renders the
 response inline, so headers, bullet lists, and tables show up correctly.
@@ -1324,3 +1326,106 @@ as:
 
 Zod input-validation failures are rendered the same way, so Claude can
 correct course without crashing the stdio session.
+
+---
+
+# Phase 8 — Analytics tools
+
+The three tools below are the analytics layer added in PR #66-#85. They
+all opt in to the DB fast path: when `MYSQL_*` env vars are configured
+and a `MossDb` pool is attached to the calling `BuildToolsAPI` instance,
+reads go to the replica directly instead of fanning per-project HTTP
+requests. Speedups summarised in [STATE.md](../STATE.md).
+
+## `project_status_brief`
+
+**Purpose**: read-only one-call summary of one or more projects, aligned
+to the Moss workflow. For each project returns the header (contract
+value, address, PMs, team) plus four analysis sections:
+
+1. **Schedule** — the actual BT published Gantt schedule, bucketed by
+   week: overdue tasks (ended before this Monday with <100% progress),
+   last week's tasks, this week's tasks, and a peek at next week.
+2. **Billing progress** — financial statements broken down as Sent/Paid
+   (already billed) vs Draft (scheduled milestones not yet reached or
+   not yet sent). Highlights last billed milestone.
+3. **Change orders & unbilled exposure** — the authoritative unbilled $
+   figure computed as contract value (`budget_revised`) minus the sum
+   of all financial-statement amounts, matching
+   `find_unbilled_change_orders`. Plus per-CO list.
+4. **Selections vs allowance budgets** — for each allowance category,
+   whether the team's selections roll up to within the revised budget.
+5. **Budget vs Sent POs** — for each category with at least one Sent PO
+   (no PO = no buyout = budget undetermined), revised budget vs PO
+   total, flagging over-budget categories.
+
+**Inputs**:
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `project_ids` | array of int | one of | 1-30 explicit project IDs. Mutually exclusive with `team`. |
+| `team` | enum | one of | `Nexus` / `Omega` / `Invicta` / `Alpha` / `all_active`. Filter active-team projects. Mutually exclusive with `project_ids`. |
+| `include` | array of enum | no | Which sections to render. Default: `schedule`, `billing`, `unbilled_cos`, `selections_vs_allowances`, `budget_vs_pos`. Legacy values (`rfis`, `tasks`, `purchase_orders`, `change_orders`, `draws`) accepted but off by default. |
+| `limit` | int | no | When `team` is set, cap projects (default 10, max 30). |
+
+**Sample prompt**: "Run project_status_brief on Katchmark (project 185907)."
+
+## `cash_flow_forecast`
+
+**Purpose**: project expected cash inflows over the next N weeks /
+months / quarters by joining Draft financial statements to the
+published (or working, as fallback) schedule via name match, then
+bucketing by the schedule task's end date. Sent-but-unpaid FS surfaced
+separately as receivables (AR).
+
+**Inputs**:
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `project_ids` | array of int | one of | 1-200 explicit project IDs. Mutually exclusive with `team`. |
+| `team` | enum | one of | `Nexus` / `Omega` / `Invicta` / `Alpha` / `all_active` (= company-wide). Mutually exclusive with `project_ids`. |
+| `granularity` | enum | no | `weekly` / `monthly` / `quarterly`. Default `monthly`. |
+| `horizon_periods` | int | no | Per-granularity max: weekly 52 (1y), monthly 24 (2y), quarterly 8 (2y). Defaults: weekly 12, monthly 6, quarterly 4. |
+| `require_published_schedule` | boolean | no | Default true. Skip design-phase projects (no published schedule) — they'd contribute $0 to every bucket while their Drafts pile up under Unscheduled. Set to false to include them. |
+| `limit` | int | no | When `team` is set, cap projects (default 100, max 200). |
+
+**Output**: receivables headline (Sent-unpaid total), schedule-coverage
+stat, portfolio-total table by bucket, per-team subtotals when scope
+crosses teams, per-project breakdown sorted by total descending, plus a
+list of Draft FS that couldn't be matched to a schedule task, plus
+caveats footer.
+
+**Sample prompt**: "Forecast company-wide cash for the next 3 quarters."
+→ `{ team: "all_active", granularity: "quarterly", horizon_periods: 3 }`
+
+## `uncollected_invoices`
+
+**Purpose**: report outstanding (sent-but-unpaid) financial statements
+aged by `sent_date`. Filters to statuses {Sent, Partial, Partly Paid,
+To Pay} with `balance > 0`. Useful for AR follow-up reports ("what's
+been sitting open >30 days?").
+
+**Inputs**:
+
+| Name | Type | Required | Notes |
+|---|---|---|---|
+| `project_ids` | array of int | one of | 1-200 explicit project IDs. Mutually exclusive with `team`. |
+| `team` | enum | one of | `Nexus` / `Omega` / `Invicta` / `Alpha` / `all_active` (= company-wide). Mutually exclusive with `project_ids`. |
+| `window_days` | int | no | Filter to invoices sent within the last N days. Common values: 7 (week), 30 (month), 90 (quarter). When omitted, includes all sent-but-unpaid regardless of age. |
+| `limit` | int | no | When `team` is set, cap projects (default 100, max 200). |
+
+**Output**: headline outstanding $, aging buckets (0-7 / 8-14 / 15-30 /
+31-60 / 61-90 / 90+ days), per-team subtotals, and per-invoice detail
+sorted by age desc.
+
+**Sample prompt**: "What invoices have been sitting unpaid for more
+than 30 days?" → `{ team: "all_active", window_days: 30 }` filters to
+recently-sent only; omit `window_days` to see the full AR ledger.
+
+## Note: `list_financial_statements.sent_date`
+
+Phase 8 also added a `sent_date` field to the `list_financial_statements`
+output (PR #81). For invoices in {Sent, Paid, Partial, Partly Paid, To
+Pay} status, `sent_date` mirrors the `date` column; for Drafts it's an
+empty string. This is the field `uncollected_invoices` uses to age
+invoices.

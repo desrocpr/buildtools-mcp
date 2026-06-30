@@ -79,6 +79,25 @@ doppler run --project buildtools-mcp --config dev -- node dist/index.js
 Doppler injects every secret in the config as a process env var; the server
 picks them up exactly as if they had been set in `.env`.
 
+### 3.3 Optional — DB fast path (Phase 8)
+
+When `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, and `MYSQL_DATABASE`
+are set, the server builds a shared `MossDb` pool at startup and uses
+it for all read-style tools (`project_status_brief`,
+`cash_flow_forecast`, `uncollected_invoices`, plus the underlying
+list/get tools). Reads against the MySQL replica are 30-100× faster
+than the HTTP datatable path; portfolio-wide rollups drop from minutes
+to seconds. See [STATE.md](../STATE.md) for the speedup table.
+
+The secrets live in `buildtools/dev` (the parent reverse-engineering
+repo) and are mirrored into `buildtools-mcp/prd`. Doppler injects
+them automatically when running production; local dev can either
+inherit them via `doppler run --project buildtools-mcp --config dev`
+or leave them unset (the HTTP fallback works without DB).
+
+Writes never use the DB regardless — they always go through the
+authenticated BT HTTPS API with the calling user's credentials.
+
 ## 4. Claude Desktop config
 
 Open (or create) the Claude Desktop config file:

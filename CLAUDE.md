@@ -15,17 +15,26 @@ Deployed at: `https://buildtools-mcp.mossbuildinganddesign.com`
 
 ## Architecture orientation
 
-Three layers, top to bottom:
+Four layers, top to bottom:
 
 1. **MCP transport** (`src/transports/`) — `stdio` for Claude Desktop,
    `http`/SSE for hosted agents. Bearer middleware + tool dispatch.
+   Both transports build the shared DB pool at startup and attach it
+   to each `BuildToolsAPI` instance as `api.db`.
 2. **Tool registry** (`src/tools/`) — one file per domain (projects,
-   financial, mutations, etc.). Each tool is a `ToolDefinition` with a
-   Zod input schema, a `permission` tag, and a handler that returns
-   Markdown.
+   financial, mutations, briefs, forecasts, invoices, etc.). Each tool
+   is a `ToolDefinition` with a Zod input schema, a `permission` tag,
+   and a handler that returns Markdown. Read tools call
+   `(api.db ?? api).getX(...)` — DB preferred, HTTP fallback.
 3. **BuildToolsAPI** (`src/client/`) — typed client over BuildTools'
    undocumented Laravel/Yii endpoints. Owns session cookies, CSRF tokens,
-   and the URL-encoded form-bracket shapes the upstream expects.
+   and the URL-encoded form-bracket shapes the upstream expects. Writes
+   always go through this class.
+4. **MossDb** (`src/db/`, PR #82-#85) — opt-in read-only adapter against
+   the BuildTools MySQL read replica. Mirrors `BuildToolsAPI`'s read
+   method signatures exactly so tool handlers can swap transparently.
+   Env-gated via `MYSQL_*`; returns null in local dev / tests, in
+   which case the HTTP path takes over.
 
 Read [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the full map.
 
@@ -66,7 +75,9 @@ roll-out email template is at [docs/onboarding-email.md](./docs/onboarding-email
 Doppler. Two projects you'll touch:
 
 - `buildtools-mcp/{dev,prd}` — `HTTP_BEARER_TOKEN`, `SUPABASE_*`,
-  `MCP_ENCRYPTION_KEY`, `MCP_OAUTH_ENABLED`, `MCP_PUBLIC_ORIGIN`.
+  `MCP_ENCRYPTION_KEY`, `MCP_OAUTH_ENABLED`, `MCP_PUBLIC_ORIGIN`,
+  `MYSQL_HOST`, `MYSQL_USER`, `MYSQL_PASSWORD`, `MYSQL_DATABASE` (DB
+  fast path — sourced from `buildtools/dev`; PR #82+).
 - `shared/{dev}` — `AZURE_AD_SSO_CLIENT_ID`, `AZURE_AD_SSO_CLIENT_SECRET`,
   `AZURE_AD_TENANT_ID` (reused from Moss's existing Entra enterprise app).
 
@@ -129,6 +140,44 @@ Public URL is served via Cloudflare Tunnel (`cloudflared.service`).
 - **Source-of-truth for BuildTools endpoints** is `~/code/buildtools/docs/`.
   When you find a new endpoint, mirror the shape from the closest existing
   `BuildToolsAPI` method; don't invent.
+
+## DB fast path (Phase 8, PR #82-#85)
+
+The `MossDb` adapter in `src/db/` reads from the BuildTools MySQL
+replica directly instead of fanning per-project HTTP requests. Speedups:
+
+| Tool | Scope | Before (HTTP) | After (DB) |
+|---|---|---:|---:|
+| `project_status_brief` | Katchmark | 5-10s | ~1s |
+| `uncollected_invoices` | `team: all_active, 7d` | 4 min | 7s |
+| `cash_flow_forecast` | `team: all_active, quarterly` | 4+ min | ~13s |
+| `findUnbilledChangeOrders` | portfolio | minutes | 25ms |
+| `getBudget` | per project | 2s | 250ms |
+
+Implementation notes:
+
+- Method signatures on `MossDb` mirror `BuildToolsAPI`'s read methods
+  exactly. The shape parity is non-negotiable — it's what lets tool
+  handlers use `(api.db ?? api).getX(...)` with no other changes.
+- Status enums need careful mapping. The HTTP wrapper renders BT's
+  HTML status labels ("Sent", "Partly Paid", "Paid"); the DB has
+  numeric tinyint codes. See `fsStatusLabel` in `MossDb.ts` for the FS
+  mapping (1=Draft, 4=Sent/Partly Paid/Paid by paid_amount, 5=Sent,
+  6=Paid). CO statuses: 1=Draft, 2=Pending, 3=Approved, 4=Rejected.
+- Per-category budget totals require `purchase_orders_items.budget_category_id`
+  (NOT on the PO header) and `change_orders_items.budget_category_id`
+  (NOT on the CO header). Aggregating with grouped LEFT JOINs (one
+  group-by per join, then JOIN) is ~10× faster than correlated subqueries.
+- Schedule tasks: `schedule_tasks.published_id` references the latest
+  `schedule_published.is_published_last=1` snapshot. Working schedule
+  = `published_id IS NULL`; published schedule = INNER JOIN
+  `schedule_published` on `is_published_last = 1`. Naive type filtering
+  is wrong — `type=2` means BOTH the root row AND every phase grouping
+  (Foundation, Framing). Filter on `parent IS NULL` to drop only the
+  root. Also drop synthetic "=> duration child" placeholder rows.
+- Per-user BT permission filtering is NOT enforced at the DB layer.
+  This is acceptable because the MCP itself is OAuth-gated to Moss
+  employees. Don't expose DB-backed reads to non-Moss tenants.
 
 ## Common gotchas
 
