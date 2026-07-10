@@ -682,6 +682,20 @@ export async function startHttpTransport(
       res.status(404).type("text/plain").send("Session not found");
       return;
     }
+    // Refresh the session's cached AuthContext from the value the bearer
+    // middleware just re-resolved for THIS request. resolveBearer re-reads
+    // the user's roles/permissions from the DB on every call, so refreshing
+    // here makes role changes take effect on the user's next request —
+    // without it, `tools/list` filtering and the per-call permission check
+    // keep using the permissions snapshotted when the SSE stream was first
+    // opened, so an admin promotion (e.g. viewer -> editor) wouldn't surface
+    // new tools until the user tore down and re-established the connection.
+    const refreshedAuth = (req as Request & { auth?: unknown }).auth as
+      | { kind: "human" | "service" | "legacy"; user?: { id: string; email: string } | null }
+      | undefined;
+    if (refreshedAuth) {
+      sessionStore.setAuth(sessionId, refreshedAuth);
+    }
     await transport.handlePostMessage(req, res);
   });
 
