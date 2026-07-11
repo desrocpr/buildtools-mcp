@@ -41,9 +41,18 @@ Read [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the full map.
 ## Multi-user auth (MOS-328)
 
 The repo also hosts a complete OAuth 2.1 + RBAC + audit + admin surface
-behind `MCP_OAUTH_ENABLED=true`. **As of this writing the flag is off in
-production**; the legacy `HTTP_BEARER_TOKEN` + `set_session_credentials`
-flow is what's actually serving traffic.
+behind `MCP_OAUTH_ENABLED=true`. **This flag is now ON in production** and
+OAuth is serving live traffic: enrolled Moss users authenticate via
+Microsoft Entra and tools are gated by their role (verified 2026-07-10 —
+users enrolled, editor/viewer roles in use). The legacy `HTTP_BEARER_TOKEN`
++ `set_session_credentials` path still resolves for service accounts (the
+harness) and during the deprecation window.
+
+Role changes take effect on the user's next request (the `/messages`
+handler refreshes the session's cached AuthContext from the per-request
+bearer resolve). A user does NOT need to reconnect after an admin promotes
+them — but Claude Desktop still needs a `tools/list` re-fetch (toggle the
+connector) to *display* newly-permitted tools, since it caches the list.
 
 When you work on auth-adjacent code: read [docs/AUTH.md](./docs/AUTH.md).
 It documents:
@@ -111,15 +120,23 @@ npx supabase db push --workdir /home/pdesroches/code/buildtools-mcp \
 
 ## Deploy
 
-Production runs on AWS Lightsail (`ubuntu@44.223.78.200`,
-`~/.ssh/harness_lightsail`). Standard deploy:
+Production runs on AWS Lightsail (`ubuntu@32.193.43.119`,
+`~/.ssh/harness_lightsail`). The `~/.ssh/config` alias `lightsail-harness`
+points at this host — prefer `ssh lightsail-harness` (the raw IP has been
+reassigned before; the alias tracks the current one). App dir is
+`/opt/buildtools-mcp`; the systemd unit runs
+`doppler run --project buildtools-mcp --config prd -- node dist/index.js`.
+Standard deploy:
 
 ```bash
-ssh -i ~/.ssh/harness_lightsail ubuntu@44.223.78.200 \
+ssh lightsail-harness \
   'cd /opt/buildtools-mcp && sudo -u ubuntu git pull && \
    sudo -u ubuntu npm run build && \
    sudo systemctl restart buildtools-mcp'
 ```
+
+Restarting the service clears the in-memory HTTP/SSE session store — see
+the note in "Multi-user auth" about role changes.
 
 Public URL is served via Cloudflare Tunnel (`cloudflared.service`).
 

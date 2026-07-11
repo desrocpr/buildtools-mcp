@@ -97,6 +97,42 @@ export class SessionStore {
   }
 }
 
+/** Minimal structural view of a resolved auth context, used by the
+ * refresh-policy guard below so this module needs no import of
+ * `AuthContext` (which would create a cycle with `src/auth/`). */
+interface AuthContextView {
+  kind?: string;
+  user?: { id?: string | null } | null;
+}
+
+/**
+ * Decide whether an incoming per-request auth context may overwrite the
+ * context cached for an existing SSE session.
+ *
+ * The `/messages` handler re-resolves the caller's roles/permissions on every
+ * request (so an admin role change takes effect without a reconnect). But the
+ * request's `sessionId` and its bearer are independent inputs, and the session
+ * lookup is not owner-bound — so this guard is what keeps one caller from
+ * overwriting ANOTHER session's identity. Rules:
+ *
+ *   - Never apply a legacy-bearer context (`kind === "legacy"`, `user` null):
+ *     doing so would strip RBAC + rate-limit enforcement from an OAuth session,
+ *     since both are skipped for legacy contexts.
+ *   - Only refresh a session that already has an established OAuth/service
+ *     identity, and only when the incoming user id MATCHES it. Same principal →
+ *     roles refresh; different principal (or none) → ignore. Identity is pinned
+ *     at connect time by the `/sse` handler; this function only ever updates the
+ *     permissions of that same user.
+ */
+export function shouldRefreshSessionAuth(
+  existing: AuthContextView | undefined,
+  incoming: AuthContextView | undefined,
+): boolean {
+  if (!incoming || incoming.kind === "legacy" || !incoming.user?.id) return false;
+  if (!existing?.user?.id) return false;
+  return existing.user.id === incoming.user.id;
+}
+
 /**
  * One-line audit record emitted to stderr by both transports on every tool
  * dispatch. The format is intentionally simple so a follower like
