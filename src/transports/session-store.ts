@@ -129,7 +129,9 @@ interface AuthContextView {
  * transport records this key for the connecting principal at `/sse` and rejects
  * any `/messages` whose bearer resolves to a different key.
  *
- *   - OAuth / service identities key on the (stable) user id.
+ *   - OAuth / service identities key on `kind:userId` — namespacing by kind so
+ *     a human token and a service token are never interchangeable even if they
+ *     somehow resolved to the same underlying `mcp_users.id`.
  *   - Legacy-bearer callers share one key (`"legacy"`) — they are one trust
  *     principal (the shared `HTTP_BEARER_TOKEN`), so any legacy caller may post
  *     to a legacy session, but never to an OAuth/service one, and vice-versa.
@@ -139,7 +141,7 @@ interface AuthContextView {
  */
 export function sessionOwnerKey(ctx: AuthContextView | undefined): string | null {
   if (!ctx) return null;
-  if (ctx.user?.id) return `u:${ctx.user.id}`;
+  if (ctx.user?.id) return `${ctx.kind ?? "u"}:${ctx.user.id}`;
   if (ctx.kind === "legacy") return "legacy";
   return null;
 }

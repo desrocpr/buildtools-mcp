@@ -21,9 +21,11 @@ const legacy = { kind: "legacy", user: null };
 const asAuth = (v: unknown) => v as unknown as AuthContext;
 
 describe("sessionOwnerKey", () => {
-  it("keys OAuth/service identities on the user id", () => {
-    expect(sessionOwnerKey(human("u1"))).toBe("u:u1");
-    expect(sessionOwnerKey(service("svc1"))).toBe("u:svc1");
+  it("keys OAuth/service identities on kind:userId (namespaced by kind)", () => {
+    expect(sessionOwnerKey(human("u1"))).toBe("human:u1");
+    expect(sessionOwnerKey(service("svc1"))).toBe("service:svc1");
+    // Same underlying id but different kind must NOT collide.
+    expect(sessionOwnerKey(human("x"))).not.toBe(sessionOwnerKey(service("x")));
   });
 
   it("collapses all legacy-bearer callers to one shared key", () => {
