@@ -68,7 +68,12 @@ import {
   workTrackingTools,
   type ToolDefinition,
 } from "../tools/index.js";
-import { auditLog, SessionStore } from "./session-store.js";
+import { auditLog, SessionStore, shouldRefreshSessionAuth } from "./session-store.js";
+// Type-only import — no runtime edge, so it does not reintroduce the
+// import cycle that `session-store.ts` avoids by typing its auth store as
+// `unknown`. Lets the cast sites below use the real interface instead of a
+// hand-copied fragment that would silently drift if `AuthContext` changed.
+import type { AuthContext } from "../auth/resolver.js";
 
 const SSE_ENDPOINT = "/sse";
 const MESSAGES_ENDPOINT = "/messages";
@@ -682,18 +687,23 @@ export async function startHttpTransport(
       res.status(404).type("text/plain").send("Session not found");
       return;
     }
-    // Refresh the session's cached AuthContext from the value the bearer
-    // middleware just re-resolved for THIS request. resolveBearer re-reads
-    // the user's roles/permissions from the DB on every call, so refreshing
-    // here makes role changes take effect on the user's next request —
-    // without it, `tools/list` filtering and the per-call permission check
-    // keep using the permissions snapshotted when the SSE stream was first
-    // opened, so an admin promotion (e.g. viewer -> editor) wouldn't surface
-    // new tools until the user tore down and re-established the connection.
+    // Re-sync the session's cached AuthContext from the value the bearer
+    // middleware just re-resolved for THIS request. The cached context is NOT
+    // a performance cache (resolveBearer re-reads the user's roles from the DB
+    // on every request regardless) — it is the bridge that carries the
+    // request-scoped identity into the MCP handlers, which can't see `req`.
+    // Re-syncing it here is what makes an admin role change (e.g. viewer ->
+    // editor) take effect on the user's next request instead of being frozen
+    // at SSE-connect time. `shouldRefreshSessionAuth` pins the session to its
+    // connect-time principal: it refreshes ONLY when the request resolves to
+    // the same user, and never applies a legacy context — otherwise a request
+    // bearing a different (or legacy) token could overwrite this session's
+    // identity and strip its RBAC/rate-limit enforcement.
     const refreshedAuth = (req as Request & { auth?: unknown }).auth as
-      | { kind: "human" | "service" | "legacy"; user?: { id: string; email: string } | null }
+      | AuthContext
       | undefined;
-    if (refreshedAuth) {
+    const existingAuth = sessionStore.getAuth<AuthContext>(sessionId);
+    if (shouldRefreshSessionAuth(existingAuth, refreshedAuth)) {
       sessionStore.setAuth(sessionId, refreshedAuth);
     }
     await transport.handlePostMessage(req, res);
