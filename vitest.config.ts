@@ -27,8 +27,8 @@ export default defineConfig({
         "src/index.ts", // process entrypoint (transport selection + boot)
       ],
       thresholds: {
-        lines: 67,
-        statements: 67,
+        lines: 68,
+        statements: 68,
         functions: 75,
         branches: 70,
       },
