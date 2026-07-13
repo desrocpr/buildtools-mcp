@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build + test + coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Type-check + build
+        run: npm run build
+
+      # `npm test` is `vitest run --coverage`; the coverage thresholds in
+      # vitest.config.ts fail the job if coverage drops below the floor.
+      # The suite is hermetic — no Supabase/MySQL/secrets required (the OAuth
+      # transport test injects an authResolver; the legacy transport test
+      # spawns its server with a self-provided bearer).
+      - name: Test + coverage gate
+        run: npm test

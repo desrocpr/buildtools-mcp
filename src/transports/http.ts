@@ -102,6 +102,15 @@ export interface HttpTransportOptions {
    * inside the OAuth flow). Defaults to `MCP_PUBLIC_ORIGIN` env.
    */
   publicOrigin?: string;
+  /**
+   * Test-only dependency-injection seam: override the bearer → AuthContext
+   * resolver. When provided, the OAuth path uses this instead of the
+   * Supabase-backed `resolveBearer`, and the web/enrollment routes +
+   * credential preload are skipped (no DB required) — which lets the RBAC /
+   * owner-binding / filtering behavior be integration-tested in-process
+   * without a live Supabase. Production never sets this (see `src/index.ts`).
+   */
+  authResolver?: (bearer: string) => Promise<AuthContext | null>;
 }
 
 /** Handle returned from `startHttpTransport` — exposes the underlying HTTP
@@ -539,7 +548,7 @@ export async function startHttpTransport(
     /^(1|true|yes)$/i.test(process.env.MCP_OAUTH_ENABLED ?? "");
   let resolverDb: import("../auth/db.js").Db | undefined;
   let oauthEncryptionKey: Buffer | undefined;
-  if (oauthEnabled) {
+  if (oauthEnabled && !opts.authResolver) {
     const publicOrigin =
       opts.publicOrigin ??
       process.env.MCP_PUBLIC_ORIGIN ??
@@ -592,15 +601,17 @@ export async function startHttpTransport(
 
     // OAuth-enabled path.
     const bearer = parseBearerHeader(req.headers.authorization ?? null);
-    if (!bearer || !resolverDb) {
+    if (!bearer || (!resolverDb && !opts.authResolver)) {
       res.status(401).type("text/plain").send("Unauthorized");
       return;
     }
     try {
-      const ctx = await resolveBearer(bearer, {
-        db: resolverDb,
-        legacyBearer: opts.bearerToken,
-      });
+      const ctx = opts.authResolver
+        ? await opts.authResolver(bearer)
+        : await resolveBearer(bearer, {
+            db: resolverDb as import("../auth/db.js").Db,
+            legacyBearer: opts.bearerToken,
+          });
       if (!ctx) {
         res.status(401).type("text/plain").send("Unauthorized");
         return;
