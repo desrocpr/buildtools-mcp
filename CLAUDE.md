@@ -48,11 +48,37 @@ users enrolled, editor/viewer roles in use). The legacy `HTTP_BEARER_TOKEN`
 + `set_session_credentials` path still resolves for service accounts (the
 harness) and during the deprecation window.
 
-Role changes take effect on the user's next request (the `/messages`
-handler refreshes the session's cached AuthContext from the per-request
-bearer resolve). A user does NOT need to reconnect after an admin promotes
-them — but Claude Desktop still needs a `tools/list` re-fetch (toggle the
-connector) to *display* newly-permitted tools, since it caches the list.
+Role changes take effect on the user's next request. Permission filtering,
+the call gate, and audit read the **per-request** auth context (carried into
+the MCP handlers via an `AsyncLocalStorage` in `request-context.ts`), which
+the bearer middleware re-resolves from the DB on every call — there is no
+mutable per-session permission snapshot to go stale. A user does NOT need to
+reconnect after an admin promotes them — but Claude Desktop still needs a
+`tools/list` re-fetch (toggle the connector) to *display* newly-permitted
+tools, since it caches the list.
+
+**Owner-binding.** `/messages` routes only by the `?sessionId=` query param,
+which rides in the URL (a weaker channel than a header — it can leak via
+proxy/CDN access logs, `Referer`, browser history). To stop a leaked session
+id from being a foothold, the transport records the connecting principal's
+`sessionOwnerKey` (`kind:userId`, or `legacy`) at `/sse` and rejects any
+`/messages` whose bearer resolves to a different identity — returning the same
+`404 "Session not found"` as an unknown session (so the status code can't
+probe whether a sessionId maps to a live session) and logging the attempt
+server-side. So a session id alone is not sufficient to inject into or drive
+BuildTools actions under someone else's session; you also need that owner's
+own token. Owner-binding is only active when a session authenticated at
+connect (`MCP_OAUTH_ENABLED=true`, which is the prod config); with OAuth off
+there is no identity to bind and the pre-Phase-6 behavior applies.
+
+**Fail-closed on missing request context.** The permission filter and call
+gate treat "no auth context" as "show/allow everything" for genuinely legacy
+sessions — but for a session that authenticated as OAuth/service at connect,
+a *missing* per-request ALS context means the bridge broke, not that the
+caller is unauthenticated. Both handlers cross-check the connect-time snapshot
+(`sessionAuthenticatedAtConnect`) and fail **closed** (empty tool list / denied
+call) in that case, so an ALS-propagation regression fails loudly instead of
+silently disabling RBAC.
 
 When you work on auth-adjacent code: read [docs/AUTH.md](./docs/AUTH.md).
 It documents:

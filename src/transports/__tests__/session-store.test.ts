@@ -1,63 +1,77 @@
 /**
- * Unit tests for the per-request session-auth refresh guard (MOS-631).
+ * Unit tests for session owner-binding + the per-request auth context
+ * (MOS-631 follow-up).
  *
- * `shouldRefreshSessionAuth` is the security boundary that lets an admin role
- * change take effect mid-session (the bug fixed in PR #87) WITHOUT letting a
- * request bearing a different — or legacy — token overwrite another session's
- * identity and strip its RBAC/rate-limit enforcement.
+ * `sessionOwnerKey` + `SessionStore.setOwner/getOwner` are the boundary that
+ * lets `/messages` reject a request whose bearer resolves to a different
+ * principal than the one that opened the session — closing the cross-session
+ * message-injection path. `runWithRequestAuth/currentRequestAuth` carry the
+ * live request identity into the MCP handlers (replacing the mutable snapshot).
  */
 import { describe, it, expect } from "vitest";
-import { SessionStore, shouldRefreshSessionAuth } from "../session-store.js";
+import { SessionStore, sessionOwnerKey } from "../session-store.js";
+import { runWithRequestAuth, currentRequestAuth } from "../request-context.js";
+import type { AuthContext } from "../../auth/resolver.js";
 
 const human = (id: string) => ({ kind: "human", user: { id } });
 const service = (id: string) => ({ kind: "service", user: { id } });
 const legacy = { kind: "legacy", user: null };
+// The ALS store is opaque (identity in, identity out); cast the minimal
+// fixtures to AuthContext for the typed `runWithRequestAuth` boundary.
+const asAuth = (v: unknown) => v as unknown as AuthContext;
 
-describe("shouldRefreshSessionAuth", () => {
-  it("refreshes when the request resolves to the SAME user (the role-change fix)", () => {
-    // Session opened as this user; a later request for the same user carries
-    // freshly-resolved (e.g. newly-promoted) permissions — must be applied.
-    expect(shouldRefreshSessionAuth(human("u1"), human("u1"))).toBe(true);
+describe("sessionOwnerKey", () => {
+  it("keys OAuth/service identities on kind:userId (namespaced by kind)", () => {
+    expect(sessionOwnerKey(human("u1"))).toBe("human:u1");
+    expect(sessionOwnerKey(service("svc1"))).toBe("service:svc1");
+    // Same underlying id but different kind must NOT collide.
+    expect(sessionOwnerKey(human("x"))).not.toBe(sessionOwnerKey(service("x")));
   });
 
-  it("refreshes same-user service (harness) sessions too", () => {
-    expect(shouldRefreshSessionAuth(service("svc1"), service("svc1"))).toBe(true);
+  it("collapses all legacy-bearer callers to one shared key", () => {
+    expect(sessionOwnerKey(legacy)).toBe("legacy");
   });
 
-  it("does NOT let a different user overwrite the session's identity", () => {
-    // Cross-session overwrite: attacker's token + victim's sessionId.
-    expect(shouldRefreshSessionAuth(human("victim"), human("attacker"))).toBe(false);
+  it("returns null when there is no identity to bind", () => {
+    expect(sessionOwnerKey(undefined)).toBeNull();
+    expect(sessionOwnerKey({ kind: "human", user: null })).toBeNull();
   });
 
-  it("does NOT apply a legacy context (would strip RBAC + rate limiting)", () => {
-    expect(shouldRefreshSessionAuth(human("u1"), legacy)).toBe(false);
-  });
-
-  it("does NOT establish identity on a session that has none yet", () => {
-    // Identity is pinned at connect time by /sse; this guard only refreshes,
-    // never bootstraps or upgrades an unidentified/legacy session.
-    expect(shouldRefreshSessionAuth(legacy, human("u1"))).toBe(false);
-    expect(shouldRefreshSessionAuth(undefined, human("u1"))).toBe(false);
-  });
-
-  it("ignores an absent or identity-less incoming context", () => {
-    expect(shouldRefreshSessionAuth(human("u1"), undefined)).toBe(false);
-    expect(shouldRefreshSessionAuth(human("u1"), { kind: "human", user: null })).toBe(false);
-    expect(shouldRefreshSessionAuth(human("u1"), { kind: "human", user: { id: "" } })).toBe(false);
+  it("distinguishes principals so a mismatch is detectable", () => {
+    // The /messages guard compares these keys; different users must differ,
+    // and an OAuth identity must never equal the legacy key.
+    expect(sessionOwnerKey(human("victim"))).not.toBe(sessionOwnerKey(human("attacker")));
+    expect(sessionOwnerKey(human("u1"))).not.toBe(sessionOwnerKey(legacy));
   });
 });
 
-describe("SessionStore auth round-trip", () => {
-  it("stores and returns the auth context the guard relies on, and clears it on delete", () => {
+describe("SessionStore owner-binding round-trip", () => {
+  it("stores, returns, and clears the owner key", () => {
     const store = new SessionStore();
-    const ctx = human("u1");
-    store.setAuth("sess-a", ctx);
-    expect(store.getAuth("sess-a")).toEqual(ctx);
-    // A refresh for the same user replaces the stored permissions.
-    const promoted = { kind: "human", user: { id: "u1", permissions: ["read", "write:budget"] } };
-    store.setAuth("sess-a", promoted);
-    expect(store.getAuth("sess-a")).toEqual(promoted);
-    store.delete("sess-a");
-    expect(store.getAuth("sess-a")).toBeUndefined();
+    expect(store.getOwner("s1")).toBeUndefined(); // unbound → no enforcement
+    store.setOwner("s1", "u:u1");
+    expect(store.getOwner("s1")).toBe("u:u1");
+    store.delete("s1");
+    expect(store.getOwner("s1")).toBeUndefined();
+  });
+});
+
+describe("request-context (AsyncLocalStorage)", () => {
+  it("exposes the request auth inside the scope and nothing outside it", () => {
+    expect(currentRequestAuth()).toBeUndefined();
+    const ctx = asAuth(human("u1"));
+    const inside = runWithRequestAuth(ctx, () => currentRequestAuth());
+    expect(inside).toBe(ctx);
+    expect(currentRequestAuth()).toBeUndefined();
+  });
+
+  it("propagates the context across awaits within the scope", async () => {
+    const ctx = asAuth(human("u2"));
+    const seen = await runWithRequestAuth(ctx, async () => {
+      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 1));
+      return currentRequestAuth();
+    });
+    expect(seen).toBe(ctx);
   });
 });

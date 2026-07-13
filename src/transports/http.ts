@@ -68,7 +68,8 @@ import {
   workTrackingTools,
   type ToolDefinition,
 } from "../tools/index.js";
-import { auditLog, SessionStore, shouldRefreshSessionAuth } from "./session-store.js";
+import { auditLog, SessionStore, sessionOwnerKey } from "./session-store.js";
+import { runWithRequestAuth, currentRequestAuth } from "./request-context.js";
 // Type-only import — no runtime edge, so it does not reintroduce the
 // import cycle that `session-store.ts` avoids by typing its auth store as
 // `unknown`. Lets the cast sites below use the real interface instead of a
@@ -217,25 +218,47 @@ function buildPerSessionServer(opts: {
     ...mutationTools.map((t) => [t.name, t] as const),
   ]);
 
+  // Whether this session authenticated as a non-legacy OAuth/service identity
+  // at connect time, read from the connect-time snapshot. This is the
+  // fail-closed signal: for such a session, a MISSING per-request auth context
+  // means the ALS bridge broke (a bug) — not a legacy/unauthenticated caller —
+  // so the handlers deny rather than fall through to "show/allow everything".
+  const sessionAuthenticatedAtConnect = (): boolean => {
+    const c = opts.sessionStore.getAuth<{ kind: string; user: unknown | null }>(
+      opts.sessionId,
+    );
+    return c !== undefined && c.kind !== "legacy" && c.user !== null;
+  };
+
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     // Filter the advertised tool list by the caller's permissions when
-    // we have an OAuth/service AuthContext on the session. Legacy
+    // we have an OAuth/service AuthContext for THIS request. Legacy
     // bearer sessions (kind=legacy) and the absence of any auth context
     // both fall through to "show everything" — preserves pre-Phase-6
     // behavior so existing clients continue to work during cutover.
-    const authCtx = opts.sessionStore.getAuth<{
-      kind: "human" | "service" | "legacy";
-      user: { permissions: string[] } | null;
-    }>(opts.sessionId);
+    // Read from the per-request context (AsyncLocalStorage), not a session
+    // snapshot: the resolver re-reads roles from the DB on every request, so
+    // a role change is reflected on the user's next `tools/list`.
+    const authCtx = currentRequestAuth();
+    // Fail-closed guard: if this session authenticated as a non-legacy
+    // OAuth/service identity at connect time but the per-request context is
+    // missing, the AsyncLocalStorage bridge did not propagate (a bug, or a
+    // future SDK dispatch change). Advertise only the meta tools rather than
+    // fall through to the unfiltered "show everything" branch — absence of
+    // context must not read as "no auth configured" for an authenticated
+    // session. See `sessionAuthenticatedAtConnect`.
+    const contextLost = sessionAuthenticatedAtConnect() && !authCtx?.user;
     const shouldFilter =
       authCtx !== undefined && authCtx.kind !== "legacy" && authCtx.user !== null;
     const { hasPermission } = await import("../auth/types.js");
     const tools = Array.from(toolsByName.values());
-    const filtered = shouldFilter
-      ? tools.filter((t) =>
-          hasPermission(authCtx!.user!.permissions, t.permission),
-        )
-      : tools;
+    const filtered = contextLost
+      ? []
+      : shouldFilter
+        ? tools.filter((t) =>
+            hasPermission(authCtx!.user!.permissions, t.permission),
+          )
+        : tools;
     return {
       tools: [
         {
@@ -271,12 +294,7 @@ function buildPerSessionServer(opts: {
       result: "ok" | "error" | "denied" | "rate_limited",
       errorMessage?: string,
     ): Promise<void> => {
-      const ctx = opts.sessionStore.getAuth<{
-        kind: "human" | "service" | "legacy";
-        user: { id: string; email: string; permissions: string[] } | null;
-        tokenId: string | null;
-        tokenKind: "oauth-access" | "service" | null;
-      }>(sessionId);
+      const ctx = currentRequestAuth();
       if (opts.authDb && ctx && ctx.kind !== "legacy" && ctx.user) {
         const { logAuditEvent } = await import("../auth/audit.js");
         await logAuditEvent(opts.authDb, {
@@ -339,14 +357,25 @@ function buildPerSessionServer(opts: {
     }
 
     // Permission + rate-limit enforcement (MOS-328 Phase 6b/6c). Both
-    // gating rules apply only when the session has an OAuth/service
-    // AuthContext; legacy and unauthed sessions are unaffected.
-    const authCtx = opts.sessionStore.getAuth<{
-      kind: "human" | "service" | "legacy";
-      user: { id: string; email: string; permissions: string[]; roles: Array<{ name: string }> } | null;
-      tokenId: string | null;
-      tokenKind: "oauth-access" | "service" | null;
-    }>(sessionId);
+    // gating rules apply only when the request has an OAuth/service
+    // AuthContext; legacy and unauthed sessions are unaffected. Read from
+    // the per-request context so enforcement uses freshly-resolved roles.
+    const authCtx = currentRequestAuth();
+    // Fail-closed: an authenticated session (per the connect snapshot) whose
+    // per-request context is missing means the ALS bridge broke — deny rather
+    // than skip the gate.
+    if (sessionAuthenticatedAtConnect() && !authCtx?.user) {
+      await writeAudit(name, "denied", "request auth context unavailable (fail-closed)");
+      return {
+        content: [
+          {
+            type: "text",
+            text: "**Permission denied**: the authentication context for this request was unavailable. This is an internal error, not a permissions problem — please retry; if it persists, report it.",
+          },
+        ],
+        isError: true,
+      };
+    }
     if (
       authCtx !== undefined &&
       authCtx.kind !== "legacy" &&
@@ -606,6 +635,12 @@ export async function startHttpTransport(
       | undefined;
     if (ctx) {
       sessionStore.setAuth(sessionId, ctx);
+      // Owner-binding (MOS-631 follow-up): record the connecting principal so
+      // `/messages` can reject requests whose bearer resolves to a different
+      // identity — a leaked/guessed sessionId alone must not grant a foothold
+      // in someone else's session.
+      const ownerKey = sessionOwnerKey(ctx);
+      if (ownerKey) sessionStore.setOwner(sessionId, ownerKey);
 
       // Phase 6c: when the session is OAuth-authenticated, transparently
       // pre-load the user's BuildTools credentials from Supabase so
@@ -687,26 +722,35 @@ export async function startHttpTransport(
       res.status(404).type("text/plain").send("Session not found");
       return;
     }
-    // Re-sync the session's cached AuthContext from the value the bearer
-    // middleware just re-resolved for THIS request. The cached context is NOT
-    // a performance cache (resolveBearer re-reads the user's roles from the DB
-    // on every request regardless) — it is the bridge that carries the
-    // request-scoped identity into the MCP handlers, which can't see `req`.
-    // Re-syncing it here is what makes an admin role change (e.g. viewer ->
-    // editor) take effect on the user's next request instead of being frozen
-    // at SSE-connect time. `shouldRefreshSessionAuth` pins the session to its
-    // connect-time principal: it refreshes ONLY when the request resolves to
-    // the same user, and never applies a legacy context — otherwise a request
-    // bearing a different (or legacy) token could overwrite this session's
-    // identity and strip its RBAC/rate-limit enforcement.
-    const refreshedAuth = (req as Request & { auth?: unknown }).auth as
+    // Owner-binding: `/messages` routes only by the `?sessionId=` query param,
+    // which is not a secret with bearer-grade handling (it rides in the URL).
+    // Reject any request whose bearer resolves to a different principal than
+    // the one that opened this session — otherwise a leaked session id would
+    // let another caller inject messages into (and drive BuildTools actions
+    // under) someone else's session. Unbound sessions (owner key absent, e.g.
+    // OAuth disabled) keep the pre-Phase-6 behavior.
+    const requestAuth = (req as Request & { auth?: unknown }).auth as
       | AuthContext
       | undefined;
-    const existingAuth = sessionStore.getAuth<AuthContext>(sessionId);
-    if (shouldRefreshSessionAuth(existingAuth, refreshedAuth)) {
-      sessionStore.setAuth(sessionId, refreshedAuth);
+    const ownerKey = sessionStore.getOwner(sessionId);
+    if (ownerKey !== undefined && sessionOwnerKey(requestAuth) !== ownerKey) {
+      // Audit the attempt server-side (no sessionId/token values — this is a
+      // hostile input path), but return the SAME 404 as an unknown session so
+      // the status code can't be used to probe whether a given sessionId maps
+      // to a live session owned by someone else.
+      process.stderr.write(
+        "[http-transport] SECURITY: /messages owner-binding rejection — caller identity does not match session owner\n",
+      );
+      res.status(404).type("text/plain").send("Session not found");
+      return;
     }
-    await transport.handlePostMessage(req, res);
+    // Carry the freshly-resolved request auth into the MCP handlers via
+    // AsyncLocalStorage. Permission filtering, the call gate, and audit all
+    // read this live context (not a mutable session snapshot), so a role
+    // change takes effect on the next request with no reconnect.
+    await runWithRequestAuth(requestAuth, () =>
+      transport.handlePostMessage(req, res),
+    );
   });
 
   return new Promise<HttpTransportHandle>((resolve, reject) => {

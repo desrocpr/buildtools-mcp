@@ -58,6 +58,10 @@ export class SessionStore {
   // the HTTP transport casts it back to AuthContext at the dispatch
   // layer in Phase 6b.
   private readonly authStore = new Map<string, unknown>();
+  // Owner-binding: the connect-time identity key (see `sessionOwnerKey`).
+  // Set once at `/sse` and never mutated; `/messages` rejects requests whose
+  // resolved identity does not match.
+  private readonly ownerStore = new Map<string, string>();
 
   /** Replace any prior credentials for `sessionId`. */
   set(sessionId: string, creds: SessionCredentials): void {
@@ -79,9 +83,20 @@ export class SessionStore {
     return this.authStore.get(sessionId) as T | undefined;
   }
 
+  /** Record the connect-time owner key for a session (owner-binding). */
+  setOwner(sessionId: string, ownerKey: string): void {
+    this.ownerStore.set(sessionId, ownerKey);
+  }
+
+  /** Returns the owner key for `sessionId`, or `undefined` if unbound. */
+  getOwner(sessionId: string): string | undefined {
+    return this.ownerStore.get(sessionId);
+  }
+
   /** Returns `true` if the entry existed and was removed. */
   delete(sessionId: string): boolean {
     this.authStore.delete(sessionId);
+    this.ownerStore.delete(sessionId);
     return this.store.delete(sessionId);
   }
 
@@ -94,43 +109,41 @@ export class SessionStore {
   clear(): void {
     this.store.clear();
     this.authStore.clear();
+    this.ownerStore.clear();
   }
 }
 
-/** Minimal structural view of a resolved auth context, used by the
- * refresh-policy guard below so this module needs no import of
- * `AuthContext` (which would create a cycle with `src/auth/`). */
+/** Minimal structural view of a resolved auth context, so this module needs
+ * no import of `AuthContext` (which would create a cycle with `src/auth/`). */
 interface AuthContextView {
   kind?: string;
   user?: { id?: string | null } | null;
 }
 
 /**
- * Decide whether an incoming per-request auth context may overwrite the
- * context cached for an existing SSE session.
+ * Stable identity key for owner-binding an SSE session (MOS-631 follow-up).
  *
- * The `/messages` handler re-resolves the caller's roles/permissions on every
- * request (so an admin role change takes effect without a reconnect). But the
- * request's `sessionId` and its bearer are independent inputs, and the session
- * lookup is not owner-bound — so this guard is what keeps one caller from
- * overwriting ANOTHER session's identity. Rules:
+ * The `/messages` endpoint routes purely by the `?sessionId=` query param and
+ * does not otherwise bind a request to the session's owner — so without a check,
+ * any caller who learns a session id could POST into another user's session. The
+ * transport records this key for the connecting principal at `/sse` and rejects
+ * any `/messages` whose bearer resolves to a different key.
  *
- *   - Never apply a legacy-bearer context (`kind === "legacy"`, `user` null):
- *     doing so would strip RBAC + rate-limit enforcement from an OAuth session,
- *     since both are skipped for legacy contexts.
- *   - Only refresh a session that already has an established OAuth/service
- *     identity, and only when the incoming user id MATCHES it. Same principal →
- *     roles refresh; different principal (or none) → ignore. Identity is pinned
- *     at connect time by the `/sse` handler; this function only ever updates the
- *     permissions of that same user.
+ *   - OAuth / service identities key on `kind:userId` — namespacing by kind so
+ *     a human token and a service token are never interchangeable even if they
+ *     somehow resolved to the same underlying `mcp_users.id`.
+ *   - Legacy-bearer callers share one key (`"legacy"`) — they are one trust
+ *     principal (the shared `HTTP_BEARER_TOKEN`), so any legacy caller may post
+ *     to a legacy session, but never to an OAuth/service one, and vice-versa.
+ *   - Returns `null` when there is no identity to bind (e.g. OAuth disabled);
+ *     the caller treats a `null` recorded owner as "no binding to enforce",
+ *     preserving pre-Phase-6 behavior.
  */
-export function shouldRefreshSessionAuth(
-  existing: AuthContextView | undefined,
-  incoming: AuthContextView | undefined,
-): boolean {
-  if (!incoming || incoming.kind === "legacy" || !incoming.user?.id) return false;
-  if (!existing?.user?.id) return false;
-  return existing.user.id === incoming.user.id;
+export function sessionOwnerKey(ctx: AuthContextView | undefined): string | null {
+  if (!ctx) return null;
+  if (ctx.user?.id) return `${ctx.kind ?? "u"}:${ctx.user.id}`;
+  if (ctx.kind === "legacy") return "legacy";
+  return null;
 }
 
 /**
