@@ -28,7 +28,12 @@ import {
   registerClient,
   createAuthCode,
   consumeAuthCode,
+  issueTokenPair,
+  resolveAccessToken,
+  rotateRefreshToken,
+  revokeToken,
 } from "../../src/auth/oauth-store.js";
+import { generateAccessToken, generateRefreshToken } from "../../src/auth/tokens.js";
 import {
   upsertServiceCredentials,
   getServiceCredentials,
@@ -98,6 +103,41 @@ describe.skipIf(!LIVE)("auth data layer — live Supabase round-trips", () => {
       expect(await getServiceCredentials(db, u.id, "buildtools", key)).toEqual(creds);
     } finally {
       await deleteServiceCredentials(db, u.id, "buildtools");
+    }
+  });
+
+  it("token pair: issue → resolve access → rotate refresh (old refresh dies) → revoke access", async () => {
+    const u = await newServiceUser();
+    const client = await registerClient(db, { redirectUris: ["https://example.invalid/cb"] });
+    try {
+      const pair = await issueTokenPair(
+        db,
+        { userId: u.id, clientId: client.clientId, scope: "mcp" },
+        generateAccessToken,
+        generateRefreshToken,
+      );
+      // Access token resolves to the user.
+      const resolved = await resolveAccessToken(db, pair.accessToken);
+      expect(resolved?.userId).toBe(u.id);
+
+      // Rotating the refresh token mints a new pair and invalidates the old refresh.
+      const rotated = await rotateRefreshToken(
+        db,
+        pair.refreshToken,
+        generateAccessToken,
+        generateRefreshToken,
+      );
+      expect(rotated.accessToken).not.toBe(pair.accessToken);
+      await expect(
+        rotateRefreshToken(db, pair.refreshToken, generateAccessToken, generateRefreshToken),
+      ).rejects.toThrow(/invalid_grant/);
+
+      // Revoking an access token makes it stop resolving.
+      await revokeToken(db, rotated.accessToken);
+      expect(await resolveAccessToken(db, rotated.accessToken)).toBeNull();
+    } finally {
+      await db.from("mcp_oauth_tokens").delete().eq("user_id", u.id);
+      await db.from("mcp_oauth_clients").delete().eq("client_id", client.clientId);
     }
   });
 
