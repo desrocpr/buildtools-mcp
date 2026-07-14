@@ -148,11 +148,37 @@ Multiple roles take the MAX limit per bucket.
 | Zero-admin lockout                    | `countActiveAdmins` guard on revoke + role-remove |
 | Stale `last_seen_at` writes           | 5-min in-memory debounce |
 | Audit log of admin mutations          | Every admin POST writes `mcp_audit_log` row |
+| Stale role after admin change (MOS-631) | Permissions read per-request via `AsyncLocalStorage`, not a connect-time snapshot — a role change takes effect on the next request |
+| Cross-session `/messages` injection (MOS-631) | Owner-binding: the connecting principal (`sessionOwnerKey`) is recorded at `/sse`; a `/messages` whose bearer resolves to a different identity gets a uniform `404` (no liveness oracle) + a server-side log |
+| RBAC silently disabled by a lost auth context (MOS-631) | Fail-closed: an authenticated session with a missing per-request context denies instead of falling through to "show/allow everything" |
+
+## Per-request auth + owner-binding (MOS-631)
+
+The HTTP/SSE transport resolves the bearer on **every** `/messages` request and
+carries the resulting `AuthContext` into the MCP handlers via an
+`AsyncLocalStorage` (`src/transports/request-context.ts`). The tool-list filter,
+the per-call permission gate, and the audit writer all read that per-request
+context — there is no mutable per-session permission snapshot, so a role change
+takes effect on the user's next request (no reconnect, no restart).
+
+Because `/messages` routes only by the `?sessionId=` query param (which rides in
+the URL and can leak via proxy logs / `Referer`), the transport **owner-binds**
+each session: it records the connecting principal's `sessionOwnerKey`
+(`kind:userId`, or `legacy`) at `/sse` and rejects any `/messages` whose bearer
+resolves to a different identity, returning the same `404` as an unknown session
+(so the status code can't probe session liveness) and logging the attempt.
+
+Both the tool-list filter and the call gate **fail closed**: for a session that
+authenticated as OAuth/service at connect, a *missing* per-request context means
+the bridge broke, not that the caller is unauthenticated — so they deny rather
+than fall through to the unfiltered/unenforced path. See
+`sessionAuthenticatedAtConnect` in `src/transports/http.ts`.
 
 ## Feature flag + backwards compat
 
-`MCP_OAUTH_ENABLED=true` activates the OAuth surface. When off, the server
-behaves exactly as pre-Phase-6. When on:
+`MCP_OAUTH_ENABLED=true` activates the OAuth surface — **it is ON in production
+as of 2026-07-10 (Phase 9 cutover complete)**. When off, the server behaves
+exactly as pre-Phase-6. When on:
 
 - `/oauth/*`, `/enroll/*`, `/admin/*`, `/.well-known/*` are exempt from
   bearer middleware (they have their own auth).
@@ -255,7 +281,11 @@ Not yet automated. Manual procedure:
 
 (Versioning is in place; the actual rotation code isn't. Tracked as a follow-up.)
 
-### Cutover
+### Cutover — DONE (2026-07-10)
+
+`MCP_OAUTH_ENABLED=true` is live in `buildtools-mcp/prd`. Moss users are
+enrolled and using role-gated access (editor/viewer). The steps below are kept
+as the runbook (e.g. after a rebuild-from-scratch):
 
 1. Confirm `pg_cron` is enabled (above).
 2. Flip `MCP_OAUTH_ENABLED=true` in `buildtools-mcp/prd` Doppler.
@@ -267,6 +297,8 @@ Not yet automated. Manual procedure:
    `docs/onboarding-email.md`).
 7. **Rollback**: flip the flag back to `false` and restart. Legacy
    `HTTP_BEARER_TOKEN` + `set_session_credentials` resumes exclusive control.
+   (Note: with the flag off, owner-binding is inert — there is no identity to
+   bind — so the pre-Phase-6 behavior applies.)
 
 ### Monitoring
 
