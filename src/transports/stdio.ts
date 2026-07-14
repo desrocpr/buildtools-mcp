@@ -12,6 +12,7 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -53,7 +54,12 @@ import { auditLog } from "./session-store.js";
  *     graceful shutdown is unblocked.
  *   - `ping` is special-cased outside the registry for cheap health checks.
  */
-export async function startStdioTransport(): Promise<Server> {
+export async function startStdioTransport(
+  // Test-only DI seam: inject an in-memory transport instead of the real
+  // stdio one so the dispatch (tools/list, ping, tool errors) is coverable
+  // in-process. Production (`src/index.ts`) calls with no args.
+  opts: { transport?: Transport } = {},
+): Promise<Server> {
   const server = new Server(
     { name: "buildtools-mcp", version: "0.0.1" },
     // listChanged: true lets the client trust `notifications/tools/list_changed`
@@ -212,7 +218,7 @@ export async function startStdioTransport(): Promise<Server> {
     return result as { content: typeof result.content; isError?: boolean };
   });
 
-  const transport = new StdioServerTransport();
+  const transport = opts.transport ?? new StdioServerTransport();
   await server.connect(transport);
   return server;
 }
