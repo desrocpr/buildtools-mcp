@@ -2,7 +2,7 @@
 
 MCP server for BuildTools (third-party construction PM SaaS at `moss.buildtools.app`). Exposes BuildTools data + operations as tools/resources to Claude Desktop and other MCP-aware agents.
 
-**Status:** Phase 1-8 complete and live in production at `https://buildtools-mcp.mossbuildinganddesign.com`. Read paths now use a MySQL read-replica fast path (`MossDb` adapter) — portfolio rollups that took ~4 minutes via HTTP now return in 7-13 seconds. Writes continue to use authenticated HTTP. See [STATE.md](./STATE.md) for the current deployment + speedup table.
+**Status:** Phase 1-9 complete and live in production at `https://buildtools-mcp.mossbuildinganddesign.com`. Multi-user OAuth (Microsoft Entra + RBAC) is **live** (`MCP_OAUTH_ENABLED=true` since 2026-07-10); read paths use a MySQL read-replica fast path (`MossDb` adapter) — portfolio rollups that took ~4 minutes via HTTP now return in 7-13 seconds; writes continue to use authenticated HTTP. CI runs build + tests + a coverage gate on every PR. See [STATE.md](./STATE.md) for the current deployment state and [docs/AUTH.md](./docs/AUTH.md) for the auth model.
 
 ## What this is
 
@@ -34,6 +34,21 @@ Hosted agent ─HTTP/SSE+bearer─►│
 | 6 | HTTP/SSE transport with bearer-token auth | shipped |
 | 7 | Polish — install guide + tool reference + architecture doc | shipped |
 | 8 | Analytics tools (briefs, forecasts, uncollected invoices) + DB fast path | shipped (PR #66-#85) |
+| 9 | Multi-user OAuth (Entra + RBAC) cutover + auth hardening (owner-binding, per-request auth) + CI/coverage | shipped (PR #87-#94) |
+
+## Testing & CI
+
+```bash
+npm test          # vitest run --coverage (enforces the src/ coverage floor)
+npm run build     # tsc
+```
+
+- **CI** (`.github/workflows/ci.yml`) runs `npm ci` + build + `npm test` on every PR and push to `main`. The suite is hermetic — no Supabase/MySQL/secrets needed (the OAuth transport test injects an `authResolver`; the stdio test injects an in-memory transport).
+- **Coverage gate**: `vitest.config.ts` measures the whole `src/` tree with a ratcheting floor. Raise it as coverage improves.
+- **Live DB suite** (`tests/integration/auth-db.live.test.ts`) exercises the real Supabase auth data layer (tokens, OAuth codes, roles, credentials). It is **skipped in CI** and runs on demand:
+  ```bash
+  doppler run --project buildtools-mcp --config prd -- npm test
+  ```
 
 ## Quick start
 

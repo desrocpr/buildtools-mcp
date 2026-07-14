@@ -170,9 +170,11 @@ Public URL is served via Cloudflare Tunnel (`cloudflared.service`).
 
 - **No emojis in code or commit messages** unless the user asks. Default
   to terse, declarative prose.
-- **Don't add tests for trivial code** — keep coverage above 80% but don't
-  pad with assertions that just re-state the implementation. Live probes
-  against the Supabase project are the higher-signal verification.
+- **Don't add tests for trivial code** — don't pad with assertions that just
+  re-state the implementation. Prefer behavioral tests (stateful fakes,
+  in-process route mounts) over call-spy mocks, and use the env-gated live
+  suite for the Supabase CRUD (see "Testing & CI"). Keep the coverage floor in
+  `vitest.config.ts` moving up, never down.
 - **Tool handlers never throw to the SDK** — both Zod errors and
   `BuildToolsError`s render as Markdown `isError: true` content.
 - **Mutations require confirmation** — every write goes through
@@ -256,5 +258,26 @@ Implementation notes:
 | 6.5 — Review hardening | ✅ | #42 |
 | 7 — Admin endpoints | ✅ | #43 |
 | 7.5 — Admin-review hardening | ✅ | #44 |
-| **8 — Docs + onboarding** | **✅** | (this PR) |
-| 9 — Cutover | _pending_ | needs pg_cron enable, Paul to enroll, harness SA provision |
+| **8 — Docs + onboarding** | **✅** | #45 |
+| **9 — Cutover** | **✅** | live 2026-07-10 (`MCP_OAUTH_ENABLED=true` in prod) |
+| **9.5 — Auth hardening** | **✅** | #87-#88 (per-request auth via ALS, owner-binding, fail-closed) |
+
+## Testing & CI
+
+- `npm test` = `vitest run --coverage`. `vitest.config.ts` enforces a
+  **whole-`src/` coverage floor** (a ratcheting gate — raise it as coverage
+  improves; do NOT lower it). `npm run build` = `tsc`.
+- **CI** (`.github/workflows/ci.yml`, added PR #89) runs `npm ci` + build +
+  `npm test` on every PR and push to `main`. The suite is **hermetic** — no
+  Supabase/MySQL/secrets. Two DI seams keep it that way: `authResolver` on the
+  HTTP transport and `transport` on stdio (both test-only; production never
+  sets them).
+- **Live DB suite** — `tests/integration/auth-db.live.test.ts` round-trips the
+  real Supabase auth layer (service tokens, OAuth codes + token rotation, roles,
+  credential bytea). It is `describe.skipIf(!SUPABASE_URL)`, so it **skips in
+  CI** and runs on demand:
+  `doppler run --project buildtools-mcp --config prd -- npm test`. Self-cleaning
+  (unique rows deleted in `finally`).
+- This is the codified form of the "live probes beat builder-mocks for DB code"
+  convention: hermetic tests cover logic/crypto/route-handlers; the live suite
+  covers the Supabase CRUD.

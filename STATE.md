@@ -1,5 +1,58 @@
 # State
 
+## 🟢 2026-07-14 — Auth hardening (MOS-631) + testing & CI initiative
+
+### OAuth cutover complete (MOS-328 Phase 9)
+
+`MCP_OAUTH_ENABLED=true` in production since 2026-07-10. Enrolled Moss users
+authenticate via Microsoft Entra and tools are gated by their role
+(editor/viewer in active use). Legacy `HTTP_BEARER_TOKEN` +
+`set_session_credentials` still resolves for service accounts (the harness) and
+during the deprecation window.
+
+### Security hardening (MOS-631, PRs #87-#88)
+
+Hardened the RBAC/session auth path after the "role change didn't take effect"
+incident and two multi-agent reviews:
+
+- **Per-request auth** — permission filtering, the call gate, and audit read a
+  per-request `AuthContext` carried via `AsyncLocalStorage`
+  (`src/transports/request-context.ts`), not a mutable per-session snapshot. A
+  role change takes effect on the user's next request — no reconnect, no
+  service restart.
+- **Owner-binding** — `/messages` records the connecting principal at `/sse`
+  (`sessionOwnerKey`) and rejects any request whose bearer resolves to a
+  different identity, returning a uniform `404` (no session-liveness oracle) plus
+  a server-side log. Closes cross-session message injection.
+- **Fail-closed** — an authenticated session whose per-request ALS context is
+  missing (bridge broke) denies (empty tool list / denied call) instead of
+  falling through to "show/allow everything".
+
+Verified live in prod: viewer 0 → editor 12 write tools mid-session on one
+connection; attacker POST to another session → 404.
+
+### Testing & CI (PRs #89-#94)
+
+- **First CI on the repo** — `.github/workflows/ci.yml` runs `npm ci` + build +
+  `npm test` (coverage gate) on every PR and push to `main`. Hermetic — no
+  Supabase/MySQL/secrets required.
+- **Coverage gate** now measures the whole `src/` tree (was `src/client` only)
+  with a **ratcheting floor** (currently lines/statements 69, functions 75,
+  branches 70). Overall `src` line coverage **61% → ~70%**.
+- Highlights: transport RBAC/owner-binding integration test (http.ts 0→57%,
+  stdio.ts 0→94%), OAuth 2.1 endpoint handlers (oauth.ts 3→59%), admin
+  RBAC/CSRF gates (admin.ts 3→40%), HTML-page XSS escaping (pages.ts 0→93%),
+  credential crypto round-trip (credentials.ts 1→88%), PKCE + permission-union.
+- **DI seams** for hermetic testing: `authResolver` on the HTTP transport,
+  `transport` on stdio — production call paths unchanged.
+- **Env-gated live DB suite** (`tests/integration/auth-db.live.test.ts`) —
+  real-Supabase round-trips for service tokens, OAuth codes/token rotation,
+  roles, and credential bytea. Self-cleaning; runs via
+  `doppler run --project buildtools-mcp --config prd -- npm test`, skipped in
+  hermetic CI.
+
+---
+
 ## 🟢 2026-06-29 — DB fast path + analytics tools complete (Phase 8)
 
 PRs #66-#85 ship a full analytics layer plus a MySQL read-replica fast
