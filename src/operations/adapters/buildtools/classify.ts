@@ -96,19 +96,27 @@ export interface ClassifySpec<T> {
 
 /**
  * Default rejection reader for BuildTools' save endpoints, which signal refusal
- * with an `e` / `errors` / `message` field.
+ * with an `e` or `errors` envelope.
  *
- * NOTE — a bare non-1 result code with no error envelope is treated as
- * AMBIGUOUS, not failed. Cambium takes the same position (an unrecognised
- * envelope is ambiguous), and it follows from the model's own asymmetry: we have
- * not verified in `~/code/buildtools/docs/` that a bare `{r:0}` is always a
- * pre-mutation refusal, and guessing "failed" is the expensive direction to be
- * wrong in.
+ * `message` is deliberately NOT accepted as proof of rejection. It is polysemous
+ * upstream: at least six write endpoints return it alongside SUCCESS —
+ * `createChangeOrder` (`BuildToolsAPI.ts:2665`), `createTask` (`:4104`),
+ * `createRFI` (`:4167`), `createInvoice` (`:4253`), `createFinancialStatement`
+ * (`:4324`), `createService` (`:4616`) — and those endpoints signal success with
+ * `result === "success"`, not `r === 1`. If an adapter wiring supplied an
+ * `isSuccess` that missed the right discriminator, reading their success-time
+ * `message` as a rejection would report a landed write as `failed`: the exact
+ * bug this module exists to prevent, hidden inside its own safety net. Requiring
+ * a real error envelope makes that failure mode ambiguous instead.
+ *
+ * A bare non-1 result code with no error envelope is likewise AMBIGUOUS, not
+ * failed — we have not verified that `{r:0}` is always a pre-mutation refusal,
+ * and guessing "failed" is the expensive direction to be wrong in.
  */
 export function readBuildToolsRejection(
   payload: Record<string, unknown>,
 ): RejectionDetail | undefined {
-  return narrowRejection(payload.e ?? payload.errors ?? payload.message);
+  return narrowRejection(payload.e ?? payload.errors);
 }
 
 /**
@@ -128,8 +136,30 @@ function narrowRejection(value: unknown): RejectionDetail | undefined {
   if (typeof value === "object" && value !== null) {
     const msg = (value as { message?: unknown }).message;
     if (typeof msg === "string") return { message: msg };
+    // Laravel's default ValidationException envelope keys field names to arrays
+    // of messages: `{"errors": {"name": ["Name is required"], ...}}`. Flatten it
+    // rather than dropping — this is plausibly the most common rejection shape,
+    // and dropping it would classify a clean 422 refusal as ambiguous, defeating
+    // the parse-first ordering above.
+    const flattened = flattenFieldErrors(value as Record<string, unknown>);
+    if (flattened.length > 0) return flattened;
   }
   return undefined;
+}
+
+/** Flatten `{field: ["msg", ...], ...}` into a flat list of messages. */
+function flattenFieldErrors(value: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const [field, messages] of Object.entries(value)) {
+    if (typeof messages === "string") {
+      out.push(`${field}: ${messages}`);
+    } else if (Array.isArray(messages)) {
+      for (const m of messages) {
+        if (typeof m === "string") out.push(`${field}: ${m}`);
+      }
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

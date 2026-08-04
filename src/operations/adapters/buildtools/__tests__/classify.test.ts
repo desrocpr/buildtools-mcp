@@ -225,6 +225,56 @@ describe("egress safety", () => {
     expect(JSON.stringify(outcome)).not.toContain("91234");
   });
 
+  it("never reads a success-time `message` as a rejection", () => {
+    // `message` is polysemous upstream: createChangeOrder / createTask /
+    // createRFI / createInvoice / createFinancialStatement / createService all
+    // return it ALONGSIDE success, and signal success with `result === "success"`
+    // rather than `r === 1`. A wiring whose isSuccess misses that discriminator
+    // must degrade to ambiguous, never to a false `failed` for a landed write.
+    const mismatched: ClassifySpec<{ id: unknown }> = {
+      isSuccess: (p) => p.r === 1, // wrong discriminator for this endpoint
+      extract: (p) => ({ id: p.id }),
+    };
+
+    const outcome = classifyWriteResponse(
+      response(
+        200,
+        JSON.stringify({
+          result: "success",
+          id: 5150,
+          message: "Change order created",
+        }),
+      ),
+      mismatched,
+    );
+
+    expect(outcome.status).not.toBe("failed");
+    expect(outcome.status).toBe("ambiguous");
+  });
+
+  it("flattens Laravel's nested field-error envelope into a failure", () => {
+    // {"message": "...", "errors": {"field": ["msg"]}} is Laravel's default
+    // ValidationException shape. Dropping it would classify a clean 422 refusal
+    // as ambiguous and defeat the parse-first ordering.
+    const outcome = classifyWriteResponse(
+      response(
+        422,
+        JSON.stringify({
+          message: "The given data was invalid.",
+          errors: { name: ["Name is required"], zip: ["Zip is invalid"] },
+        }),
+      ),
+      btSpec,
+    );
+
+    expect(outcome.status).toBe("failed");
+    if (outcome.status !== "failed") throw new Error("expected failed");
+    expect(outcome.details).toEqual([
+      "name: Name is required",
+      "zip: Zip is invalid",
+    ]);
+  });
+
   it("keeps recognised rejection detail shapes", () => {
     const asArray = classifyWriteResponse(
       response(422, JSON.stringify({ errors: ["Name required", "Zip invalid"] })),

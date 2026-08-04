@@ -193,6 +193,21 @@ export function checkIdempotency(
  *   - The result isn't an error (`isError` is not `true`)
  *
  * Returns nothing — the cache write is a side effect.
+ *
+ * ⚠ MOS-747 — MUST CHANGE BEFORE WRITES ARE WIRED TO `WriteOutcome`.
+ *
+ * The `isError` gate below implements "failures stay uncached so the next
+ * attempt gets a fresh shot at BT". That is correct for a *failed* write and
+ * WRONG for an *ambiguous* one. An ambiguous write (unreadable, non-2xx, or
+ * timed-out — see `src/operations/outcomes.ts`) may already have landed
+ * upstream. If it renders as `isError: true` it will not be cached, so a retry
+ * carrying the same `idempotency_key` re-issues the write to BuildTools and
+ * creates a duplicate — through the very mechanism built to prevent one.
+ *
+ * When the operations adapter starts returning `WriteOutcome`, gate on
+ * `isCacheable(outcome)` (cache `ok` AND `ambiguous`, skip only `failed`)
+ * instead of on `isError`, and make an ambiguous replay return
+ * "unknown — reconcile first" rather than re-firing.
  */
 export function storeIdempotencyResult(opts: StoreIdempotencyResultOptions): void {
   if (
