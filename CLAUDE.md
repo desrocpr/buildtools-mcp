@@ -20,7 +20,10 @@ Four layers, top to bottom:
 1. **MCP transport** (`src/transports/`) — `stdio` for Claude Desktop,
    `http`/SSE for hosted agents. Bearer middleware + tool dispatch.
    Both transports build the shared DB pool at startup and attach it
-   to each `BuildToolsAPI` instance as `api.db`.
+   to each `BuildToolsAPI` instance as `api.db`. They also construct the
+   two process-wide in-memory stores (`ConfirmationStore`,
+   `IdempotencyStore`) and pass them into every handler — that wiring
+   lives in `stdio.ts` / `http.ts`, not in the tool modules.
 2. **Tool registry** (`src/tools/`) — one file per domain (projects,
    financial, mutations, briefs, forecasts, invoices, etc.). Each tool
    is a `ToolDefinition` with a Zod input schema, a `permission` tag,
@@ -35,6 +38,17 @@ Four layers, top to bottom:
    method signatures exactly so tool handlers can swap transparently.
    Env-gated via `MYSQL_*`; returns null in local dev / tests, in
    which case the HTTP path takes over.
+
+Two sidecars hang off that spine:
+
+- **Web surface** (`src/web/`) — the Express routes mounted by the HTTP
+  transport: `enroll.ts` (Entra sign-in + BT credential capture),
+  `oauth.ts` (OAuth 2.1 authorize/token/register), `admin.ts` (RBAC
+  console), `pages.ts` (server-rendered HTML), `csrf.ts`, `router.ts`.
+  Nothing here is reachable on the stdio transport.
+- **Mutation guards** (`src/confirm/`, `src/idempotency/`) — the two-step
+  confirmation handshake and the retry-safety cache. Both are in-memory,
+  process-local, and cleared on restart by design.
 
 Read [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the full map.
 
@@ -128,10 +142,21 @@ echo-appends-`\n` gotcha from the user's global CLAUDE.md).
 npm run build
 
 # Type-check only
-npx tsc --noEmit
+npm run typecheck
 
-# Tests (vitest)
+# Tests (vitest run --coverage)
 npm test
+
+# One file / one directory — skip the coverage gate so a partial run
+# doesn't fail on thresholds it was never going to meet
+npx vitest run src/auth/__tests__/tokens.test.ts --coverage.enabled=false
+npx vitest run src/web --coverage.enabled=false
+
+# One test by name
+npx vitest run -t "access tokens are prefixed mcpa_" --coverage.enabled=false
+
+# Watch mode
+npm run test:watch
 
 # Run the server locally
 doppler run --project buildtools-mcp --config prd -- \
@@ -179,6 +204,12 @@ Public URL is served via Cloudflare Tunnel (`cloudflared.service`).
   `BuildToolsError`s render as Markdown `isError: true` content.
 - **Mutations require confirmation** — every write goes through
   `requiresConfirmation()`. Don't bypass.
+- **`idempotency_key` writes bracket their work** — a mutation that accepts
+  the arg calls `checkIdempotency()` before doing anything and
+  `storeIdempotencyResult()` after (`src/idempotency/helpers.ts`). Only the
+  *execute* call (the one carrying `confirmation_id`) caches, and only on
+  success — failures stay uncached so the next attempt gets a fresh shot at
+  BT. Same key + different args is an error, not a cache hit.
 - **Permission tags on every tool** — `read`, `write:<domain>`, `delete`,
   or `admin`. The dispatcher filters tools/list and enforces tools/call
   based on the user's role when OAuth is enabled.
@@ -244,8 +275,21 @@ Implementation notes:
 - **`mcp_oauth_codes` 60s TTL + `sealState` 90s TTL** — both are tight by
   design. If a user reports "sign-in failed" after a slow MFA, those are
   the suspects.
+- **Two different MySQL clients** — `src/db/MossDb.ts` is the Phase 8 read
+  fast path (attached as `api.db`); `src/client/MysqlReadReplica.ts` is an
+  older, narrower helper that `BuildToolsAPI` lazy-imports for selection
+  dates the BT HTML grid doesn't render. They hit the same replica but share
+  no pool. New DB reads belong in `MossDb`.
+- **Stale nested `buildtools-mcp/` tree pollutes the test run** — the repo
+  root contains a tracked gitlink (`160000`, no `.gitmodules`) holding an old
+  partial copy of `src/`, last touched at PR #67. Its 12 test files are
+  outside the coverage `include` but *inside* vitest's default discovery
+  glob, so `npm test` runs both copies (e.g. `Confirmation.test.ts` executes
+  twice, once against stale source). Don't edit anything under it — edits
+  there do nothing. If a test fails at a path starting with `buildtools-mcp/`,
+  that's the stale copy, not your change.
 
-## Status of MOS-328 (Phase 8 of 9 done as of this writing)
+## Status of MOS-328 (all 9 phases shipped; auth hardening done)
 
 | Phase | Status | PR |
 |---|---|---|

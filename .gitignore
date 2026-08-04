@@ -17,3 +17,8 @@ smoke-*.ts
 smoke*.ts
 probe-*.ts
 run-*.ts
+
+# A nested clone of this repo at the root was once committed as a gitlink and
+# went stale; vitest discovered its duplicate tests and ran them against dead
+# source. Anchored to the root so it only guards against that recurrence.
+/buildtools-mcp/
