@@ -1,108 +1,149 @@
 /**
- * Write outcomes for the operations-management interface (MOS-747).
+ * Write outcomes — the NEUTRAL vocabulary of the operations-management
+ * interface (MOS-747).
+ *
+ * This module has ZERO vendor imports by design. It states what a write
+ * outcome *is*; how to derive one from a particular vendor's wire format is
+ * adapter knowledge and lives in `adapters/<vendor>/classify.ts`. (The repo's
+ * agnostic-integration rule: vendor types never appear in shared types.)
  *
  * THE PROBLEM THIS SOLVES
  *
  * Every write on `BuildToolsAPI` returns `{ success: boolean }`. That type
  * cannot express "I don't know", and for a remote write "I don't know" is a
- * real, common, and dangerous state:
- *
- *   - `post()` parses the response body as JSON and DISCARDS the HTTP status
- *     (`BuildToolsAPI.post`). A 500 whose body happens to be JSON therefore
- *     parses cleanly, fails the `r === 1` check, and is reported as a clean
- *     failure — even though a 500 can be thrown *after* the row was written.
- *   - When the body does NOT parse (BuildTools drifts — it is a
- *     reverse-engineered app and its templates change), `post()` returns a
- *     `{ status, body }` fallback. That object also fails `r === 1`, so a
- *     drifted response is likewise reported as a clean failure.
- *   - A network error or timeout throws. At least one call site caught that
- *     and converted it into `{ success: false }` too.
- *
- * In all three cases the write MAY HAVE LANDED. Reporting them as failure is
- * how a create that actually succeeded becomes a duplicate on retry — the
- * precise defect MOS-747 exists to stop.
+ * real, common, and dangerous state — a create whose result we failed to read
+ * may well have landed, and a caller who reads that as failure will retry and
+ * duplicate it.
  *
  * THE MODEL
  *
- * Three states, and the distinction that matters is the second vs the third:
- *
- *   ok         — upstream returned a structured success. It landed.
+ *   ok         — upstream returned a structured success. The call was applied.
  *   failed     — upstream returned a structured REJECTION. Proof it did not
- *                land. Safe to retry as-is.
- *   ambiguous  — we never got a structured verdict. It may or may not have
+ *                land. Safe to retry as-is once the input is fixed.
+ *   ambiguous  — no structured verdict was obtained. It may or may not have
  *                landed. NOT safe to retry blindly; reconcile first.
  *
- * `ambiguous` is deliberately the fallback for anything unrecognised. When in
- * doubt the answer is "I don't know", never "it failed" — a false `failed`
- * causes duplicates, whereas a false `ambiguous` only costs a reconcile probe.
+ * `ambiguous` is deliberately the fallback for anything unrecognised. A false
+ * `failed` costs duplicate records; a false `ambiguous` costs one reconcile
+ * probe. The asymmetry decides every ambiguous case in this file.
  *
- * This mirrors the contract Cambium's `ConstructionPmAdapter` already states
- * ("Throwing = the outcome is AMBIGUOUS ... never assume a throw means 'not
- * created'"), expressed as a value instead of a thrown error so it survives
- * being serialised across the HTTP gateway hop.
+ * WHAT `ok` MEANS FOR BULK WRITES
+ *
+ * `ok` means THE CALL WAS APPLIED — not "every item succeeded". Several
+ * BuildTools endpoints (`deleteBudgetItem`, `deleteSelection`,
+ * `deleteFinancialStatement`, batch PO transitions) return succeeded/failed
+ * counts, and `{r:1, s:0, f:0}` is documented upstream as a silent no-op. Those
+ * methods therefore carry their counts in `T` (see `BulkWriteData`) rather than
+ * collapsing partial application into a boolean. Fixing this reading now, before
+ * ~20 methods each pick one implicitly, is deliberate.
+ *
+ * INTERACTION WITH THE IDEMPOTENCY CACHE (decide before wiring writes)
+ *
+ * `storeIdempotencyResult` currently refuses to cache when `isError === true`
+ * (`src/idempotency/helpers.ts:203`), on the documented rationale that failures
+ * should get a fresh attempt. That is right for `failed` and WRONG for
+ * `ambiguous`: if an ambiguous write is rendered as an error it will not be
+ * cached, so a retry carrying the same `idempotency_key` re-issues the write and
+ * produces the duplicate this whole model exists to prevent.
+ *
+ * The rule when writes are wired: cache `ok` AND `ambiguous`; skip only
+ * `failed`. An ambiguous replay must return "unknown — reconcile first" rather
+ * than re-firing.
+ *
+ * WHY A VALUE AND NOT A THROW
+ *
+ * Cambium's `ConstructionPmAdapter` expresses the same distinction by throwing
+ * (`BuildToolsAmbiguousError`). That works in-process but cannot cross the HTTP
+ * gateway MOS-747 adds: an exception flattens into an undifferentiated 500,
+ * losing exactly the two bits that matter (ambiguous-vs-failed, and the probe).
+ * A value serialises. The mapping back to Cambium's convention is total —
+ * ok → return, failed → throw Error, ambiguous → throw BuildToolsAmbiguousError.
  */
 
-import { BuildToolsNetworkError } from "../client/errors.js";
-
 // ---------------------------------------------------------------------------
-// The outcome type
+// Outcome types
 // ---------------------------------------------------------------------------
 
-/** Upstream gave a structured success. The write landed. */
+/** Upstream gave a structured success. The call was applied. */
 export interface WriteOk<T> {
   status: "ok";
   data: T;
 }
 
 /**
+ * A bounded shape for upstream rejection detail.
+ *
+ * Deliberately NOT `unknown`. These outcomes are rendered into MCP tool output
+ * and serialised across the HTTP gateway to machine callers, so `details` is a
+ * data-egress path. Typing it loosely invites a call site to write
+ * `readRejection: (p) => p` and flow an entire upstream payload — which for a
+ * construction-PM SaaS can echo other clients' names, addresses, and financial
+ * figures — across that boundary. The narrow type makes the careless version a
+ * compile error rather than silent over-collection.
+ */
+export type RejectionDetail = string | string[] | { message: string };
+
+/**
  * Upstream gave a structured rejection — validation errors, a business-rule
- * refusal, an explicit negative result code. This is PROOF the write did not
- * land, so a caller may retry (after fixing the input) without reconciling.
+ * refusal, an explicit negative result code. PROOF the write did not land, so a
+ * caller may retry (after fixing the input) without reconciling.
  */
 export interface WriteFailed {
   status: "failed";
   reason: string;
-  /** The structured error payload from upstream, when there was one. */
-  details?: unknown;
+  details?: RejectionDetail;
 }
 
 /**
- * We did not get a structured verdict. The write MAY have landed.
+ * How a caller mechanically determines whether an ambiguous write landed.
+ *
+ * Structured, not prose: a remote caller receiving this across the gateway must
+ * be able to act on it without parsing English. Mirrors the shape of Cambium's
+ * `findByMarker(marker)` probe.
+ */
+export type ReconcileProbe =
+  | { kind: "marker"; marker: string }
+  | { kind: "search"; resource: string; query: string };
+
+/**
+ * No structured verdict was obtained. The write MAY have landed.
  *
  * A caller MUST NOT retry blindly. It must first reconcile — determine whether
- * the write is present upstream — and only then decide to retry or not.
+ * the write is present upstream — and only then decide whether to retry.
  */
 export interface WriteAmbiguous {
   status: "ambiguous";
   reason: string;
-  /**
-   * How to find out whether it landed. Carries the reconcile hint (a marker,
-   * a search term, an idempotency key) so the ambiguity is actionable rather
-   * than merely alarming. Mirrors Cambium's `findByMarker` probe.
-   */
-  probe?: string;
+  /** How to find out whether it landed. Makes the ambiguity actionable. */
+  probe?: ReconcileProbe;
 }
 
 export type WriteOutcome<T> = WriteOk<T> | WriteFailed | WriteAmbiguous;
 
+/** Payload shape for writes that apply to many rows at once. */
+export interface BulkWriteData {
+  succeeded: number;
+  failed: number;
+}
+
 // ---------------------------------------------------------------------------
-// Constructors — terse, so call sites read as prose
+// Constructors
 // ---------------------------------------------------------------------------
 
 export function ok<T>(data: T): WriteOk<T> {
   return { status: "ok", data };
 }
 
-export function failed(reason: string, details?: unknown): WriteFailed {
+export function failed(reason: string, details?: RejectionDetail): WriteFailed {
   return details === undefined
-    ? { status: "failed", reason }
-    : { status: "failed", reason, details };
+    ? { status: "failed", reason: redactUrls(reason) }
+    : { status: "failed", reason: redactUrls(reason), details };
 }
 
-export function ambiguous(reason: string, probe?: string): WriteAmbiguous {
+export function ambiguous(reason: string, probe?: ReconcileProbe): WriteAmbiguous {
   return probe === undefined
-    ? { status: "ambiguous", reason }
-    : { status: "ambiguous", reason, probe };
+    ? { status: "ambiguous", reason: redactUrls(reason) }
+    : { status: "ambiguous", reason: redactUrls(reason), probe };
 }
 
 // ---------------------------------------------------------------------------
@@ -123,160 +164,35 @@ export function needsReconcile<T>(o: WriteOutcome<T>): o is WriteAmbiguous {
   return o.status === "ambiguous";
 }
 
+/**
+ * True when this outcome may be cached against an idempotency key.
+ *
+ * `ok` and `ambiguous` both must be cached; only `failed` is replayable from
+ * scratch. See the idempotency note in this file's header — getting this
+ * backwards reopens the duplicate-write hole.
+ */
+export function isCacheable<T>(o: WriteOutcome<T>): boolean {
+  return o.status !== "failed";
+}
+
 // ---------------------------------------------------------------------------
-// Classification
+// Egress sanitisation
 // ---------------------------------------------------------------------------
 
 /**
- * A write response with the HTTP status PRESERVED.
+ * Strip query strings from any URL appearing in a human-readable reason.
  *
- * `BuildToolsAPI.post()` throws the status away whenever the body parses,
- * which is exactly what makes a JSON-bodied 500 indistinguishable from a
- * business rejection. Classification needs the status, so writes must hand us
- * this shape rather than `post()`'s return value.
- */
-export interface RawWriteResponse {
-  /** HTTP status code. */
-  status: number;
-  /** Raw response body, for diagnostics when parsing failed. */
-  body: string;
-  /**
-   * The parsed body, or `undefined` when it did not parse as JSON.
-   * `undefined` means BuildTools drifted — which is ambiguous, not failure.
-   */
-  json?: unknown;
-}
-
-/** How a caller reads success and rejection out of a parsed body. */
-export interface ClassifySpec<T> {
-  /**
-   * Return the success value when the payload represents a structured
-   * success, otherwise `undefined`. For most BuildTools endpoints this is
-   * `p.r === 1`.
-   */
-  readSuccess: (payload: Record<string, unknown>) => T | undefined;
-  /**
-   * Return the structured rejection detail when the payload represents an
-   * explicit upstream refusal, otherwise `undefined`.
-   *
-   * Returning `undefined` here means "no structured verdict either way",
-   * which classifies as AMBIGUOUS — not as failure. Only return a value when
-   * upstream actually told us it refused.
-   */
-  readRejection?: (payload: Record<string, unknown>) => unknown | undefined;
-  /** Reconcile hint propagated onto an ambiguous outcome. */
-  probe?: string;
-}
-
-/**
- * Default rejection reader for BuildTools' save endpoints, which signal
- * refusal with an `e` or `errors` field alongside a non-1 result code.
- */
-export function readBuildToolsRejection(
-  payload: Record<string, unknown>,
-): unknown | undefined {
-  const detail = payload.e ?? payload.errors ?? payload.message;
-  if (detail !== undefined && detail !== null) return detail;
-  // An explicit non-1 result code is itself a structured verdict: the save
-  // handler ran and reported a negative. That is proof it did not land.
-  if (typeof payload.r === "number" && payload.r !== 1) return { r: payload.r };
-  return undefined;
-}
-
-/**
- * Classify a raw write response into an outcome.
+ * Reasons are built partly from upstream error messages, and BuildTools'
+ * network errors embed the request URL verbatim (`BuildToolsAPI.ts:566`,
+ * `:1219`). The download path follows BuildTools' 302s to short-lived presigned
+ * S3 URLs (`BuildToolsAPI.ts:1164`) whose query strings carry
+ * `X-Amz-Signature` / `X-Amz-Credential`. Outcomes are destined for MCP output
+ * and the HTTP gateway, so this is the last place that can sanitise before the
+ * value crosses a trust boundary.
  *
- * Order matters — status is checked BEFORE the body, because a non-2xx is
- * ambiguous no matter how parseable its body is.
+ * The path is kept — that is the part with diagnostic value; only the query is
+ * dropped.
  */
-export function classifyWriteResponse<T>(
-  res: RawWriteResponse,
-  spec: ClassifySpec<T>,
-): WriteOutcome<T> {
-  // Non-2xx: the server may have applied the write before failing. Unknowable
-  // from here, regardless of what the body says.
-  if (res.status < 200 || res.status >= 300) {
-    return ambiguous(
-      `upstream returned HTTP ${res.status}; the write may or may not have been applied`,
-      spec.probe,
-    );
-  }
-
-  // 2xx but the body did not parse — BuildTools drifted. A drifted success
-  // page and a drifted error page are indistinguishable to us.
-  if (res.json === undefined || res.json === null) {
-    return ambiguous(
-      "upstream response was not parseable JSON (BuildTools template drift); the write may or may not have been applied",
-      spec.probe,
-    );
-  }
-
-  if (typeof res.json !== "object") {
-    return ambiguous(
-      `upstream returned a non-object body (${typeof res.json}); the write may or may not have been applied`,
-      spec.probe,
-    );
-  }
-
-  const payload = res.json as Record<string, unknown>;
-
-  const success = spec.readSuccess(payload);
-  if (success !== undefined) return ok(success);
-
-  const rejection = (spec.readRejection ?? readBuildToolsRejection)(payload);
-  if (rejection !== undefined) {
-    return failed(describeRejection(rejection), rejection);
-  }
-
-  // Parsed, 2xx, but recognisable as neither success nor rejection. We have no
-  // verdict — treat as unknown rather than guessing failure.
-  return ambiguous(
-    "upstream returned no recognisable success or rejection signal; the write may or may not have been applied",
-    spec.probe,
-  );
-}
-
-/**
- * Classify a thrown error from a write.
- *
- * A network error or timeout is ALWAYS ambiguous: the request may have reached
- * BuildTools and been applied before the connection died. This is the case
- * that was previously swallowed into `{ success: false }`.
- *
- * Re-thrown for anything that is not a recognised transport failure — a bug in
- * our own code should surface as a bug, not be laundered into an outcome.
- */
-export function classifyWriteError(err: unknown, probe?: string): WriteAmbiguous {
-  if (err instanceof BuildToolsNetworkError) {
-    return ambiguous(
-      `network failure during write (${err.message}); the write may or may not have been applied`,
-      probe,
-    );
-  }
-  if (isAbortLike(err)) {
-    return ambiguous(
-      "write timed out; the write may or may not have been applied",
-      probe,
-    );
-  }
-  throw err;
-}
-
-function isAbortLike(err: unknown): boolean {
-  if (typeof err !== "object" || err === null) return false;
-  const name = (err as { name?: unknown }).name;
-  return name === "AbortError" || name === "TimeoutError";
-}
-
-function describeRejection(detail: unknown): string {
-  if (typeof detail === "string") return detail;
-  if (Array.isArray(detail)) {
-    const parts = detail.filter((d) => typeof d === "string");
-    if (parts.length > 0) return parts.join("; ");
-  }
-  if (typeof detail === "object" && detail !== null) {
-    const msg = (detail as { message?: unknown }).message;
-    if (typeof msg === "string") return msg;
-  }
-  return "upstream rejected the write";
+export function redactUrls(text: string): string {
+  return text.replace(/(https?:\/\/[^\s?]+)\?[^\s]*/gi, "$1?[redacted]");
 }
