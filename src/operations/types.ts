@@ -60,8 +60,13 @@ export interface ListQuery {
    * Values are the provider's status codes, which callers already hold.
    */
   status?: string | number | Array<string | number>;
-  /** Filter users by role. Only meaningful for `getUsers`. */
-  role?: string;
+  /**
+   * Filter companies by type (Vendor / Subcontractor / Customer).
+   *
+   * Separate from `status`: BuildTools keeps company type in its own grid
+   * column, and conflating the two would filter the wrong one.
+   */
+  companyType?: string | string[];
 }
 
 /** A budget line as the operations layer models it. */

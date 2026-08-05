@@ -94,43 +94,43 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
   // --- list reads ---------------------------------------------------------
 
   async getProjects<T = unknown>(query: ListQuery = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getProjects<T>(toDatatableParams(query)));
+    return normalizeEnvelope(await this.reader.getProjects<T>(toDatatableParams("projects", query)));
   }
   async getCompanies<T = unknown>(query: ListQuery = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getCompanies<T>(toDatatableParams(query)));
+    return normalizeEnvelope(await this.reader.getCompanies<T>(toDatatableParams("companies", query)));
   }
   async getPurchaseOrders<T = unknown>(
     query: ListQuery = {},
   ): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getPurchaseOrders<T>(toDatatableParams(query)));
+    return normalizeEnvelope(await this.reader.getPurchaseOrders<T>(toDatatableParams("purchaseOrders", query)));
   }
   async getTasks<T = unknown>(query: ListQuery = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getTasks<T>(toDatatableParams(query)));
+    return normalizeEnvelope(await this.reader.getTasks<T>(toDatatableParams("tasks", query)));
   }
   async getRFIs<T = unknown>(query: ListQuery = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getRFIs<T>(toDatatableParams(query)));
+    return normalizeEnvelope(await this.reader.getRFIs<T>(toDatatableParams("rfis", query)));
   }
   async getServices<T = unknown>(query: ListQuery = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getServices<T>(toDatatableParams(query)));
+    return normalizeEnvelope(await this.reader.getServices<T>(toDatatableParams("services", query)));
   }
   async getUsers<T = unknown>(query: ListQuery = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getUsers<T>(toDatatableParams(query)));
+    return normalizeEnvelope(await this.reader.getUsers<T>(toDatatableParams("users", query)));
   }
   async getCertificates<T = unknown>(
     query: ListQuery = {},
   ): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getCertificates<T>(toDatatableParams(query)));
+    return normalizeEnvelope(await this.reader.getCertificates<T>(toDatatableParams("certificates", query)));
   }
   async getDailyLogs<T = unknown>(query: ListQuery = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getDailyLogs<T>(toDatatableParams(query)));
+    return normalizeEnvelope(await this.reader.getDailyLogs<T>(toDatatableParams("dailyLogs", query)));
   }
   async getWeeklyReports<T = unknown>(
     query: ListQuery = {},
   ): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getWeeklyReports<T>(toDatatableParams(query)));
+    return normalizeEnvelope(await this.reader.getWeeklyReports<T>(toDatatableParams("weeklyReports", query)));
   }
   async getWorkDays<T = unknown>(query: ListQuery = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getWorkDays<T>(toDatatableParams(query)));
+    return normalizeEnvelope(await this.reader.getWorkDays<T>(toDatatableParams("workDays", query)));
   }
   async searchCertificates<T = unknown>(
     query: string,
