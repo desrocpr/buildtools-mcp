@@ -38,8 +38,36 @@
 // Neutral parameter + row types
 // ---------------------------------------------------------------------------
 
-/** Filter/paging parameters for a list read. Provider-agnostic key/values. */
-export type ListParams = Record<string, string | number | undefined>;
+/**
+ * A list read, described by FACET rather than by a vendor's wire format.
+ *
+ * The first cut of this type was BuildTools' `DatatableParams` renamed, so
+ * callers passed jQuery-DataTables keys (`search[value]`,
+ * `columns[1][search][value]`) straight through a "neutral" interface. Naming
+ * the facet instead is what lets a second vendor's adapter implement this
+ * without reverse-engineering a positional column index — see
+ * `adapters/buildtools/query.ts` for the translation.
+ */
+export interface ListQuery {
+  /** Free-text search across the resource. */
+  search?: string;
+  /** Maximum rows to return. */
+  limit?: number;
+  /** Rows to skip, for paging. */
+  offset?: number;
+  /**
+   * Filter on the resource's primary status/type facet. An array is an OR.
+   * Values are the provider's status codes, which callers already hold.
+   */
+  status?: string | number | Array<string | number>;
+  /**
+   * Filter companies by type (Vendor / Subcontractor / Customer).
+   *
+   * Separate from `status`: BuildTools keeps company type in its own grid
+   * column, and conflating the two would filter the wrong one.
+   */
+  companyType?: string | string[];
+}
 
 /** A budget line as the operations layer models it. */
 export interface BudgetItem {
@@ -124,6 +152,52 @@ export interface BudgetCategoryRef {
   name: string;
 }
 
+/** A file attached to a selection option. */
+export interface SelectionOptionFile {
+  id: number;
+  name: string;
+  size: number;
+  type: string;
+  url: string;
+  isImage: boolean;
+}
+
+/** One option a client can choose within a selection. */
+export interface SelectionOption {
+  id: number;
+  selectionId: number;
+  title: string;
+  description: string;
+  model: string;
+  url: string;
+  price: number | null;
+  companyId: number | null;
+  companyName: string;
+  selected: boolean;
+  files: SelectionOptionFile[];
+  subitems: Array<Record<string, unknown>>;
+}
+
+export interface SelectionDetail {
+  items: SelectionOption[];
+}
+
+/**
+ * A change order with approved value not yet reflected in billing.
+ *
+ * The extra columns are grid-derived and vary, hence the index signature; the
+ * named fields are the ones consumers actually render.
+ */
+export interface UnbilledChangeOrderRow extends Record<string, unknown> {
+  total_value: number;
+}
+
+/** Filters for the unbilled-change-order sweep. */
+export interface UnbilledChangeOrderFilters {
+  min_amount?: number;
+  older_than_days?: number;
+}
+
 /**
  * A purchase order as the operations layer models it.
  *
@@ -191,17 +265,17 @@ export interface OperationsManagementApi {
   readonly provider: string;
 
   // --- list reads (datatable-shaped) ------------------------------------
-  getProjects<T = unknown>(options?: ListParams): Promise<T | null>;
-  getCompanies<T = unknown>(options?: ListParams): Promise<T | null>;
-  getPurchaseOrders<T = unknown>(options?: ListParams): Promise<T | null>;
-  getTasks<T = unknown>(options?: ListParams): Promise<T | null>;
-  getRFIs<T = unknown>(options?: ListParams): Promise<T | null>;
-  getServices<T = unknown>(options?: ListParams): Promise<T | null>;
-  getUsers<T = unknown>(options?: ListParams): Promise<T | null>;
-  getCertificates<T = unknown>(options?: ListParams): Promise<T | null>;
-  getDailyLogs<T = unknown>(options?: ListParams): Promise<T | null>;
-  getWeeklyReports<T = unknown>(options?: ListParams): Promise<T | null>;
-  getWorkDays<T = unknown>(options?: ListParams): Promise<T | null>;
+  getProjects<T = unknown>(query?: ListQuery): Promise<T | null>;
+  getCompanies<T = unknown>(query?: ListQuery): Promise<T | null>;
+  getPurchaseOrders<T = unknown>(query?: ListQuery): Promise<T | null>;
+  getTasks<T = unknown>(query?: ListQuery): Promise<T | null>;
+  getRFIs<T = unknown>(query?: ListQuery): Promise<T | null>;
+  getServices<T = unknown>(query?: ListQuery): Promise<T | null>;
+  getUsers<T = unknown>(query?: ListQuery): Promise<T | null>;
+  getCertificates<T = unknown>(query?: ListQuery): Promise<T | null>;
+  getDailyLogs<T = unknown>(query?: ListQuery): Promise<T | null>;
+  getWeeklyReports<T = unknown>(query?: ListQuery): Promise<T | null>;
+  getWorkDays<T = unknown>(query?: ListQuery): Promise<T | null>;
   searchCertificates<T = unknown>(query: string, limit?: number): Promise<T | null>;
 
   // --- single-record reads ----------------------------------------------
@@ -235,13 +309,12 @@ export interface OperationsManagementApi {
   getSelectionDetail(
     selectionId: string | number,
     projectId: string | number,
-  ): Promise<unknown>;
+  ): Promise<SelectionDetail | null>;
 
   // --- portfolio reads ---------------------------------------------------
-  findUnbilledChangeOrders(filters: {
-    min_amount?: number;
-    [key: string]: unknown;
-  }): Promise<unknown>;
+  findUnbilledChangeOrders(
+    filters?: UnbilledChangeOrderFilters,
+  ): Promise<UnbilledChangeOrderRow[]>;
 }
 
 /** Per-tenant selection config. Values are config names, never secrets. */

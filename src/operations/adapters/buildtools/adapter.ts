@@ -16,16 +16,20 @@
 
 import type { BuildToolsAPI } from "../../../client/BuildToolsAPI.js";
 import { normalizeEnvelope, normalizeMaybeRow } from "../../normalize.js";
+import { toDatatableParams } from "./query.js";
 import type {
   AllowanceItem,
   BudgetCategoryRef,
   BudgetView,
-  ListParams,
+  ListQuery,
   OperationsManagementApi,
   PurchaseOrderView,
   ScheduleView,
+  SelectionDetail,
   SelectionsView,
   StatementsView,
+  UnbilledChangeOrderFilters,
+  UnbilledChangeOrderRow,
 } from "../../types.js";
 
 /**
@@ -89,44 +93,44 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
 
   // --- list reads ---------------------------------------------------------
 
-  async getProjects<T = unknown>(options: ListParams = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getProjects<T>(options));
+  async getProjects<T = unknown>(query: ListQuery = {}): Promise<T | null> {
+    return normalizeEnvelope(await this.reader.getProjects<T>(toDatatableParams("projects", query)));
   }
-  async getCompanies<T = unknown>(options: ListParams = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getCompanies<T>(options));
+  async getCompanies<T = unknown>(query: ListQuery = {}): Promise<T | null> {
+    return normalizeEnvelope(await this.reader.getCompanies<T>(toDatatableParams("companies", query)));
   }
   async getPurchaseOrders<T = unknown>(
-    options: ListParams = {},
+    query: ListQuery = {},
   ): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getPurchaseOrders<T>(options));
+    return normalizeEnvelope(await this.reader.getPurchaseOrders<T>(toDatatableParams("purchaseOrders", query)));
   }
-  async getTasks<T = unknown>(options: ListParams = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getTasks<T>(options));
+  async getTasks<T = unknown>(query: ListQuery = {}): Promise<T | null> {
+    return normalizeEnvelope(await this.reader.getTasks<T>(toDatatableParams("tasks", query)));
   }
-  async getRFIs<T = unknown>(options: ListParams = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getRFIs<T>(options));
+  async getRFIs<T = unknown>(query: ListQuery = {}): Promise<T | null> {
+    return normalizeEnvelope(await this.reader.getRFIs<T>(toDatatableParams("rfis", query)));
   }
-  async getServices<T = unknown>(options: ListParams = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getServices<T>(options));
+  async getServices<T = unknown>(query: ListQuery = {}): Promise<T | null> {
+    return normalizeEnvelope(await this.reader.getServices<T>(toDatatableParams("services", query)));
   }
-  async getUsers<T = unknown>(options: ListParams = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getUsers<T>(options));
+  async getUsers<T = unknown>(query: ListQuery = {}): Promise<T | null> {
+    return normalizeEnvelope(await this.reader.getUsers<T>(toDatatableParams("users", query)));
   }
   async getCertificates<T = unknown>(
-    options: ListParams = {},
+    query: ListQuery = {},
   ): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getCertificates<T>(options));
+    return normalizeEnvelope(await this.reader.getCertificates<T>(toDatatableParams("certificates", query)));
   }
-  async getDailyLogs<T = unknown>(options: ListParams = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getDailyLogs<T>(options));
+  async getDailyLogs<T = unknown>(query: ListQuery = {}): Promise<T | null> {
+    return normalizeEnvelope(await this.reader.getDailyLogs<T>(toDatatableParams("dailyLogs", query)));
   }
   async getWeeklyReports<T = unknown>(
-    options: ListParams = {},
+    query: ListQuery = {},
   ): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getWeeklyReports<T>(options));
+    return normalizeEnvelope(await this.reader.getWeeklyReports<T>(toDatatableParams("weeklyReports", query)));
   }
-  async getWorkDays<T = unknown>(options: ListParams = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getWorkDays<T>(options));
+  async getWorkDays<T = unknown>(query: ListQuery = {}): Promise<T | null> {
+    return normalizeEnvelope(await this.reader.getWorkDays<T>(toDatatableParams("workDays", query)));
   }
   async searchCertificates<T = unknown>(
     query: string,
@@ -237,16 +241,15 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
   async getSelectionDetail(
     selectionId: string | number,
     projectId: string | number,
-  ): Promise<unknown> {
+  ): Promise<SelectionDetail | null> {
     return this.reader.getSelectionDetail(selectionId, projectId);
   }
 
   // --- portfolio reads -----------------------------------------------------
 
-  async findUnbilledChangeOrders(filters: {
-    min_amount?: number;
-    [key: string]: unknown;
-  }): Promise<unknown> {
+  async findUnbilledChangeOrders(
+    filters: UnbilledChangeOrderFilters = {},
+  ): Promise<UnbilledChangeOrderRow[]> {
     return this.reader.findUnbilledChangeOrders(filters);
   }
 }
