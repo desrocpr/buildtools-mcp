@@ -137,7 +137,19 @@ export function ok<T>(data: T): WriteOk<T> {
 export function failed(reason: string, details?: RejectionDetail): WriteFailed {
   return details === undefined
     ? { status: "failed", reason: redactUrls(reason) }
-    : { status: "failed", reason: redactUrls(reason), details };
+    : {
+        status: "failed",
+        reason: redactUrls(reason),
+        // `details` is derived from the same upstream string as `reason`, so
+        // redacting only one leaks a presigned URL through the other.
+        details: redactDetail(details),
+      };
+}
+
+function redactDetail(detail: RejectionDetail): RejectionDetail {
+  if (typeof detail === "string") return redactUrls(detail);
+  if (Array.isArray(detail)) return detail.map(redactUrls);
+  return { message: redactUrls(detail.message) };
 }
 
 export function ambiguous(reason: string, probe?: ReconcileProbe): WriteAmbiguous {

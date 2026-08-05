@@ -46,6 +46,22 @@ describe("redactUrls", () => {
     expect(ambiguous(`boom ${url}`).reason).not.toContain("sekrit");
     expect(failed(`boom ${url}`).reason).not.toContain("sekrit");
   });
+
+  it("redacts `details` too, not just `reason`", () => {
+    // Both are derived from the same upstream string, so redacting one and
+    // forwarding the other leaks the credential anyway.
+    const url = "https://moss-bt.s3.amazonaws.com/f.pdf?X-Amz-Signature=leakme";
+
+    expect(JSON.stringify(failed("rejected", `see ${url}`))).not.toContain(
+      "leakme",
+    );
+    expect(JSON.stringify(failed("rejected", [`see ${url}`]))).not.toContain(
+      "leakme",
+    );
+    expect(
+      JSON.stringify(failed("rejected", { message: `see ${url}` })),
+    ).not.toContain("leakme");
+  });
 });
 
 describe("narrowing helpers", () => {
