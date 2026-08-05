@@ -84,6 +84,35 @@ function idFromRowMarker(marker: unknown): string | number | undefined {
  * return `T | null` where null means "not found". Both must survive untouched,
  * so this only acts on a recognisable `{ data: [...] }`.
  */
+/**
+ * Normalise a single-record read result.
+ *
+ * Single-record reads do NOT return an envelope. `getProject`, `getCompany`,
+ * `getCustomer`, and `getChangeOrder` scan a datatable and return the matched
+ * ROW directly (`BuildToolsAPI.getProject:948`, `getCompany:1065`), so
+ * `normalizeEnvelope` would pass them through untouched.
+ *
+ * The companies grid is the sharp case: it carries no top-level `id` at all —
+ * `getCompany` matches on `DT_RowId === row_${id}` precisely because that is the
+ * row's only identity. Without this, the adapter would hand back an object with
+ * no `id` while claiming otherwise, and the per-tool fallbacks in
+ * `tools/companies.ts` / `tools/customers.ts` could not be safely removed.
+ *
+ * `null` means "not found" and passes through unchanged.
+ */
+export function normalizeMaybeRow<T>(value: T): T {
+  if (value === null || value === undefined || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) return value;
+  // A single-record read should never be an envelope, but tolerate one rather
+  // than silently mangling `data` into a row-shaped object.
+  if (Array.isArray((value as { data?: unknown }).data)) {
+    return normalizeEnvelope(value);
+  }
+  return normalizeRow(value as Record<string, unknown>) as T;
+}
+
 export function normalizeEnvelope<T>(value: T): T {
   if (value === null || typeof value !== "object") return value;
 

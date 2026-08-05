@@ -115,6 +115,38 @@ describe("id normalisation across the boundary", () => {
     expect(result.data[0]).toEqual({ id: 12, name: "x" });
   });
 
+  it("normalises single-record reads, which return a BARE row not an envelope", async () => {
+    // getProject/getCompany/getCustomer/getChangeOrder scan a datatable and
+    // return the matched row directly — there is no {data: [...]} wrapper for
+    // envelope normalisation to latch onto. The companies grid is the sharp
+    // case: it carries NO top-level id, so the row's only identity is DT_RowId
+    // (BuildToolsAPI.getCompany matches on `row_${id}` for exactly that reason).
+    const api = {
+      async getCompany() {
+        return { DT_RowId: "row_977", name: "Acme Supply", type_name: "Vendor" };
+      },
+      db: null,
+    } as unknown as BuildToolsAPI;
+    const adapter = new BuildToolsOperationsAdapter(api);
+
+    const company = (await adapter.getCompany(977)) as Record<string, unknown>;
+
+    expect(company.id).toBe(977);
+    expect(company).not.toHaveProperty("DT_RowId");
+  });
+
+  it("returns null from a single-record read rather than an empty row", async () => {
+    // null means "not found" and must survive normalisation untouched.
+    const api = {
+      async getProject() {
+        return null;
+      },
+      db: null,
+    } as unknown as BuildToolsAPI;
+
+    expect(await new BuildToolsOperationsAdapter(api).getProject(1)).toBeNull();
+  });
+
   it("leaves bespoke, non-envelope shapes alone", async () => {
     const adapter = adapterOver({ http: fakeBackend("http", []) });
 

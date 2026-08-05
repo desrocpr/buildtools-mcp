@@ -15,7 +15,7 @@
  */
 
 import type { BuildToolsAPI } from "../../../client/BuildToolsAPI.js";
-import { normalizeEnvelope } from "../../normalize.js";
+import { normalizeEnvelope, normalizeMaybeRow } from "../../normalize.js";
 import type {
   AllowanceItem,
   BudgetCategoryRef,
@@ -136,20 +136,20 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
   // --- single-record reads -------------------------------------------------
 
   async getProject<T = unknown>(projectId: string | number): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getProject<T>(projectId));
+    return normalizeMaybeRow(await this.reader.getProject<T>(projectId));
   }
   async getCompany<T = unknown>(companyId: string | number): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getCompany<T>(companyId));
+    return normalizeMaybeRow(await this.reader.getCompany<T>(companyId));
   }
   async getCustomer<T = unknown>(
     customerId: string | number,
   ): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getCustomer<T>(customerId));
+    return normalizeMaybeRow(await this.reader.getCustomer<T>(customerId));
   }
   async getChangeOrder<T = unknown>(
     changeOrderId: string | number,
   ): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getChangeOrder<T>(changeOrderId));
+    return normalizeMaybeRow(await this.reader.getChangeOrder<T>(changeOrderId));
   }
   async getPurchaseOrder(
     purchaseOrderId: string | number,
@@ -159,7 +159,7 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
   async getFinancialStatement<T = unknown>(
     projectId: string | number,
   ): Promise<T | null> {
-    return normalizeEnvelope(
+    return normalizeMaybeRow(
       await this.reader.getFinancialStatement<T>(projectId),
     );
   }
