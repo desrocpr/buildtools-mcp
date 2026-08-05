@@ -36,7 +36,7 @@ import type {
  * on either side becomes a compile error here rather than a runtime surprise in
  * a tool handler.
  */
-type ReadBackend = Pick<
+export type ReadBackend = Pick<
   BuildToolsAPI,
   | "getProjects"
   | "getProject"
@@ -80,7 +80,11 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
    * transport at startup and may legitimately be null in local dev and tests.
    */
   private get reader(): ReadBackend {
-    return (this.api.db ?? this.api) as unknown as ReadBackend;
+    // No `as unknown as` hop: MossDb is checked against ReadBackend by the
+    // assertion below, so this narrowing is a real structural check rather than
+    // an assertion that erases one. An earlier version cast through `unknown`
+    // while its own comment claimed to be enforcing parity — it was not.
+    return this.api.db ?? this.api;
   }
 
   // --- list reads ---------------------------------------------------------
@@ -182,10 +186,41 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
   ): Promise<StatementsView> {
     return this.reader.getFinancialStatements(projectId);
   }
+  /**
+   * Read the schedule, priming the HTTP session first when necessary.
+   *
+   * BuildTools' `/schedule/*\/data` only returns the full task list AFTER
+   * `/budget?PR[]=<id>` has been requested for that project — otherwise it
+   * answers with a project-root stub. Live probe 2026-06-28.
+   *
+   * This precondition previously lived in the tool layer (`forecasts.ts`,
+   * `briefs.ts`), gated on `api.db`. The neutral interface deliberately has no
+   * `api.db`, so the precondition has to live here or it would simply vanish on
+   * retarget — silently, since nothing about the call signature would change.
+   * It also has to live here for the Phase 4 gateway, whose remote callers
+   * cannot be expected to know about it.
+   *
+   * The DB path is project-scoped in SQL and needs no prime; skipping it there
+   * matters, because the prime triggers the expensive per-category budget
+   * aggregation (~2s/project on a team-wide forecast).
+   */
   async getSchedule(
     projectId: string | number,
     kind: "working" | "published" = "working",
   ): Promise<ScheduleView> {
+    if (!this.api.db) {
+      try {
+        await this.api.getBudget(projectId);
+      } catch (err) {
+        // A failed prime degrades the schedule to a stub; it must not fail the
+        // read outright, which is how the tool layer treated it too.
+        process.stderr.write(
+          `[operations] schedule budget-prime failed for project ${projectId}: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+      }
+    }
     return this.reader.getSchedule(projectId, kind);
   }
   async getSelectionBudgetCategories(
@@ -222,3 +257,16 @@ export function buildBuildToolsOperationsAdapter(
 ): OperationsManagementApi {
   return new BuildToolsOperationsAdapter(api);
 }
+
+/**
+ * Compile-time parity check: `MossDb` must satisfy every read method the
+ * adapter may route to it.
+ *
+ * CLAUDE.md calls this parity "non-negotiable" but nothing enforced it — the
+ * DB and HTTP back ends could drift apart and the failure would surface as a
+ * runtime `TypeError` inside a tool handler, only on machines where `MYSQL_*`
+ * is configured (i.e. production, not CI). This turns that into a build error.
+ */
+const _mossDbSatisfiesReadBackend: ReadBackend =
+  null as unknown as import("../../../db/MossDb.js").MossDb;
+void _mossDbSatisfiesReadBackend;

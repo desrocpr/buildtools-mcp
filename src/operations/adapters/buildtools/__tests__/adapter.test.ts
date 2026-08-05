@@ -162,6 +162,76 @@ describe("id normalisation across the boundary", () => {
   });
 });
 
+describe("schedule session priming", () => {
+  // BuildTools' HTTP /schedule/*/data only returns the full task list AFTER
+  // /budget has been requested for that project (live probe 2026-06-28,
+  // recorded in briefs.ts). Without the prime it returns a project-root stub.
+  // The DB path is project-scoped in SQL and needs no prime.
+  //
+  // This lived in the tool layer, gated on `api.db`. The neutral interface has
+  // no `api.db`, so if the adapter does not own the precondition a retarget
+  // silently produces stub schedules — with no compile error to catch it.
+  function scheduleFake() {
+    const calls: string[] = [];
+    return {
+      calls,
+      async getBudget() {
+        calls.push("budget");
+        return { items: [], columns: [] };
+      },
+      async getSchedule() {
+        calls.push("schedule");
+        return { tasks: [], links: [] };
+      },
+    };
+  }
+
+  it("primes the session with a budget fetch before the HTTP schedule read", async () => {
+    const http = scheduleFake();
+    const adapter = new BuildToolsOperationsAdapter({
+      ...http,
+      db: null,
+    } as unknown as BuildToolsAPI);
+
+    await adapter.getSchedule(42);
+
+    expect(http.calls).toEqual(["budget", "schedule"]);
+  });
+
+  it("skips the prime on the DB path, which is project-scoped in SQL", async () => {
+    // The prime costs ~2s/project because it triggers the expensive
+    // per-category budget aggregation — real money on a team-wide forecast.
+    const http = scheduleFake();
+    const db = scheduleFake();
+    const adapter = new BuildToolsOperationsAdapter({
+      ...http,
+      db,
+    } as unknown as BuildToolsAPI);
+
+    await adapter.getSchedule(42);
+
+    expect(db.calls).toEqual(["schedule"]);
+    expect(http.calls).toEqual([]);
+  });
+
+  it("still returns the schedule when priming fails", async () => {
+    // A failed prime degrades the result; it must not fail the read outright.
+    const adapter = new BuildToolsOperationsAdapter({
+      async getBudget() {
+        throw new Error("budget exploded");
+      },
+      async getSchedule() {
+        return { tasks: [{ id: 1 }], links: [] };
+      },
+      db: null,
+    } as unknown as BuildToolsAPI);
+
+    const schedule = await adapter.getSchedule(42);
+
+    expect(schedule.tasks).toHaveLength(1);
+  });
+});
+
 describe("delegation wiring", () => {
   // 27 near-identical hand-written delegating methods is exactly where a
   // copy-paste slip hides — `getServices` quietly calling `getUsers` would pass

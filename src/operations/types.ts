@@ -129,9 +129,22 @@ export interface BudgetCategoryRef {
  *
  * Declared structurally rather than re-exporting the vendor's `PurchaseOrderDetail`
  * — that type lives in the client and importing it here would put a vendor type
- * back in shared types. A richer vendor shape stays assignable to this one, so
- * the adapter needs no mapping and TypeScript still verifies the fields exist.
+ * back in shared types.
+ *
+ * It must carry every field a consumer renders, NOT merely enough for the
+ * adapter to compile. Assignability is one-directional: a richer vendor shape
+ * satisfies a narrower neutral one, so omissions are invisible at the adapter
+ * and only surface as compile errors at the call site — where the tempting fix
+ * is to delete the line and silently drop output. `get_purchase_order` renders
+ * `totalNumeric` (the Total line), `invoiceRelated` (Invoiced/unpaid),
+ * `amounts[0]` (Qty and Unit columns), and `internalNotes` (Notes column).
  */
+export interface PurchaseOrderAmount extends Record<string, unknown> {
+  /** Positional grid blob from BuildTools; keys vary by line type. */
+  q?: unknown;
+  u?: unknown;
+}
+
 export interface PurchaseOrderItem {
   id: number | null;
   budgetCategoryId: number | null;
@@ -139,6 +152,9 @@ export interface PurchaseOrderItem {
   budgetCategoryName: string;
   total: string;
   notes: string;
+  internalNotes: string;
+  invoiceRelated: string;
+  amounts: PurchaseOrderAmount[];
   companyId: number | null;
   companyName: string;
 }
@@ -155,6 +171,7 @@ export interface PurchaseOrderView {
   companyId: number | null;
   companyName: string;
   items: PurchaseOrderItem[];
+  totalNumeric: number;
 }
 
 // ---------------------------------------------------------------------------
