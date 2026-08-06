@@ -46,3 +46,53 @@ describe("MossDb — FS status labeling", () => {
     expect(mmddyyyy(undefined)).toBe("");
   });
 });
+
+describe("MossDb — search handling (search[value])", () => {
+  const { searchClause, rejectUnsupportedSearch } = __test__;
+
+  // Five list methods silently ignored search[value]. The HTTP path honours it,
+  // so with MYSQL_* configured (production) a searched read returned the first
+  // N rows UNFILTERED and the tool rendered them as matches. list_projects with
+  // a `query` argument was live-affected, with no client-side fallback.
+
+  it("builds an OR-LIKE clause over the given columns", () => {
+    const out = searchClause({ "search[value]": "Katch" }, ["p.name", "p.city"]);
+
+    expect(out.sql).toBe("(p.name LIKE ? OR p.city LIKE ?)");
+    expect(out.params).toEqual(["%Katch%", "%Katch%"]);
+  });
+
+  it("emits nothing when no search term was supplied", () => {
+    expect(searchClause({}, ["p.name"]).sql).toBeNull();
+    expect(searchClause({ "search[value]": "" }, ["p.name"]).sql).toBeNull();
+    expect(searchClause({ "search[value]": "   " }, ["p.name"]).sql).toBeNull();
+  });
+
+  it("keeps one bind parameter per column, so the SQL stays parameterised", () => {
+    // Guards the injection surface as much as the behaviour: the term is never
+    // interpolated into the statement.
+    const out = searchClause({ "search[value]": "'; DROP TABLE projects;--" }, [
+      "a",
+      "b",
+      "c",
+    ]);
+
+    expect(out.params).toHaveLength(3);
+    expect(out.sql).not.toContain("DROP");
+  });
+
+  it("rejects a search on a grid with no searchable columns mapped", () => {
+    // Failing loudly beats returning unfiltered rows that present as matches —
+    // that silence is exactly how this bug class stayed invisible.
+    expect(() =>
+      rejectUnsupportedSearch({ "search[value]": "x" }, "getWorkDays"),
+    ).toThrow(/cannot honour search\[value\]/);
+  });
+
+  it("allows a call with no search term through unharmed", () => {
+    expect(() => rejectUnsupportedSearch({}, "getWorkDays")).not.toThrow();
+    expect(() =>
+      rejectUnsupportedSearch({ "search[value]": "" }, "getWorkDays"),
+    ).not.toThrow();
+  });
+});
