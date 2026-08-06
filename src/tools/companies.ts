@@ -102,6 +102,13 @@ function escapeTableCellContent(s: unknown): string {
  * no top-level `id` field on that endpoint.
  */
 function companyIdFromRow(row: Record<string, unknown>): string {
+  // Prefer a real `id`. The raw HTTP grid has none — hence the DT_RowId
+  // fallback below — but rows arriving through the operations adapter are
+  // normalised to carry `id` with `DT_RowId` stripped (MOS-747). Reading only
+  // the marker would render every company as "?" after the retarget, with no
+  // compile error to catch it.
+  if (row.id !== undefined && row.id !== null) return String(row.id);
+
   const dt = typeof row.DT_RowId === "string" ? row.DT_RowId : "";
   return dt.replace(/^row_/, "") || "?";
 }

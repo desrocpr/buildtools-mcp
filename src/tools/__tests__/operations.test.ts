@@ -468,3 +468,50 @@ describe("list_users + query", () => {
   });
 });
 
+
+describe("list_users — id survives row normalisation (MOS-747 prep)", () => {
+  // Rows arriving through the operations adapter carry a real `id` and have
+  // DT_RowId stripped. parseUserId previously read ONLY DT_RowId, so every row
+  // would have rendered as "?" after the retarget — with no compile error,
+  // since rows are Record<string, unknown>.
+
+  const userRow = (extra: Record<string, unknown>) => ({
+    first_name: "Ada",
+    last_name: "Lovelace",
+    email: "ada@moss.test",
+    role: "Employee",
+    ...extra,
+  });
+
+  it("renders the id from a normalised row carrying `id` and no DT_RowId", async () => {
+    const api = fakeApi({
+      getUsers: (async () => ({ data: [userRow({ id: 4711 })] })) as never,
+    });
+
+    const text = textOf(await listUsersTool.handler({}, api));
+
+    expect(text).toContain("4711");
+    expect(text).not.toContain("?");
+  });
+
+  it("still renders the id from a raw DT_RowId row (pre-retarget shape)", async () => {
+    const api = fakeApi({
+      getUsers: (async () => ({ data: [userRow({ DT_RowId: "row_4711" })] })) as never,
+    });
+
+    expect(textOf(await listUsersTool.handler({}, api))).toContain("4711");
+  });
+
+  it("prefers a real id when both are present", async () => {
+    const api = fakeApi({
+      getUsers: (async () => ({
+        data: [userRow({ id: 4711, DT_RowId: "row_9999" })],
+      })) as never,
+    });
+
+    const text = textOf(await listUsersTool.handler({}, api));
+
+    expect(text).toContain("4711");
+    expect(text).not.toContain("9999");
+  });
+});
