@@ -106,6 +106,51 @@ const COMPANY_TYPE_CODES: Record<string, number> = {
   vendor: 3,
 };
 
+
+/**
+ * Build a search WHERE fragment for a set of columns.
+ *
+ * WHY THIS EXISTS — five list methods on this adapter silently ignored
+ * `search[value]`. The HTTP path honours it, so whenever MYSQL_* is configured
+ * (i.e. production) a searched read returned the first N rows UNFILTERED, and
+ * the tool rendered them as matches. `list_projects` with a `query` argument was
+ * live-affected: searching "Katchmark" returned an arbitrary project list with
+ * no error and no client-side fallback.
+ */
+export function searchClause(
+  opts: Record<string, unknown>,
+  columns: string[],
+): { sql: string | null; params: string[] } {
+  const term = String(opts["search[value]"] ?? "").trim();
+  if (term === "" || columns.length === 0) return { sql: null, params: [] };
+  const like = `%${term}%`;
+  return {
+    sql: `(${columns.map((c) => `${c} LIKE ?`).join(" OR ")})`,
+    params: columns.map(() => like),
+  };
+}
+
+/**
+ * Refuse a search this method cannot honour.
+ *
+ * The alternative — ignoring it — is how the bug above stayed invisible: a
+ * filter that silently stops filtering returns plausible rows and no error.
+ * Failing loudly means the next person to wire a search arg to one of these
+ * grids finds out immediately instead of shipping wrong results.
+ */
+export function rejectUnsupportedSearch(
+  opts: Record<string, unknown>,
+  method: string,
+): void {
+  if (String(opts["search[value]"] ?? "").trim() !== "") {
+    throw new Error(
+      `MossDb.${method} cannot honour search[value] — no searchable columns are ` +
+        "mapped for this grid. Returning unfiltered rows would silently present " +
+        "them as matches; add the columns to this method instead.",
+    );
+  }
+}
+
 export class MossDb {
   private pool: Pool;
 
@@ -213,10 +258,13 @@ export class MossDb {
    * `schedule_published_duration` field that the team-resolution path
    * filters on.
    */
-  async getProjects<T = { data: Array<Record<string, unknown>> }>(opts: {
-    length?: number;
-  } = {}): Promise<T> {
-    const limit = Math.max(1, Math.min(opts.length ?? 100, 500));
+  async getProjects<T = { data: Array<Record<string, unknown>> }>(
+    opts: Record<string, unknown> = {},
+  ): Promise<T> {
+    const limit = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
+    // The HTTP grid's global search spans the displayed columns; name/address/
+    // city is the closest faithful equivalent here.
+    const search = searchClause(opts, ["p.name", "p.address", "p.city"]);
     // One query: join projects to the latest published-snapshot duration
     const [rows] = await this.pool.query<RowDataPacket[]>(
       `SELECT
@@ -770,6 +818,11 @@ export class MossDb {
       where.push("s.project_id = ?");
       params.push(Number(projectId));
     }
+    const search = searchClause(opts, ["s.name", "s.number", "p.name"]);
+    if (search.sql) {
+      where.push(search.sql);
+      params.push(...search.params);
+    }
     const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     const [rows] = await this.pool.query<RowDataPacket[]>(
       `SELECT s.id, s.project_id, s.status, s.name, s.number, s.due_date, s.created_at,
@@ -977,6 +1030,7 @@ export class MossDb {
   async getDailyLogs<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
     opts: Record<string, unknown> = {},
   ): Promise<T> {
+    rejectUnsupportedSearch(opts, "getDailyLogs");
     const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
     const projectId = opts["PR[]"] ?? opts["project_id"];
     const where: string[] = ["d.deleted_at IS NULL"];
@@ -1010,6 +1064,7 @@ export class MossDb {
   async getWeeklyReports<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
     opts: Record<string, unknown> = {},
   ): Promise<T> {
+    rejectUnsupportedSearch(opts, "getWeeklyReports");
     const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
     const projectId = opts["PR[]"] ?? opts["project_id"];
     const where: string[] = ["w.deleted_at IS NULL"];
@@ -1367,6 +1422,7 @@ export class MossDb {
   async getWorkDays<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
     opts: Record<string, unknown> = {},
   ): Promise<T> {
+    rejectUnsupportedSearch(opts, "getWorkDays");
     const length = Math.max(1, Math.min(Number(opts["length"] ?? 100), 500));
     const projectId = opts["PR[]"] ?? opts["project_id"];
     const where: string[] = [];
@@ -1417,4 +1473,4 @@ export function buildMossDbFromEnv(env: NodeJS.ProcessEnv = process.env): MossDb
   });
 }
 
-export const __test__ = { fsStatusLabel, mmddyyyy };
+export const __test__ = { fsStatusLabel, mmddyyyy, searchClause, rejectUnsupportedSearch };
