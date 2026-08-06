@@ -47,6 +47,7 @@ import type { Server as HttpServer } from "node:http";
 
 import { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { ConfirmationStore } from "../confirm/index.js";
+import { getOperationsManagementApi } from "../operations/factory.js";
 import { buildMossDbFromEnv, type MossDb } from "../db/MossDb.js";
 import { IdempotencyStore } from "../idempotency/index.js";
 import {
@@ -66,6 +67,7 @@ import {
   selectionTools,
   taskTools,
   workTrackingTools,
+  type ToolContext,
   type ToolDefinition,
 } from "../tools/index.js";
 import { auditLog, SessionStore, sessionOwnerKey } from "./session-store.js";
@@ -175,6 +177,13 @@ function buildPerSessionServer(opts: {
       password: creds.password,
     });
     apiInstance.db = sharedDb;
+    // The neutral operations adapter (MOS-747). Attached here, alongside the
+    // DB fast path, so tool handlers read through one surface that owns both
+    // the db-vs-http choice and DT_RowId normalisation.
+    apiInstance.ops = getOperationsManagementApi(
+      { provider: "buildtools" },
+      { buildToolsApi: apiInstance },
+    );
     return apiInstance;
   }
 
@@ -208,7 +217,7 @@ function buildPerSessionServer(opts: {
     defaultTenant: opts.defaultTenant,
   });
 
-  const toolsByName: Map<string, ToolDefinition> = new Map([
+  const toolsByName: Map<string, ToolDefinition<ToolContext>> = new Map([
     [sessionTool.name, sessionTool] as const,
     ...projectTools.map((t) => [t.name, t] as const),
     ...financialTools.map((t) => [t.name, t] as const),
@@ -452,7 +461,7 @@ function buildPerSessionServer(opts: {
     if (name === "set_session_credentials") {
       // `api` is not used by this tool's handler. The handler signature
       // requires the second arg, so pass an un-callable sentinel cast.
-      const sentinel = undefined as unknown as BuildToolsAPI;
+      const sentinel = undefined as unknown as ToolContext;
       const result = await tool.handler(args, sentinel);
       // Invalidate any cached BuildToolsAPI from a prior handshake so the
       // next BuildTools-bound call reconstructs the client from the new
@@ -488,7 +497,9 @@ function buildPerSessionServer(opts: {
       };
     }
 
-    const result = await tool.handler(args, api);
+    // `ops` is attached when the client is built, so this is a real
+    // ToolContext rather than a hopeful cast.
+    const result = await tool.handler(args, api as ToolContext);
     await writeAudit(name, result.isError ? "error" : "ok");
     return result as { content: typeof result.content; isError?: boolean };
   });

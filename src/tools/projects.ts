@@ -31,6 +31,7 @@ import { z } from "zod/v3";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
 import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
+import type { ListQuery } from "../operations/types.js";
 import { BuildToolsError } from "../client/errors.js";
 
 // ---------------------------------------------------------------------------
@@ -60,12 +61,38 @@ export interface ToolResult {
   isError?: boolean;
 }
 
-/** MCP tool definition (name + description + JSON Schema for input). */
-export interface ToolDefinition {
+/**
+ * What a migrated tool handler receives (MOS-747 Phase 3).
+ *
+ * Deliberately the concrete client WITH a guaranteed `ops`, rather than a
+ * separate `{ops, api}` pair. That choice is what makes the migration
+ * sliceable: because `ToolContext` is a subtype of `BuildToolsAPI`, and
+ * handler is a function property (so its parameter is contravariant), an
+ * un-migrated `ToolDefinition<BuildToolsAPI>` is still assignable to
+ * `ToolDefinition<ToolContext>`. Migrated and un-migrated tools therefore
+ * coexist in one registry, and each domain moves in its own PR instead of one
+ * 367-call-site sweep.
+ *
+ * Writes still go through the concrete client — the neutral write surface is a
+ * later phase — so `mutations.ts` and `attachments.ts` stay on
+ * `ToolDefinition<BuildToolsAPI>` for now.
+ */
+export type ToolContext = BuildToolsAPI & {
+  readonly ops: import("../operations/types.js").OperationsManagementApi;
+};
+
+/**
+ * MCP tool definition (name + description + JSON Schema for input).
+ *
+ * `C` is what the handler needs. It defaults to the concrete client so
+ * un-migrated tools compile unchanged; migrated read tools declare
+ * `ToolDefinition<ToolContext>`.
+ */
+export interface ToolDefinition<C = BuildToolsAPI> {
   name: string;
   description: string;
   inputSchema: ReturnType<typeof zodToJsonSchema>;
-  handler: (args: unknown, api: BuildToolsAPI) => Promise<ToolResult>;
+  handler: (args: unknown, ctx: C) => Promise<ToolResult>;
   /**
    * Permission required to call this tool, evaluated against the
    * caller's role-resolved permission set (MOS-328 Phase 6b).
@@ -251,7 +278,7 @@ interface ProjectsDatatable {
 
 async function listProjectsHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListProjectsInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_projects");
@@ -260,32 +287,19 @@ async function listProjectsHandler(
   const status = input.status ?? "Active";
   const limit = input.limit ?? 50;
 
-  const params: Record<string, string | number> = {
-    length: limit,
-  };
+  // Described by facet, not by DataTables wire keys. The status column index,
+  // the pipe+regex form for a multi-code status like "Active" = [5,6,7,8], and
+  // the global `search[value]` key are all the adapter's problem now.
+  const query: ListQuery = { limit };
 
-  // Column index 1 is the status column on the projects datatable.
-  // For single-code statuses we filter directly; for multi-code (e.g. "Active"
-  // = [5,6,7,8]) we use the pipe-separated syntax that DataTables supports.
   const codes = STATUS_LABEL_TO_CODES[status] ?? [];
-  if (codes.length === 1) {
-    params["columns[1][search][value]"] = String(codes[0]);
-  } else if (codes.length > 1) {
-    params["columns[1][search][value]"] = codes.join("|");
-    params["columns[1][search][regex]"] = "true";
-  }
+  if (codes.length > 0) query.status = codes;
 
-  // Free-text query: BT's datatable doesn't expose per-column filters
-  // for project name / customer / address / project-number separately,
-  // so we use the global `search[value]` which searches across all
-  // columns. PR #71 unifies what was previously two tools (`list` +
-  // `search`) into one with this `query` arg.
-  if (input.query) {
-    params["search[value]"] = input.query;
-  }
+  // PR #71 unified what were two tools (`list` + `search`) into one `query` arg.
+  if (input.query) query.search = input.query;
 
   try {
-    const result = await (api.db ?? api).getProjects<ProjectsDatatable>(params);
+    const result = await ctx.ops.getProjects<ProjectsDatatable>(query);
     const rows = result?.data ?? [];
     if (rows.length === 0) {
       return markdown(
@@ -303,7 +317,7 @@ async function listProjectsHandler(
   }
 }
 
-export const listProjectsTool: ToolDefinition = {
+export const listProjectsTool: ToolDefinition<ToolContext> = {
   name: "list_projects",
   description:
     "List or search BuildTools projects. " +
@@ -384,14 +398,14 @@ function formatProjectDetail(project: ProjectDetail): string {
 
 async function getProjectHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = GetProjectInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "get_project");
   const { project_id } = parsed.data;
 
   try {
-    const project = await (api.db ?? api).getProject<ProjectDetail>(project_id);
+    const project = await ctx.ops.getProject<ProjectDetail>(project_id);
     if (!project) {
       return markdown(`No project found with ID #${project_id}.`);
     }
@@ -401,7 +415,7 @@ async function getProjectHandler(
   }
 }
 
-export const getProjectTool: ToolDefinition = {
+export const getProjectTool: ToolDefinition<ToolContext> = {
   name: "get_project",
   description: "Get full detail for a single BuildTools project by ID.",
   inputSchema: zodToJsonSchema(GetProjectInputSchema),
@@ -414,7 +428,7 @@ export const getProjectTool: ToolDefinition = {
 // Exported registry
 // ---------------------------------------------------------------------------
 
-export const projectTools: ToolDefinition[] = [
+export const projectTools: ToolDefinition<ToolContext>[] = [
   listProjectsTool,
   getProjectTool,
 ];

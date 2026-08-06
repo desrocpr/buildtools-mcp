@@ -21,6 +21,7 @@ import {
 import { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { loadConfigFromEnv } from "../client/config.js";
 import { ConfirmationStore } from "../confirm/index.js";
+import { getOperationsManagementApi } from "../operations/factory.js";
 import { buildMossDbFromEnv } from "../db/MossDb.js";
 import { IdempotencyStore } from "../idempotency/index.js";
 import {
@@ -39,6 +40,7 @@ import {
   selectionTools,
   taskTools,
   workTrackingTools,
+  type ToolContext,
   type ToolDefinition,
 } from "../tools/index.js";
 import { auditLog } from "./session-store.js";
@@ -85,6 +87,13 @@ export async function startStdioTransport(
       sessionTimeoutMinutes: config.sessionTimeoutMinutes,
     });
     apiSingleton.db = sharedDb;
+    // The neutral operations adapter (MOS-747). Attached here, alongside the
+    // DB fast path, so tool handlers read through one surface that owns both
+    // the db-vs-http choice and DT_RowId normalisation.
+    apiSingleton.ops = getOperationsManagementApi(
+      { provider: "buildtools" },
+      { buildToolsApi: apiSingleton },
+    );
     return apiSingleton;
   }
 
@@ -113,7 +122,7 @@ export async function startStdioTransport(
     idempotencyStore,
   );
 
-  const toolsByName: Map<string, ToolDefinition> = new Map([
+  const toolsByName: Map<string, ToolDefinition<ToolContext>> = new Map([
     ...projectTools.map((t) => [t.name, t] as const),
     ...financialTools.map((t) => [t.name, t] as const),
     ...customerTools.map((t) => [t.name, t] as const),
@@ -204,7 +213,9 @@ export async function startStdioTransport(
       };
     }
 
-    const result = await tool.handler(args, api);
+    // `ops` is attached when the client is built, so this is a real
+    // ToolContext rather than a hopeful cast.
+    const result = await tool.handler(args, api as ToolContext);
     auditLog({
       sessionId: "stdio",
       username,

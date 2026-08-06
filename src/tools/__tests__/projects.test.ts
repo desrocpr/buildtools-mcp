@@ -15,7 +15,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
+import type { OperationsManagementApi } from "../../operations/types.js";
 import {
   BuildToolsAuthError,
   BuildToolsServerError,
@@ -25,6 +25,7 @@ import {
   getProjectTool,
   listProjectsTool,
   projectTools,
+  type ToolContext,
   type ToolResult,
 } from "../projects.js";
 
@@ -33,16 +34,18 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * Build a fake `BuildToolsAPI` with only the methods our handlers call. The
- * cast is intentional — we are stubbing exactly the surface this module uses,
- * not the entire class.
+ * Build a fake tool context.
+ *
+ * These handlers now read through the neutral operations interface (MOS-747),
+ * so the stubs hang off `ops` rather than off the vendor client. The cast is
+ * intentional — we stub exactly the surface this module uses, not the whole
+ * interface.
  */
 function fakeApi(overrides: {
-  getProjects?: BuildToolsAPI["getProjects"];
-  getProject?: BuildToolsAPI["getProject"];
-  searchProjects?: BuildToolsAPI["searchProjects"];
-}): BuildToolsAPI {
-  return overrides as unknown as BuildToolsAPI;
+  getProjects?: OperationsManagementApi["getProjects"];
+  getProject?: OperationsManagementApi["getProject"];
+}): ToolContext {
+  return { ops: overrides } as unknown as ToolContext;
 }
 
 function textOf(result: ToolResult): string {
@@ -110,7 +113,7 @@ describe("list_projects", () => {
       recordsTotal: 1,
       recordsFiltered: 1,
     });
-    const api = fakeApi({ getProjects: getProjects as BuildToolsAPI["getProjects"] });
+    const api = fakeApi({ getProjects: getProjects as OperationsManagementApi["getProjects"] });
 
     const result = await listProjectsTool.handler({ status: "Active" }, api);
 
@@ -122,19 +125,20 @@ describe("list_projects", () => {
     expect(text).toContain("Jones Addition");
     expect(text).toContain("Springfield, VA");
     expect(text).toContain("$ 245,500.50");
-    // "Active" maps to codes [5,6,7,8] — passed as pipe-separated regex.
+    // "Active" maps to codes [5,6,7,8]. The tool now names the FACET; encoding
+    // those into a pipe-joined DataTables column filter is the adapter's job
+    // (operations/adapters/buildtools/query.ts), not this handler's.
     expect(getProjects).toHaveBeenCalledTimes(1);
     const callArgs = getProjects.mock.calls[0][0];
     expect(callArgs).toMatchObject({
-      length: 50,
-      "columns[1][search][value]": "5|6|7|8",
-      "columns[1][search][regex]": "true",
+      limit: 50,
+      status: [5, 6, 7, 8],
     });
   });
 
-  it("passes query via search[value] and respects custom limit", async () => {
+  it("passes a neutral search facet and respects custom limit", async () => {
     const getProjects = vi.fn().mockResolvedValue({ data: [sampleListRow] });
-    const api = fakeApi({ getProjects: getProjects as BuildToolsAPI["getProjects"] });
+    const api = fakeApi({ getProjects: getProjects as OperationsManagementApi["getProjects"] });
 
     await listProjectsTool.handler(
       { status: "All", query: "Jones", limit: 10 },
@@ -143,16 +147,16 @@ describe("list_projects", () => {
 
     const callArgs = getProjects.mock.calls[0][0];
     expect(callArgs).toMatchObject({
-      length: 10,
-      "search[value]": "Jones",
+      limit: 10,
+      search: "Jones",
     });
-    // "All" status means no column filter.
-    expect(callArgs["columns[1][search][value]"]).toBeUndefined();
+    // "All" status means no status filter at all.
+    expect(callArgs.status).toBeUndefined();
   });
 
   it("returns a Markdown 'no matches' message when the result is empty", async () => {
     const getProjects = vi.fn().mockResolvedValue({ data: [] });
-    const api = fakeApi({ getProjects: getProjects as BuildToolsAPI["getProjects"] });
+    const api = fakeApi({ getProjects: getProjects as OperationsManagementApi["getProjects"] });
 
     const result = await listProjectsTool.handler({}, api);
 
@@ -164,7 +168,7 @@ describe("list_projects", () => {
     const getProjects = vi
       .fn()
       .mockRejectedValue(new BuildToolsAuthError("Not authenticated"));
-    const api = fakeApi({ getProjects: getProjects as BuildToolsAPI["getProjects"] });
+    const api = fakeApi({ getProjects: getProjects as OperationsManagementApi["getProjects"] });
 
     const result = await listProjectsTool.handler({}, api);
 
@@ -193,7 +197,7 @@ describe("list_projects", () => {
 
   it("handles a null datatable envelope gracefully (treats as empty)", async () => {
     const getProjects = vi.fn().mockResolvedValue(null);
-    const api = fakeApi({ getProjects: getProjects as BuildToolsAPI["getProjects"] });
+    const api = fakeApi({ getProjects: getProjects as OperationsManagementApi["getProjects"] });
     const result = await listProjectsTool.handler({}, api);
     expect(result.isError).toBeFalsy();
     expect(textOf(result)).toMatch(/No projects matched/);
@@ -207,7 +211,7 @@ describe("list_projects", () => {
 describe("get_project", () => {
   it("renders a structured Markdown detail view on the happy path", async () => {
     const getProject = vi.fn().mockResolvedValue(sampleDetail);
-    const api = fakeApi({ getProject: getProject as BuildToolsAPI["getProject"] });
+    const api = fakeApi({ getProject: getProject as OperationsManagementApi["getProject"] });
 
     const result = await getProjectTool.handler({ project_id: 100002 }, api);
 
@@ -226,7 +230,7 @@ describe("get_project", () => {
 
   it("returns a Markdown 'not found' message when the client returns null", async () => {
     const getProject = vi.fn().mockResolvedValue(null);
-    const api = fakeApi({ getProject: getProject as BuildToolsAPI["getProject"] });
+    const api = fakeApi({ getProject: getProject as OperationsManagementApi["getProject"] });
 
     const result = await getProjectTool.handler({ project_id: 999 }, api);
 
@@ -238,7 +242,7 @@ describe("get_project", () => {
     const getProject = vi
       .fn()
       .mockResolvedValue({ id: 1, name: "Tiny project" });
-    const api = fakeApi({ getProject: getProject as BuildToolsAPI["getProject"] });
+    const api = fakeApi({ getProject: getProject as OperationsManagementApi["getProject"] });
 
     const result = await getProjectTool.handler({ project_id: 1 }, api);
 
@@ -253,7 +257,7 @@ describe("get_project", () => {
     const getProject = vi
       .fn()
       .mockRejectedValue(new BuildToolsServerError("Internal server error", { status: 500 }));
-    const api = fakeApi({ getProject: getProject as BuildToolsAPI["getProject"] });
+    const api = fakeApi({ getProject: getProject as OperationsManagementApi["getProject"] });
 
     const result = await getProjectTool.handler({ project_id: 7 }, api);
 

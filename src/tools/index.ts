@@ -12,6 +12,7 @@ export {
   listProjectsTool,
   getProjectTool,
   projectTools,
+  type ToolContext,
   type ToolDefinition,
   type ToolResult,
 } from "./projects.js";
