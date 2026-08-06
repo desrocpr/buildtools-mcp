@@ -80,6 +80,25 @@ const STATUS_COLUMN: Partial<Record<GridName, number>> = {
  */
 const COMPANY_TYPE_COLUMN = 3;
 
+/**
+ * Throw unless this grid's status column has been verified.
+ *
+ * Exported so the mock adapter enforces the SAME rule: if the mock filtered on
+ * a grid where the real adapter throws, a test would pass and the identical
+ * production call would explode. Divergence in the failure surface is as
+ * dangerous as divergence in the results.
+ */
+export function assertStatusFilterSupported(grid: GridName): void {
+  if (STATUS_COLUMN[grid] === undefined) {
+    throw new Error(
+      `operations: status filtering is not verified for the '${grid}' grid — ` +
+        "the DataTables column index is unknown, and guessing would silently " +
+        "filter the wrong column. Verify against ~/code/buildtools/docs/ and " +
+        "add it to STATUS_COLUMN.",
+    );
+  }
+}
+
 export function toDatatableParams(
   grid: GridName,
   query: ListQuery = {},
@@ -94,16 +113,8 @@ export function toDatatableParams(
   if (query.offset !== undefined) params.start = query.offset;
 
   if (query.status !== undefined) {
-    const column = STATUS_COLUMN[grid];
-    if (column === undefined) {
-      throw new Error(
-        `operations: status filtering is not verified for the '${grid}' grid — ` +
-          "the DataTables column index is unknown, and guessing would silently " +
-          "filter the wrong column. Verify against ~/code/buildtools/docs/ and " +
-          "add it to STATUS_COLUMN.",
-      );
-    }
-    applyColumnFilter(params, column, query.status);
+    assertStatusFilterSupported(grid);
+    applyColumnFilter(params, STATUS_COLUMN[grid] as number, query.status);
   }
 
   if (query.companyType !== undefined) {

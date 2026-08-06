@@ -93,6 +93,19 @@ function fmtUsdStr(n: number): string {
 // MossDb
 // ---------------------------------------------------------------------------
 
+/**
+ * Company type name → BuildTools numeric code.
+ *
+ * The HTTP grid filters by role NAME; the replica stores a numeric `type`.
+ * Mapping here keeps the neutral `companyType` facet meaning one thing on both
+ * back ends.
+ */
+const COMPANY_TYPE_CODES: Record<string, number> = {
+  customer: 1,
+  subcontractor: 2,
+  vendor: 3,
+};
+
 export class MossDb {
   private pool: Pool;
 
@@ -583,11 +596,29 @@ export class MossDb {
       where.push("(c.name LIKE ? OR c.email LIKE ?)");
       params.push(`%${search}%`, `%${search}%`);
     }
-    // type filter (1=Customer, 2=Subcontractor, 3=Vendor per CLAUDE.md)
-    if (opts["columns[1][search][value]"] !== undefined) {
-      const typeFilter = String(opts["columns[1][search][value]"]);
-      where.push("c.type = ?");
-      params.push(Number(typeFilter));
+    // Company type filter.
+    //
+    // Reads column 3 with the STRING role name (Vendor / Subcontractor /
+    // Customer), matching what BuildToolsAPI.searchCompanies sends
+    // (BuildToolsAPI.ts:1049) and what the neutral `companyType` facet encodes
+    // (operations/adapters/buildtools/query.ts).
+    //
+    // This previously read column 1 as a NUMERIC code, which no caller ever
+    // sent — the branch was dead, and the two back ends silently disagreed on
+    // both the column index and the value format. Left as-is, the first caller
+    // of the neutral `companyType` facet would have got every company back,
+    // unfiltered, on the DB fast path (i.e. in production) with no error.
+    //
+    // Numeric codes are still accepted so any direct caller keeps working.
+    const typeFilter =
+      opts["columns[3][search][value]"] ?? opts["columns[1][search][value]"];
+    if (typeFilter !== undefined) {
+      const raw = String(typeFilter);
+      const code = COMPANY_TYPE_CODES[raw.toLowerCase()] ?? Number(raw);
+      if (Number.isFinite(code)) {
+        where.push("c.type = ?");
+        params.push(code);
+      }
     }
     const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     const [rows] = await this.pool.query<RowDataPacket[]>(
