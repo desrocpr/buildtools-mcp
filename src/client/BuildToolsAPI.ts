@@ -307,6 +307,21 @@ export class BuildToolsAPI {
    */
   public db: import("../db/MossDb.js").MossDb | null = null;
 
+  /**
+   * The neutral operations adapter wrapping this client (MOS-747).
+   *
+   * Attached by the transports at construction, exactly like `db`. Tool
+   * handlers migrate from `(api.db ?? api).getX(...)` to `api.ops.getX(...)`,
+   * which moves both the read-path selection and `DT_RowId` normalisation
+   * behind the adapter.
+   *
+   * The inline type import avoids a module cycle: `src/operations/` imports
+   * this class, so this file must not import it back eagerly. Same trick as
+   * `db` above.
+   */
+  public ops: import("../operations/types.js").OperationsManagementApi | null =
+    null;
+
   /** Hostname-keyed cookie jar: { hostname → { cookieName → cookieValue } }. */
   private cookies: Record<string, Record<string, string>> = {};
 
