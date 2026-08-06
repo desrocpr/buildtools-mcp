@@ -641,8 +641,8 @@ export class MossDb {
     const where: string[] = [];
     const params: unknown[] = [];
     if (search) {
-      where.push("(c.name LIKE ? OR c.email LIKE ?)");
-      params.push(`%${search}%`, `%${search}%`);
+      where.push("(c.name LIKE ? OR c.email LIKE ? OR c.address LIKE ?)");
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
     // Company type filter.
     //
@@ -670,7 +670,7 @@ export class MossDb {
     }
     const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     const [rows] = await this.pool.query<RowDataPacket[]>(
-      `SELECT c.id, c.name, c.type, c.type_name, c.email, c.phone, c.address, c.city, c.state, c.status
+      `SELECT c.id, c.name, c.type, c.type_name, c.email, c.phone, c.address, c.city, c.state, c.zip, c.status
          FROM companies c
          ${whereSql}
          ORDER BY c.id DESC
@@ -688,7 +688,16 @@ export class MossDb {
       address: r.address ?? "",
       city: r.city ?? "",
       state: r.state ?? "",
+      zip: r.zip ?? "",
       status: r.status,
+      // NOT emitted: `budget_relations` and `main_contact`. Both are present on
+      // the HTTP grid but are not columns on `companies` — budget_relations is a
+      // rendered blob of the company's related budget items. Consumers that read
+      // them degrade on this path: `search_companies` shows an em-dash for
+      // "Default budget category", and `list_customers`' `has_active_project`
+      // heuristic (which infers activity from a non-empty budget_relations)
+      // filters everything out. Reconstructing them needs a verified join
+      // against the live schema — tracked, not guessed at here.
     }));
     return { data, recordsTotal: data.length } as T;
   }
@@ -946,6 +955,14 @@ export class MossDb {
     const data = rows.map((r) => ({
       DT_RowId: `row_${r.id}`,
       id: r.id,
+      // HTTP-shape aliases. The HTTP grid names these `info` (the canonical PO
+      // id consumers render) and `company`; emitting only `id`/`company_name`
+      // broke every consumer that reads the HTTP names — e.g. get_company
+      // filtered PO history on `r.company` and matched nothing, reporting
+      // "0 POs" for every company. Shape parity with BuildToolsAPI is the whole
+      // contract that lets a caller swap back ends.
+      info: r.id,
+      company: r.company_name,
       project_id: r.project_id,
       project_name: r.project_name,
       company_name: r.company_name,

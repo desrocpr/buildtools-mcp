@@ -410,7 +410,11 @@ async function getCompanyHandler(
     );
     if (poHistory.mostRecent) {
       const mr = poHistory.mostRecent;
+      // `id` first: it is the one field both back ends always carry. `info` is
+      // the HTTP grid's name for it, and `DT_RowId` is stripped by the adapter's
+      // normalisation — so reading those first rendered "?" on the DB path.
       const poId =
+        (mr.id as string | number | undefined) ??
         (mr.info as string | number | undefined) ??
         (typeof mr.DT_RowId === "string"
           ? mr.DT_RowId.replace(/^row_/, "")

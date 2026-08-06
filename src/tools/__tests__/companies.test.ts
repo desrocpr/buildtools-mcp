@@ -166,3 +166,53 @@ describe("get_company handler", () => {
     );
   });
 });
+
+describe("get_company — PO history works on BOTH back-end row shapes", () => {
+  // These reads used to be HTTP-only. Routing them through the operations
+  // adapter means the DB fast path can now serve them — and the two back ends
+  // named the same fields differently (`company`/`info` over HTTP,
+  // `company_name`/`id` in SQL). The filter matched neither on the DB path, so
+  // every company reported "0 POs" with no error.
+  const company = {
+    id: 977,
+    name: "Kai Muten, LLC",
+    type_name: "Subcontractor",
+  };
+
+  async function renderWith(poRow: Record<string, unknown>) {
+    const api = fakeApi({
+      getCompany: vi.fn().mockResolvedValue(company),
+      getPurchaseOrders: vi.fn().mockResolvedValue({ data: [poRow] }),
+    } as Partial<OperationsManagementApi>);
+    const out = await getCompanyTool.handler({ company_id: 977 }, api);
+    return (out.content[0] as { text: string }).text;
+  }
+
+  it("counts and renders PO history from an HTTP-shaped row", async () => {
+    const text = await renderWith({
+      info: 28278,
+      company: "Kai Muten, LLC",
+      name: "Demo work",
+      total: "$ 1,200.00",
+    });
+
+    expect(text).toContain("**Purchase order history**: 1 PO");
+    expect(text).toContain("PO #28278");
+  });
+
+  it("counts and renders PO history from a DB-shaped row", async () => {
+    // Same PO, as MossDb emits it. Before the field-parity fix this rendered
+    // "0 POs" and a "?" id.
+    const text = await renderWith({
+      id: 28278,
+      company_name: "Kai Muten, LLC",
+      company: "Kai Muten, LLC",
+      name: "Demo work",
+      total: "$ 1,200.00",
+    });
+
+    expect(text).toContain("**Purchase order history**: 1 PO");
+    expect(text).toContain("PO #28278");
+    expect(text).not.toContain("PO #?");
+  });
+});
