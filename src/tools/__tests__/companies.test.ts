@@ -11,15 +11,20 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
+import type { OperationsManagementApi } from "../../operations/types.js";
+import type { ToolContext } from "../projects.js";
 import {
   companyTools,
   getCompanyTool,
   searchCompaniesTool,
 } from "../companies.js";
 
-function fakeApi(overrides: Partial<BuildToolsAPI> = {}): BuildToolsAPI {
-  return overrides as BuildToolsAPI;
+/**
+ * Build a fake tool context. These handlers read through the neutral operations
+ * interface (MOS-747), so the stubs hang off `ops`.
+ */
+function fakeApi(overrides: Partial<OperationsManagementApi> = {}): ToolContext {
+  return { ops: overrides } as unknown as ToolContext;
 }
 
 describe("companyTools registry", () => {
@@ -68,14 +73,17 @@ describe("search_companies handler", () => {
       recordsTotal: 1095,
       recordsFiltered: 1,
     });
-    const api = fakeApi({ searchCompanies } as Partial<BuildToolsAPI>);
+    const api = fakeApi({ getCompanies: searchCompanies } as Partial<OperationsManagementApi>);
 
     const out = await searchCompaniesTool.handler(
       { query: "Kai Muten", role: "Subcontractor", limit: 25 },
       api,
     );
-    expect(searchCompanies).toHaveBeenCalledWith("Kai Muten", {
-      role: "Subcontractor",
+    // search_companies now reads through getCompanies with named facets; the
+    // role→column-3 encoding is the adapter's job (MOS-747).
+    expect(searchCompanies).toHaveBeenCalledWith({
+      search: "Kai Muten",
+      companyType: "Subcontractor",
       limit: 25,
     });
     const text = (out.content[0] as { text: string }).text;
@@ -85,10 +93,11 @@ describe("search_companies handler", () => {
 
   it("omits role from the API call when 'All' is selected", async () => {
     const searchCompanies = vi.fn().mockResolvedValue({ data: [], recordsFiltered: 0 });
-    const api = fakeApi({ searchCompanies } as Partial<BuildToolsAPI>);
+    const api = fakeApi({ getCompanies: searchCompanies } as Partial<OperationsManagementApi>);
     await searchCompaniesTool.handler({ query: "abc", role: "All" }, api);
-    expect(searchCompanies).toHaveBeenCalledWith("abc", {
-      role: undefined,
+    expect(searchCompanies).toHaveBeenCalledWith({
+      search: "abc",
+      companyType: undefined,
       limit: 25,
     });
   });
@@ -129,8 +138,8 @@ describe("get_company handler", () => {
     });
     const api = fakeApi({
       getCompany,
-      searchPurchaseOrders,
-    } as Partial<BuildToolsAPI>);
+      getPurchaseOrders: searchPurchaseOrders,
+    } as Partial<OperationsManagementApi>);
 
     const out = await getCompanyTool.handler({ company_id: 977 }, api);
     const text = (out.content[0] as { text: string }).text;
@@ -142,12 +151,15 @@ describe("get_company handler", () => {
     expect(text).toContain("Most recent: PO #28278");
     // The PO search must use the comma-stripped query so the BuildTools
     // tokenizer matches — verbatim "Kai Muten, LLC" returns zero hits.
-    expect(searchPurchaseOrders).toHaveBeenCalledWith("Kai Muten", 50);
+    expect(searchPurchaseOrders).toHaveBeenCalledWith({
+      search: "Kai Muten",
+      limit: 50,
+    });
   });
 
   it("handles 'company not found' cleanly", async () => {
     const getCompany = vi.fn().mockResolvedValue(null);
-    const api = fakeApi({ getCompany } as Partial<BuildToolsAPI>);
+    const api = fakeApi({ getCompany } as Partial<OperationsManagementApi>);
     const out = await getCompanyTool.handler({ company_id: 99999 }, api);
     expect((out.content[0] as { text: string }).text).toContain(
       "No company found for ID **99999**",

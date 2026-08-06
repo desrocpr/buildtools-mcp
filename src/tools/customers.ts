@@ -30,7 +30,8 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 
-import type { ToolDefinition, ToolResult } from "./projects.js";
+import type { ListQuery } from "../operations/types.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./projects.js";
 
 // ---------------------------------------------------------------------------
 // Rendering helpers
@@ -142,7 +143,7 @@ interface CustomersDatatable {
 
 async function listCustomersHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListCustomersInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_customers");
@@ -150,13 +151,11 @@ async function listCustomersHandler(
 
   // Bump the page size to 200 to surface a wider sweep than the 50-row
   // default — customers list is typically small.
-  const params: Record<string, string | number> = { length: 200 };
-  if (name_search) {
-    params["search[value]"] = name_search;
-  }
+  const query: ListQuery = { limit: 200 };
+  if (name_search) query.search = name_search;
 
   try {
-    const result = await (api.db ?? api).getCompanies<CustomersDatatable>(params);
+    const result = await ctx.ops.getCompanies<CustomersDatatable>(query);
     let rows = result?.data ?? [];
 
     if (has_active_project === true) {
@@ -184,7 +183,7 @@ async function listCustomersHandler(
   }
 }
 
-export const listCustomersTool: ToolDefinition = {
+export const listCustomersTool: ToolDefinition<ToolContext> = {
   name: "list_customers",
   description:
     "List BuildTools customers (people / companies tied to projects). Optionally filter by activity.",
@@ -332,14 +331,14 @@ function formatCustomerDetail(customer: CustomerDetailPayload): string {
 
 async function getCustomerHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = GetCustomerInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "get_customer");
   const { customer_id } = parsed.data;
 
   try {
-    const customer = await (api.db ?? api).getCustomer<CustomerDetailPayload>(customer_id);
+    const customer = await ctx.ops.getCustomer<CustomerDetailPayload>(customer_id);
     if (!customer) {
       return markdown(`No customer found with ID #${customer_id}.`);
     }
@@ -349,7 +348,7 @@ async function getCustomerHandler(
   }
 }
 
-export const getCustomerTool: ToolDefinition = {
+export const getCustomerTool: ToolDefinition<ToolContext> = {
   name: "get_customer",
   description:
     "Get full detail for a single BuildTools customer by ID, including address, primary contact, and associated projects.",
@@ -362,7 +361,7 @@ export const getCustomerTool: ToolDefinition = {
 // Exported registry
 // ---------------------------------------------------------------------------
 
-export const customerTools: ToolDefinition[] = [
+export const customerTools: ToolDefinition<ToolContext>[] = [
   listCustomersTool,
   getCustomerTool,
 ];
