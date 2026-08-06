@@ -79,21 +79,25 @@ export async function startStdioTransport(
   function getApi(): BuildToolsAPI {
     if (apiSingleton) return apiSingleton;
     const config = loadConfigFromEnv();
-    apiSingleton = new BuildToolsAPI({
+    // Build and fully wire a LOCAL instance, then memoize — assigning first
+    // and attaching afterwards would memoize a half-built client if an
+    // attachment step threw, and the fast path never retries.
+    const built = new BuildToolsAPI({
       tenant: config.tenant,
       baseUrl: config.baseUrl,
       username: config.username,
       password: config.password,
       sessionTimeoutMinutes: config.sessionTimeoutMinutes,
     });
-    apiSingleton.db = sharedDb;
+    built.db = sharedDb;
     // The neutral operations adapter (MOS-747). Attached here, alongside the
     // DB fast path, so tool handlers read through one surface that owns both
     // the db-vs-http choice and DT_RowId normalisation.
-    apiSingleton.ops = getOperationsManagementApi(
+    built.ops = getOperationsManagementApi(
       { provider: "buildtools" },
-      { buildToolsApi: apiSingleton },
+      { buildToolsApi: built },
     );
+    apiSingleton = built;
     return apiSingleton;
   }
 
