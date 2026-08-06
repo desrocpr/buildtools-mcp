@@ -330,8 +330,19 @@ const ListUsersInputSchema = z.object({
 
 export type ListUsersInput = z.infer<typeof ListUsersInputSchema>;
 
-/** Extract the numeric user id from a DT_RowId of the form `row_<n>`. */
+/**
+ * Extract the user id, preferring a real `id` over the `row_<n>` marker.
+ *
+ * This read `DT_RowId` and nothing else. That works today, and breaks silently
+ * the moment reads come through the operations adapter, which normalises rows
+ * to carry `id` and strips `DT_RowId` (MOS-747). Every row would have rendered
+ * as "?" with no compile error, because rows are `Record<string, unknown>`.
+ *
+ * Accepting either shape makes this correct before and after the retarget.
+ */
 function parseUserId(row: Record<string, unknown>): string {
+  if (row.id !== undefined && row.id !== null) return String(row.id);
+
   const raw = row.DT_RowId;
   if (typeof raw !== "string") {
     if (raw === undefined || raw === null) return "?";
