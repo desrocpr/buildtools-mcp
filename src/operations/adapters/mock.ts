@@ -21,6 +21,7 @@
  * adapter's normalisation works should use that adapter — not this one.
  */
 
+import { assertStatusFilterSupported, type GridName } from "./buildtools/query.js";
 import type {
   AllowanceItem,
   BudgetCategoryRef,
@@ -103,7 +104,18 @@ export class MockOperationsApi implements OperationsManagementApi {
    * `status` matches the row's status. A mock that ignored its own query
    * parameters would let a tool ship with a filter that never filtered.
    */
-  private list(rows: MockRow[] = [], query: ListQuery = {}): Envelope {
+  private list(
+    grid: GridName,
+    rows: MockRow[] = [],
+    query: ListQuery = {},
+  ): Envelope {
+    // Match the real adapter's failure surface exactly. `query.ts` throws when
+    // a grid's status column has not been verified; if the mock filtered
+    // anyway, a Phase 3 test would pass and the identical production call would
+    // explode. A mock that is more permissive than production is worse than no
+    // mock — it manufactures confidence.
+    if (query.status !== undefined) assertStatusFilterSupported(grid);
+
     let out = rows;
 
     if (query.search) {
@@ -149,54 +161,54 @@ export class MockOperationsApi implements OperationsManagementApi {
 
   async getProjects<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getProjects", query);
-    return this.list(this.seed.projects, query) as T;
+    return this.list("projects", this.seed.projects, query) as T;
   }
   async getCompanies<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getCompanies", query);
-    return this.list(this.seed.companies, query) as T;
+    return this.list("companies", this.seed.companies, query) as T;
   }
   async getPurchaseOrders<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getPurchaseOrders", query);
-    return this.list(this.seed.purchaseOrders, query) as T;
+    return this.list("purchaseOrders", this.seed.purchaseOrders, query) as T;
   }
   async getTasks<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getTasks", query);
-    return this.list(this.seed.tasks, query) as T;
+    return this.list("tasks", this.seed.tasks, query) as T;
   }
   async getRFIs<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getRFIs", query);
-    return this.list(this.seed.rfis, query) as T;
+    return this.list("rfis", this.seed.rfis, query) as T;
   }
   async getServices<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getServices", query);
-    return this.list(this.seed.services, query) as T;
+    return this.list("services", this.seed.services, query) as T;
   }
   async getUsers<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getUsers", query);
-    return this.list(this.seed.users, query) as T;
+    return this.list("users", this.seed.users, query) as T;
   }
   async getCertificates<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getCertificates", query);
-    return this.list(this.seed.certificates, query) as T;
+    return this.list("certificates", this.seed.certificates, query) as T;
   }
   async getDailyLogs<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getDailyLogs", query);
-    return this.list(this.seed.dailyLogs, query) as T;
+    return this.list("dailyLogs", this.seed.dailyLogs, query) as T;
   }
   async getWeeklyReports<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getWeeklyReports", query);
-    return this.list(this.seed.weeklyReports, query) as T;
+    return this.list("weeklyReports", this.seed.weeklyReports, query) as T;
   }
   async getWorkDays<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getWorkDays", query);
-    return this.list(this.seed.workDays, query) as T;
+    return this.list("workDays", this.seed.workDays, query) as T;
   }
   async searchCertificates<T = unknown>(
     query: string,
     limit = 50,
   ): Promise<T | null> {
     this.record("searchCertificates", query, limit);
-    return this.list(this.seed.certificates, { search: query, limit }) as T;
+    return this.list("certificates", this.seed.certificates, { search: query, limit }) as T;
   }
 
   // --- single-record reads -------------------------------------------------
