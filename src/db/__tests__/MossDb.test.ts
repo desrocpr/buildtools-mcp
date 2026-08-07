@@ -22,20 +22,30 @@ describe("MossDb — env-gated factory", () => {
 describe("MossDb — FS status labeling", () => {
   const { fsStatusLabel, mmddyyyy } = __test__;
 
-  it("status=4 paid=0 → 'Sent'", () => {
-    expect(fsStatusLabel(4, 0, 1000)).toBe("Sent");
+  // These previously asserted status=4 renders "Sent"/"Partly Paid"/"Paid" by
+  // paid amount. That was the implementation restated, not BuildTools'
+  // behaviour: pulling statements of each code from the replica and reading
+  // what the HTTP grid showed for those same ids gives the mapping below, and
+  // the code ALONE decides it.
+  it("status=4 → 'To Pay', whatever the paid amount", () => {
+    expect(fsStatusLabel(4, 0, 1000)).toBe("To Pay");
+    expect(fsStatusLabel(4, 500, 1000)).toBe("To Pay");
   });
-  it("status=4 paid<amount → 'Partly Paid'", () => {
-    expect(fsStatusLabel(4, 500, 1000)).toBe("Partly Paid");
+  it("status=5 → 'Partly Paid', even when fully paid", () => {
+    // Verified: a code-5 statement paid in full still renders "Partly Paid",
+    // as does one with a negative paid amount. BuildTools' own oddity, mirrored.
+    expect(fsStatusLabel(5, 0, 1000)).toBe("Partly Paid");
+    expect(fsStatusLabel(5, 1000, 1000)).toBe("Partly Paid");
   });
-  it("status=4 paid≈amount → 'Paid'", () => {
-    expect(fsStatusLabel(4, 1000, 1000)).toBe("Paid");
-  });
-  it("status=6 → 'Paid'", () => {
+  it("status=6 → 'Paid', even when nothing is recorded as paid", () => {
     expect(fsStatusLabel(6, 1000, 1000)).toBe("Paid");
+    expect(fsStatusLabel(6, 0, 1000)).toBe("Paid");
   });
   it("status=1 → 'Draft'", () => {
     expect(fsStatusLabel(1, 0, 1000)).toBe("Draft");
+  });
+  it("status=2 → 'Unknown', which is what BuildTools itself shows", () => {
+    expect(fsStatusLabel(2, 0, 1000)).toBe("Unknown");
   });
 
   it("mmddyyyy formats Date", () => {

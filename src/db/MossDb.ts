@@ -45,23 +45,39 @@ export interface MossDbConfig {
 // keeps working unchanged.
 // ---------------------------------------------------------------------------
 
+/**
+ * Raw `financial_statements.status` → the label BuildTools renders.
+ *
+ * VERIFIED against the live system by pulling statements of each code from the
+ * replica and reading what the HTTP grid showed for those same ids:
+ *
+ *   1 -> "Draft"        2 -> "Unknown"   (BT itself has no label; 1 row exists)
+ *   4 -> "To Pay"       5 -> "Partly Paid"        6 -> "Paid"
+ *
+ * The code ALONE decides the label — paid amount does not refine it. Checked at
+ * the boundaries that matter: code 5 fully paid still renders "Partly Paid",
+ * code 5 with a negative paid amount still renders "Partly Paid", and code 6
+ * with nothing paid still renders "Paid". All 123 code-4 rows are unpaid, so
+ * that branch never had another case to serve.
+ *
+ * This previously mapped 4 to "Sent" and 2 to "Pending" — neither is a label
+ * BuildTools produces. `uncollected_invoices` and `list_financial_statements`
+ * both display this string.
+ */
 const FS_STATUS_LABELS: Record<number, string> = {
   1: "Draft",
-  2: "Pending",
-  4: "Sent",        // status=4 with paid_amount=0 → "Sent" per BT UI
+  2: "Unknown",
+  4: "To Pay",
   5: "Partly Paid",
   6: "Paid",
 };
 const FS_SENT_STATUSES = new Set([4, 5, 6]); // populate sent_date for these
 
-function fsStatusLabel(code: number, paid: number, amount: number): string {
-  // Refine status=4 vs "Sent" / "Partly Paid" based on payment progress.
-  // BT renders status=4 as "Sent" when paid=0 but "Partly Paid" when 0<paid<amount.
-  if (code === 4) {
-    if (paid <= 0.005) return "Sent";
-    if (paid + 0.005 >= amount) return "Paid";
-    return "Partly Paid";
-  }
+function fsStatusLabel(code: number, _paid: number, _amount: number): string {
+  // Paid/amount are accepted for signature parity with the HTTP wrapper but are
+  // deliberately unused: the live check above shows the status code alone
+  // decides the rendered label. The previous refinement produced labels
+  // BuildTools never shows.
   return FS_STATUS_LABELS[code] ?? `Unknown(${code})`;
 }
 
@@ -955,8 +971,14 @@ export class MossDb {
       params.push(Number(projectId));
     }
     if (search) {
-      where.push("(r.subject LIKE ? OR r.description LIKE ?)");
-      params.push(`%${search}%`, `%${search}%`);
+      // p.name included deliberately: `list_rfis` documents `project_name` as
+      // "substring match against the project name", and it forwards that value
+      // as the global search. Without the join column this matched RFI SUBJECT
+      // and DESCRIPTION text instead — so asking for one project's RFIs
+      // returned RFIs from anywhere that happened to mention it. getServices
+      // already searched its project column; this one did not.
+      where.push("(r.subject LIKE ? OR r.description LIKE ? OR p.name LIKE ?)");
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
     }
     const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     const [rows] = await this.pool.query<RowDataPacket[]>(

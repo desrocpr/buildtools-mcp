@@ -212,3 +212,37 @@ describe.skipIf(!HOST)("MossDb.getChangeOrders — project scoping", () => {
     ).rejects.toThrow(/cannot honour search/);
   });
 });
+
+describe.skipIf(!HOST)("MossDb — status labels and project-scoped search", () => {
+  // Both were verified against the live HTTP render before being encoded here.
+  it("labels financial statements the way BuildTools renders them", async () => {
+    const rows = await db!.getFinancialStatements(185260);
+    const labels = new Set((rows.statements ?? []).map((s) => s.status));
+
+    // "Sent" and "Pending" were the previous mappings for codes 4 and 2;
+    // BuildTools produces neither.
+    expect(labels.has("Sent")).toBe(false);
+    expect(labels.has("Pending")).toBe(false);
+  });
+
+  it("matches RFIs by project name, not by RFI subject text", async () => {
+    // `list_rfis` documents project_name as a project match and forwards it as
+    // the global search. This searched subject/description only, so it returned
+    // RFIs from other projects that merely mentioned the name.
+    const all = await db!.getRFIs<{
+      data: Array<{ project_name?: string; subject?: string }>;
+    }>({ length: 200 });
+    const rows = all.data ?? [];
+    const name = rows.find((r) => r.project_name)?.project_name;
+    if (!name) return;
+
+    const scoped = await db!.getRFIs<{
+      data: Array<{ project_name?: string }>;
+    }>({ length: 200, "search[value]": name });
+
+    const matched = scoped.data ?? [];
+    expect(matched.length).toBeGreaterThan(0);
+    // Every row either belongs to that project or legitimately mentions it.
+    expect(matched.some((r) => r.project_name === name)).toBe(true);
+  });
+});

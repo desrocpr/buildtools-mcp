@@ -16,9 +16,8 @@
 import { z } from "zod/v3";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
-import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 
-import type { ToolDefinition, ToolResult } from "./projects.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./projects.js";
 
 // ---------------------------------------------------------------------------
 // Markdown / formatting helpers (mirror briefs/forecasts)
@@ -175,7 +174,7 @@ interface UncollectedInvoice {
 const UNCOLLECTED_STATUSES = new Set(["Sent", "Partial", "Partly Paid", "To Pay"]);
 
 async function collectProjectInvoices(
-  api: BuildToolsAPI,
+  ctx: ToolContext,
   projectId: number,
   today: Date,
 ): Promise<{
@@ -188,7 +187,7 @@ async function collectProjectInvoices(
   let projectName = `#${projectId}`;
   let team = 0;
   try {
-    const project = await (api.db ?? api).getProject<ProjectRow>(projectId);
+    const project = await ctx.ops.getProject<ProjectRow>(projectId);
     if (project) {
       projectName = stripHtml(String(project.name ?? projectName));
       const c = Number(project.status_id ?? project.status);
@@ -200,7 +199,7 @@ async function collectProjectInvoices(
 
   let rows: UncollectedInvoice[] = [];
   try {
-    const result = await api.getFinancialStatements(projectId);
+    const result = await ctx.ops.getFinancialStatements(projectId);
     for (const s of result?.statements ?? []) {
       if (!UNCOLLECTED_STATUSES.has(s.status)) continue;
       if (s.balance <= 0.005) continue;
@@ -322,7 +321,7 @@ function hasPublishedSchedule(p: ProjectRow & { schedule_published_duration?: st
   return /\d/.test(v);
 }
 
-export const uncollectedInvoicesTool: ToolDefinition = {
+export const uncollectedInvoicesTool: ToolDefinition<ToolContext> = {
   name: "uncollected_invoices",
   description:
     "Report outstanding (sent-but-unpaid) financial statements aged by sent_date. " +
@@ -334,7 +333,7 @@ export const uncollectedInvoicesTool: ToolDefinition = {
     "When `team` is set, only projects with a published schedule are queried (design-phase projects have nothing sent anyway).",
   inputSchema: zodToJsonSchema(UncollectedInvoicesSchema),
   permission: "read:projects",
-  handler: async (rawArgs: unknown, api: BuildToolsAPI) => {
+  handler: async (rawArgs: unknown, ctx: ToolContext) => {
     const parsed = UncollectedInvoicesSchema.safeParse(rawArgs ?? {});
     if (!parsed.success) {
       return errorMarkdown(
@@ -356,7 +355,7 @@ export const uncollectedInvoicesTool: ToolDefinition = {
         teamFilter === "all_active" ? ACTIVE_TEAM_CODES : [TEAM_STATUS_MAP[teamFilter]];
       let allProjects: (ProjectRow & { schedule_published_duration?: string })[] = [];
       try {
-        const result = await (api.db ?? api).getProjects<{ data: typeof allProjects }>({ length: 300 });
+        const result = await ctx.ops.getProjects<{ data: typeof allProjects }>({ limit: 300 });
         allProjects = result?.data ?? [];
       } catch (err) {
         return errorMarkdown(
@@ -388,7 +387,7 @@ export const uncollectedInvoicesTool: ToolDefinition = {
       const batch = targetIds.slice(i, i + PROJECT_CONCURRENCY);
       const batchResults = await Promise.all(
         batch.map((id) =>
-          collectProjectInvoices(api, id, today).catch(() => ({
+          collectProjectInvoices(ctx, id, today).catch(() => ({
             projectName: `#${id}`,
             team: 0,
             rows: [],
@@ -412,7 +411,7 @@ export const uncollectedInvoicesTool: ToolDefinition = {
   },
 };
 
-export const invoiceTools: ToolDefinition[] = [uncollectedInvoicesTool];
+export const invoiceTools: ToolDefinition<ToolContext>[] = [uncollectedInvoicesTool];
 
 // Exported for tests
 export const __test__ = { parseSentDate, daysBetween, AGING_BUCKETS };

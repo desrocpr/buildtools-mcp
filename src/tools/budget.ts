@@ -11,10 +11,9 @@
 import { z } from "zod/v3";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
-import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 
-import type { ToolDefinition, ToolResult } from "./projects.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./projects.js";
 
 // ---------------------------------------------------------------------------
 // Helpers (mirrors selections.ts)
@@ -75,14 +74,14 @@ const ListBudgetInputSchema = z.object({
 
 async function listBudgetHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListBudgetInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_budget");
   const { project_id, allowances_only } = parsed.data;
 
   try {
-    const result = await (api.db ?? api).getBudget(project_id);
+    const result = await ctx.ops.getBudget(project_id);
     let items = result.items;
     if (allowances_only) {
       items = items.filter((i) => i.isAllowance);
@@ -116,7 +115,7 @@ async function listBudgetHandler(
   }
 }
 
-export const listBudgetTool: ToolDefinition = {
+export const listBudgetTool: ToolDefinition<ToolContext> = {
   name: "list_budget",
   description:
     "List all budget line items for a project (48+ categories — full grid, not just allowances). Set allowances_only=true to filter to allowance categories only. Use list_selection_categories for the catalog of budget category IDs needed when creating new items.",
@@ -129,4 +128,4 @@ export const listBudgetTool: ToolDefinition = {
 // Exported registry
 // ---------------------------------------------------------------------------
 
-export const budgetTools: ToolDefinition[] = [listBudgetTool];
+export const budgetTools: ToolDefinition<ToolContext>[] = [listBudgetTool];
