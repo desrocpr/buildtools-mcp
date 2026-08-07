@@ -16,7 +16,7 @@
 
 import type { BuildToolsAPI } from "../../../client/BuildToolsAPI.js";
 import { normalizeEnvelope, normalizeMaybeRow } from "../../normalize.js";
-import { toDatatableParams } from "./query.js";
+import { toDatatableParams, type GridName } from "./query.js";
 import type {
   AllowanceItem,
   BudgetCategoryRef,
@@ -91,13 +91,74 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
     return this.api.db ?? this.api;
   }
 
+  /**
+   * Rows to pull before filtering status client-side on the HTTP path.
+   *
+   * Bounded on purpose: an unbounded fetch to satisfy a filter would be worse
+   * than the bug. A status-filtered HTTP read therefore sees at most this many
+   * rows before narrowing.
+   */
+  private static readonly HTTP_STATUS_SCAN = 500;
+
+  /**
+   * Run a list read, compensating for BuildTools ignoring column filters.
+   *
+   * Verified live: sending `columns[1][search][value]=5|6|7|8` with the regex
+   * flag returns byte-identical rows to an unfiltered request, while `length`
+   * IS honoured — so the params arrive and the column filter specifically is
+   * discarded. `list_projects` asking for "Active" was getting every project,
+   * 333 Completed among them, under a header reading "(status: Active)".
+   *
+   * The DB path now filters in SQL (`MossDb.statusClause`). The HTTP path
+   * cannot, so the adapter narrows the rows itself — over-fetching first, since
+   * filtering a page of 50 mixed rows would return a handful and call it a
+   * page. This lives here because the adapter is the only layer that knows
+   * which back end served the read.
+   */
+  private async listRead<T>(
+    grid: GridName,
+    query: ListQuery,
+    call: (params: ReturnType<typeof toDatatableParams>) => Promise<unknown>,
+  ): Promise<T | null> {
+    const compensate = query.status !== undefined && !this.api.db;
+    if (!compensate) {
+      return normalizeEnvelope(await call(toDatatableParams(grid, query))) as
+        | T
+        | null;
+    }
+
+    const wanted = new Set(
+      (Array.isArray(query.status) ? query.status : [query.status]).map(String),
+    );
+    const scan = toDatatableParams(grid, {
+      ...query,
+      limit: BuildToolsOperationsAdapter.HTTP_STATUS_SCAN,
+    });
+    const raw = normalizeEnvelope(await call(scan)) as {
+      data?: Array<Record<string, unknown>>;
+    } | null;
+    if (!raw?.data) return raw as T | null;
+
+    const matched = raw.data.filter((row) => wanted.has(String(row.status)));
+    const limited =
+      query.limit === undefined ? matched : matched.slice(0, query.limit);
+    return {
+      ...raw,
+      data: limited,
+      recordsTotal: matched.length,
+      recordsFiltered: matched.length,
+    } as T;
+  }
+
   // --- list reads ---------------------------------------------------------
 
   async getProjects<T = unknown>(query: ListQuery = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getProjects<T>(toDatatableParams("projects", query)));
+    return this.listRead<T>("projects", query, (p) => this.reader.getProjects(p));
   }
   async getCompanies<T = unknown>(query: ListQuery = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getCompanies<T>(toDatatableParams("companies", query)));
+    return this.listRead<T>("companies", query, (p) =>
+      this.reader.getCompanies(p),
+    );
   }
   async getPurchaseOrders<T = unknown>(
     query: ListQuery = {},
@@ -105,7 +166,7 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
     return normalizeEnvelope(await this.reader.getPurchaseOrders<T>(toDatatableParams("purchaseOrders", query)));
   }
   async getTasks<T = unknown>(query: ListQuery = {}): Promise<T | null> {
-    return normalizeEnvelope(await this.reader.getTasks<T>(toDatatableParams("tasks", query)));
+    return this.listRead<T>("tasks", query, (p) => this.reader.getTasks(p));
   }
   async getRFIs<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     return normalizeEnvelope(await this.reader.getRFIs<T>(toDatatableParams("rfis", query)));

@@ -151,6 +151,43 @@ export function rejectUnsupportedSearch(
   }
 }
 
+
+/**
+ * Build a status filter from the DataTables column-search param.
+ *
+ * WHY THIS EXISTS — this adapter ignored the status filter entirely, and so
+ * does BuildTools over HTTP (verified live: sending
+ * `columns[1][search][value]=5|6|7|8` with the regex flag returns byte-identical
+ * rows to an unfiltered request, while `length` IS honoured — so the params
+ * arrive and the column filter specifically is discarded, almost certainly
+ * because BT's own UI also sends `columns[i][data]`/`[name]` definitions that
+ * map an index to a field, and this client sends only the search value).
+ *
+ * Net effect before this fix: `list_projects` with status "Active" returned
+ * EVERY project — 333 Completed among them — under a header reading
+ * "(status: Active)". Same for `list_tasks`.
+ *
+ * Accepts both wire forms the tool layer emits: a single code ("6") and the
+ * pipe-joined multi-code form used with the regex flag ("5|6|7|8").
+ */
+export function statusClause(
+  opts: Record<string, unknown>,
+  column: number,
+  sqlColumn: string,
+): { sql: string | null; params: number[] } {
+  const raw = opts[`columns[${column}][search][value]`];
+  if (raw === undefined || raw === null) return { sql: null, params: [] };
+  const codes = String(raw)
+    .split("|")
+    .map((part) => Number(part.trim()))
+    .filter((n) => Number.isFinite(n));
+  if (codes.length === 0) return { sql: null, params: [] };
+  return {
+    sql: `${sqlColumn} IN (${codes.map(() => "?").join(", ")})`,
+    params: codes,
+  };
+}
+
 export class MossDb {
   private pool: Pool;
 
@@ -265,6 +302,24 @@ export class MossDb {
     // The HTTP grid's global search spans the displayed columns; name/address/
     // city is the closest faithful equivalent here.
     const search = searchClause(opts, ["p.name", "p.address", "p.city"]);
+    // Column 1 is the projects grid's status column.
+    const status = statusClause(opts, 1, "p.status");
+    // Built as a list, like every other method here. An earlier fix computed
+    // `search` and then interpolated nothing into the query — the clause was
+    // dead and the search silently kept returning unfiltered rows. Assembling
+    // the predicates in one place makes that failure mode structural rather
+    // than a matter of remembering to interpolate.
+    const where: string[] = ["p.status BETWEEN 1 AND 20"];
+    const params: unknown[] = [];
+    if (status.sql) {
+      where.push(status.sql);
+      params.push(...status.params);
+    }
+    if (search.sql) {
+      where.push(search.sql);
+      params.push(...search.params);
+    }
+
     // One query: join projects to the latest published-snapshot duration
     const [rows] = await this.pool.query<RowDataPacket[]>(
       `SELECT
@@ -278,10 +333,10 @@ export class MossDb {
           WHERE sp.is_published_last = 1
           GROUP BY st.project_id
        ) dur ON dur.project_id = p.id
-       WHERE p.status BETWEEN 1 AND 20
+       WHERE ${where.join(" AND ")}
        ORDER BY p.id DESC
        LIMIT ?`,
-      [limit],
+      [...params, limit],
     );
     const data = rows.map((r) => ({
       id: r.id,
@@ -762,6 +817,12 @@ export class MossDb {
     if (search) {
       where.push("(t.name LIKE ? OR t.description LIKE ?)");
       params.push(`%${search}%`, `%${search}%`);
+    }
+    // Column 1 is the tasks grid's status column.
+    const status = statusClause(opts, 1, "t.status");
+    if (status.sql) {
+      where.push(status.sql);
+      params.push(...status.params);
     }
     const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     const [rows] = await this.pool.query<RowDataPacket[]>(
@@ -1512,4 +1573,4 @@ export function buildMossDbFromEnv(env: NodeJS.ProcessEnv = process.env): MossDb
   });
 }
 
-export const __test__ = { fsStatusLabel, mmddyyyy, searchClause, rejectUnsupportedSearch };
+export const __test__ = { fsStatusLabel, mmddyyyy, searchClause, rejectUnsupportedSearch, statusClause };
