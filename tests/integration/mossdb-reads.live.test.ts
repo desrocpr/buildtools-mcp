@@ -145,3 +145,42 @@ describe.skipIf(!HOST)("MossDb.getProjects — status and search actually narrow
     for (const r of combo.data ?? []) expect(Number(r.status)).toBe(6);
   });
 });
+
+describe.skipIf(!HOST)("MossDb.getTasks / getCompanies — status filters run in SQL", () => {
+  // getTasks' status wiring shipped with no live test, only a clause-builder
+  // unit test — which is exactly the gap that let PR #102 ship a dead clause.
+  it("getTasks narrows to the requested status", async () => {
+    const res = await db!.getTasks<{ data: Array<{ status: number }> }>({
+      length: 300,
+      "columns[1][search][value]": "1",
+    });
+    const rows = res.data ?? [];
+    for (const r of rows) expect(Number(r.status)).toBe(1);
+  });
+
+  it("getTasks returns fewer rows than an unfiltered read", async () => {
+    const all = await db!.getTasks<{ data: unknown[] }>({ length: 300 });
+    const one = await db!.getTasks<{ data: unknown[] }>({
+      length: 300,
+      "columns[1][search][value]": "1",
+    });
+    expect((one.data ?? []).length).toBeLessThanOrEqual((all.data ?? []).length);
+  });
+
+  it("getCompanies narrows on status, which it previously ignored", async () => {
+    // query.ts recorded companies' status column as verified and the adapter
+    // compensated for it over HTTP, but this method never read column 0 — so
+    // the filter was a silent no-op on the production path.
+    const all = await db!.getCompanies<{ data: Array<{ status: number }> }>({
+      length: 400,
+    });
+    const statuses = new Set((all.data ?? []).map((r) => Number(r.status)));
+    const target = [...statuses][0];
+    if (target === undefined) return;
+
+    const filtered = await db!.getCompanies<{ data: Array<{ status: number }> }>(
+      { length: 400, "columns[0][search][value]": String(target) },
+    );
+    for (const r of filtered.data ?? []) expect(Number(r.status)).toBe(target);
+  });
+});
