@@ -412,3 +412,97 @@ describe("status filtering compensates for BuildTools ignoring column filters", 
     expect(http.seen[0]!.length).toBe(25);
   });
 });
+
+describe("status compensation — pagination and scan bounds", () => {
+  function grid(rows: Array<Record<string, unknown>>) {
+    const seen: Array<Record<string, unknown>> = [];
+    return {
+      seen,
+      async getProjects(params: Record<string, unknown>) {
+        seen.push(params);
+        const start = Number(params.start ?? 0);
+        const len = Number(params.length ?? rows.length);
+        return { data: rows.slice(start, start + len) };
+      },
+    };
+  }
+  const rows = (n: number, status: number) =>
+    Array.from({ length: n }, (_, i) => ({ id: `${status}-${i}`, status }));
+
+  it("applies offset to the MATCHED rows, not the raw pre-filter window", async () => {
+    // Forwarding offset to the grid skips a mix of statuses, so page 2 is not a
+    // continuation of page 1. Interleave so a raw skip and a matched skip give
+    // visibly different answers.
+    const interleaved: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 6; i++) {
+      interleaved.push({ id: `hit-${i}`, status: 6 });
+      interleaved.push({ id: `miss-${i}`, status: 4 });
+    }
+    const http = grid(interleaved);
+    const adapter = new BuildToolsOperationsAdapter({
+      ...http,
+      db: null,
+    } as unknown as BuildToolsAPI);
+
+    const page2 = (await adapter.getProjects({
+      status: 6,
+      limit: 2,
+      offset: 2,
+    })) as { data: Array<Record<string, unknown>> };
+
+    // Matched rows are hit-0..hit-5; offset 2 limit 2 must be hit-2, hit-3.
+    expect(page2.data.map((r) => r.id)).toEqual(["hit-2", "hit-3"]);
+    // And the raw scan must not have carried the offset.
+    expect(http.seen[0]!.start).toBeUndefined();
+  });
+
+  it("pages consistently: page1 and page2 do not overlap and follow on", async () => {
+    const http = grid([...rows(5, 6), ...rows(5, 4)]);
+    const adapter = new BuildToolsOperationsAdapter({
+      ...http,
+      db: null,
+    } as unknown as BuildToolsAPI);
+
+    const p1 = (await adapter.getProjects({ status: 6, limit: 2 })) as {
+      data: Array<{ id: string }>;
+    };
+    const p2 = (await adapter.getProjects({
+      status: 6,
+      limit: 2,
+      offset: 2,
+    })) as { data: Array<{ id: string }> };
+
+    expect(p1.data.map((r) => r.id)).toEqual(["6-0", "6-1"]);
+    expect(p2.data.map((r) => r.id)).toEqual(["6-2", "6-3"]);
+  });
+
+  it("flags the counts as partial when the bounded scan hits its cap", async () => {
+    // The tool renders recordsTotal as "(filtered N total)". Beyond the cap
+    // that number is a floor, and saying so beats reporting it confidently.
+    const http = grid(rows(500, 6));
+    const adapter = new BuildToolsOperationsAdapter({
+      ...http,
+      db: null,
+    } as unknown as BuildToolsAPI);
+
+    const res = (await adapter.getProjects({ status: 6 })) as {
+      countsArePartial: boolean;
+    };
+
+    expect(res.countsArePartial).toBe(true);
+  });
+
+  it("does not flag partial counts for a grid smaller than the cap", async () => {
+    const http = grid(rows(10, 6));
+    const adapter = new BuildToolsOperationsAdapter({
+      ...http,
+      db: null,
+    } as unknown as BuildToolsAPI);
+
+    const res = (await adapter.getProjects({ status: 6 })) as {
+      countsArePartial: boolean;
+    };
+
+    expect(res.countsArePartial).toBe(false);
+  });
+});

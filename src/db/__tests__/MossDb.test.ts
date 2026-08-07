@@ -96,3 +96,59 @@ describe("MossDb — search handling (search[value])", () => {
     ).not.toThrow();
   });
 });
+
+describe("MossDb — statusClause", () => {
+  const { statusClause } = __test__;
+  const KEY = "columns[1][search][value]";
+
+  it("builds an IN clause from a single code", () => {
+    const out = statusClause({ [KEY]: "6" }, 1, "p.status");
+    expect(out.sql).toBe("p.status IN (?)");
+    expect(out.params).toEqual([6]);
+  });
+
+  it("builds an IN clause from the pipe-joined multi-code form", () => {
+    const out = statusClause({ [KEY]: "5|6|7|8" }, 1, "p.status");
+    expect(out.sql).toBe("p.status IN (?, ?, ?, ?)");
+    expect(out.params).toEqual([5, 6, 7, 8]);
+  });
+
+  it("emits no clause when the key is absent", () => {
+    expect(statusClause({}, 1, "p.status").sql).toBeNull();
+  });
+
+  it("treats an empty value as 'no filter', not as status 0", () => {
+    // Number("") is 0 and passes Number.isFinite, so the first version built
+    // `IN (0)` — which matches nothing, since codes start at 1.
+    expect(statusClause({ [KEY]: "" }, 1, "p.status").sql).toBeNull();
+    expect(statusClause({ [KEY]: "   " }, 1, "p.status").sql).toBeNull();
+  });
+
+  it("THROWS on an unparseable value rather than dropping the filter", () => {
+    // Silently returning "no filter" is precisely the bug this function exists
+    // to prevent: the caller asked to narrow and would get everything back,
+    // rendered as filtered. Mixing status and companyType is the easy slip.
+    expect(() => statusClause({ [KEY]: "Vendor" }, 1, "p.status")).toThrow(
+      /not a valid code/,
+    );
+  });
+
+  it("THROWS on a partially-numeric list rather than silently narrowing", () => {
+    // "5|abc|7" must not quietly become IN (5,7) — that is a different query
+    // than the caller asked for.
+    expect(() => statusClause({ [KEY]: "5|abc|7" }, 1, "p.status")).toThrow(
+      /not a valid code/,
+    );
+  });
+
+  it("bounds the number of codes it will turn into placeholders", () => {
+    const many = Array.from({ length: 200 }, (_, i) => i + 1).join("|");
+    expect(() => statusClause({ [KEY]: many }, 1, "p.status")).toThrow(/max/);
+  });
+
+  it("binds values as parameters rather than interpolating them", () => {
+    const out = statusClause({ [KEY]: "5|6" }, 1, "p.status");
+    expect(out.sql).not.toContain("5");
+    expect(out.params).toEqual([5, 6]);
+  });
+});

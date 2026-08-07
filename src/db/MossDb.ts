@@ -169,6 +169,12 @@ export function rejectUnsupportedSearch(
  *
  * Accepts both wire forms the tool layer emits: a single code ("6") and the
  * pipe-joined multi-code form used with the regex flag ("5|6|7|8").
+ *
+ * FAILS LOUD on a value it cannot parse. The first version returned
+ * `{sql: null}` for unparseable input — silently dropping the filter, which is
+ * the exact failure this function was written to eliminate, and inconsistent
+ * with `rejectUnsupportedSearch` directly above. "Absent" and "garbage" are
+ * different questions and must not share an answer.
  */
 export function statusClause(
   opts: Record<string, unknown>,
@@ -177,16 +183,43 @@ export function statusClause(
 ): { sql: string | null; params: number[] } {
   const raw = opts[`columns[${column}][search][value]`];
   if (raw === undefined || raw === null) return { sql: null, params: [] };
-  const codes = String(raw)
-    .split("|")
-    .map((part) => Number(part.trim()))
-    .filter((n) => Number.isFinite(n));
-  if (codes.length === 0) return { sql: null, params: [] };
+
+  // An empty value means "no filter selected", not "status 0" — `Number("")`
+  // is 0 and passes Number.isFinite, which would have produced `IN (0)` and
+  // matched nothing. `searchClause` already treats empty this way.
+  const text = String(raw).trim();
+  if (text === "") return { sql: null, params: [] };
+
+  const parts = text.split("|").map((p) => p.trim());
+  const codes = parts.map(Number).filter((n) => Number.isFinite(n));
+
+  if (codes.length !== parts.length) {
+    throw new Error(
+      `MossDb: status filter "${text}" is not a valid code or pipe-joined code list. ` +
+        "Dropping it would silently return unfiltered rows and present them as " +
+        "filtered — the bug this filter exists to prevent.",
+    );
+  }
+  if (codes.length > MAX_STATUS_CODES) {
+    throw new Error(
+      `MossDb: status filter carries ${codes.length} codes (max ${MAX_STATUS_CODES}).`,
+    );
+  }
+
   return {
     sql: `${sqlColumn} IN (${codes.map(() => "?").join(", ")})`,
     params: codes,
   };
 }
+
+/**
+ * Upper bound on codes in one status filter.
+ *
+ * Every caller today is bounded by a small static enum→code map, but this is an
+ * exported helper taking an untyped bag, and `ListQuery.status` is an unbounded
+ * array — so it defends itself rather than trusting every future caller.
+ */
+const MAX_STATUS_CODES = 64;
 
 export class MossDb {
   private pool: Pool;
@@ -202,6 +235,17 @@ export class MossDb {
       connectionLimit: cfg.connectionLimit ?? 8,
       waitForConnections: true,
       queueLimit: 0,
+    });
+
+    // Raise GROUP_CONCAT's output cap on every connection.
+    //
+    // The default is 1024 bytes, and `getCompanies` was hitting it on real
+    // data: 15 of 1,098 companies exceeded it (largest 1,922 bytes), and MySQL
+    // truncates mid-entry and reports it only as a WARNING — which mysql2 does
+    // not surface, so the caller silently received a corrupted list. The tool
+    // layer reads the FIRST entry, which survives, so nothing looked broken.
+    this.pool.on("connection", (conn) => {
+      conn.query("SET SESSION group_concat_max_len = 32768");
     });
   }
 
@@ -723,6 +767,19 @@ export class MossDb {
         params.push(code);
       }
     }
+
+    // Status lives in column 0 on this grid. `query.ts` records that index as
+    // verified and the adapter is wired to compensate for it over HTTP — but
+    // this method never read it, so a status-filtered companies read was a
+    // silent no-op on the DB fast path, which is production. Claiming support
+    // in one layer and not implementing it in another is worse than not
+    // claiming it.
+    const status = statusClause(opts, 0, "c.status");
+    if (status.sql) {
+      where.push(status.sql);
+      params.push(...status.params);
+    }
+
     const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     const [rows] = await this.pool.query<RowDataPacket[]>(
       // `main_contact` and `budget_relations` are relations the HTTP grid renders
@@ -741,17 +798,43 @@ export class MossDb {
       //                      every probed company, including company 1033
       //                      ("7031, 7521, 7030"), which neither budget_category
       //                      id order nor `sort` order matches.
+      // Aggregated ONCE per relation, then joined — not correlated subqueries
+      // run per outer row. Measured on the replica: the correlated form took
+      // 592-893ms for length=500; this returns identical rows in ~116ms. Same
+      // rewrite `getBudget` got in PR #85, and there are no secondary indexes
+      // on these tables (only PRIMARY), so a per-row dependent scan is a full
+      // scan every time.
+      //
+      // NOTE on main_contact: some companies carry more than one row with
+      // main_contact = 1 (e.g. 15, 70, 95, 266, 775). The previous `LIMIT 1`
+      // with no ORDER BY picked non-deterministically. This takes the WHOLE
+      // name of the lowest user id — MIN(first_name) with MIN(last_name) would
+      // have been worse than non-deterministic, splicing one person's forename
+      // onto another's surname.
       `SELECT c.id, c.name, c.type, c.type_name, c.email, c.phone, c.address, c.city, c.state, c.zip, c.status,
-              (SELECT TRIM(CONCAT(u.first_name, ' ', u.last_name))
-                 FROM companies_users cu
-                 JOIN users u ON u.id = cu.user_id
-                WHERE cu.company_id = c.id AND cu.main_contact = 1
-                LIMIT 1) AS main_contact,
-              (SELECT GROUP_CONCAT(CONCAT(bc.code, ' - ', bc.name) ORDER BY cbc.id SEPARATOR ', ')
-                 FROM companies_budget_categories cbc
-                 JOIN budget_categories bc ON bc.id = cbc.budget_category_id
-                WHERE cbc.company_id = c.id) AS budget_relations
+              mc.main_contact,
+              br.budget_relations
          FROM companies c
+         LEFT JOIN (
+           SELECT cu.company_id,
+                  SUBSTRING_INDEX(
+                    GROUP_CONCAT(
+                      TRIM(CONCAT(u.first_name, ' ', u.last_name))
+                      ORDER BY u.id SEPARATOR '\\n'
+                    ), '\\n', 1
+                  ) AS main_contact
+             FROM companies_users cu
+             JOIN users u ON u.id = cu.user_id
+            WHERE cu.main_contact = 1
+            GROUP BY cu.company_id
+         ) mc ON mc.company_id = c.id
+         LEFT JOIN (
+           SELECT cbc.company_id,
+                  GROUP_CONCAT(CONCAT(bc.code, ' - ', bc.name) ORDER BY cbc.id SEPARATOR ', ') AS budget_relations
+             FROM companies_budget_categories cbc
+             JOIN budget_categories bc ON bc.id = cbc.budget_category_id
+            GROUP BY cbc.company_id
+         ) br ON br.company_id = c.id
          ${whereSql}
          ORDER BY c.id DESC
          LIMIT ?`,

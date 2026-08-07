@@ -130,8 +130,14 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
     const wanted = new Set(
       (Array.isArray(query.status) ? query.status : [query.status]).map(String),
     );
+
+    // `offset` is deliberately NOT forwarded to the scan. The grid would skip
+    // that many RAW rows before filtering, so page 2 would not continue page 1
+    // — it would skip a mix of statuses. Offset is applied below, to the
+    // matched set, which is what the caller actually paginated.
+    const { offset: requestedOffset, ...scanQuery } = query;
     const scan = toDatatableParams(grid, {
-      ...query,
+      ...scanQuery,
       limit: BuildToolsOperationsAdapter.HTTP_STATUS_SCAN,
     });
     const raw = normalizeEnvelope(await call(scan)) as {
@@ -139,14 +145,23 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
     } | null;
     if (!raw?.data) return raw as T | null;
 
+    // The scan is bounded, so a grid larger than the cap yields a partial view.
+    // Say so rather than reporting a confident total computed from a window —
+    // `list_projects` renders that number as "(filtered N total)".
+    const scanTruncated =
+      raw.data.length >= BuildToolsOperationsAdapter.HTTP_STATUS_SCAN;
+
     const matched = raw.data.filter((row) => wanted.has(String(row.status)));
-    const limited =
-      query.limit === undefined ? matched : matched.slice(0, query.limit);
+    const start = requestedOffset ?? 0;
+    const end = query.limit === undefined ? undefined : start + query.limit;
+
     return {
       ...raw,
-      data: limited,
+      data: matched.slice(start, end),
       recordsTotal: matched.length,
       recordsFiltered: matched.length,
+      /** True when the bounded scan hit its cap, so the counts are a floor. */
+      countsArePartial: scanTruncated,
     } as T;
   }
 
