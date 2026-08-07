@@ -33,7 +33,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 
-import type { ToolDefinition, ToolResult } from "./projects.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./projects.js";
 
 // ---------------------------------------------------------------------------
 // Rendering helpers
@@ -153,7 +153,7 @@ function formatCertificateRow(row: Record<string, unknown>): string {
 
 async function listCertificatesHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListCertificatesInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_certificates");
@@ -162,12 +162,12 @@ async function listCertificatesHandler(
 
   try {
     const result = query
-      ? await (api.db ?? api).searchCertificates<WorkTrackingDatatable>(
+      ? await ctx.ops.searchCertificates<WorkTrackingDatatable>(
           query,
           effectiveLimit,
         )
-      : await (api.db ?? api).getCertificates<WorkTrackingDatatable>({
-          length: effectiveLimit,
+      : await ctx.ops.getCertificates<WorkTrackingDatatable>({
+          limit: effectiveLimit,
         });
     const rows = result?.data ?? [];
     if (rows.length === 0) {
@@ -182,7 +182,7 @@ async function listCertificatesHandler(
   }
 }
 
-export const listCertificatesTool: ToolDefinition = {
+export const listCertificatesTool: ToolDefinition<ToolContext> = {
   name: "list_certificates",
   description:
     "List BuildTools certificates (insurance, licensing, etc.) with optional free-text search.",
@@ -225,15 +225,15 @@ function formatDailyLogRow(row: Record<string, unknown>): string {
 
 async function listDailyLogsHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = LimitOnlyInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_daily_logs");
   const effectiveLimit = parsed.data.limit ?? 50;
 
   try {
-    const result = await (api.db ?? api).getDailyLogs<WorkTrackingDatatable>({
-      length: effectiveLimit,
+    const result = await ctx.ops.getDailyLogs<WorkTrackingDatatable>({
+      limit: effectiveLimit,
     });
     const rows = result?.data ?? [];
     if (rows.length === 0) return markdown(`No daily logs found.`);
@@ -245,7 +245,7 @@ async function listDailyLogsHandler(
   }
 }
 
-export const listDailyLogsTool: ToolDefinition = {
+export const listDailyLogsTool: ToolDefinition<ToolContext> = {
   name: "list_daily_logs",
   description:
     "List BuildTools daily logs (per-project per-day status entries).",
@@ -276,7 +276,7 @@ function formatWeeklyReportRow(row: Record<string, unknown>): string {
 
 async function listWeeklyReportsHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = LimitOnlyInputSchema.safeParse(args ?? {});
   if (!parsed.success) {
@@ -285,8 +285,8 @@ async function listWeeklyReportsHandler(
   const effectiveLimit = parsed.data.limit ?? 50;
 
   try {
-    const result = await (api.db ?? api).getWeeklyReports<WorkTrackingDatatable>({
-      length: effectiveLimit,
+    const result = await ctx.ops.getWeeklyReports<WorkTrackingDatatable>({
+      limit: effectiveLimit,
     });
     const rows = result?.data ?? [];
     if (rows.length === 0) return markdown(`No weekly reports found.`);
@@ -298,7 +298,7 @@ async function listWeeklyReportsHandler(
   }
 }
 
-export const listWeeklyReportsTool: ToolDefinition = {
+export const listWeeklyReportsTool: ToolDefinition<ToolContext> = {
   name: "list_weekly_reports",
   description:
     "List BuildTools weekly reports (per-project weekly progress summaries).",
@@ -327,15 +327,15 @@ function formatWorkDayRow(row: Record<string, unknown>): string {
 
 async function listWorkDaysHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = LimitOnlyInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_work_days");
   const effectiveLimit = parsed.data.limit ?? 50;
 
   try {
-    const result = await (api.db ?? api).getWorkDays<WorkTrackingDatatable>({
-      length: effectiveLimit,
+    const result = await ctx.ops.getWorkDays<WorkTrackingDatatable>({
+      limit: effectiveLimit,
     });
     const rows = result?.data ?? [];
     if (rows.length === 0) return markdown(`No work days found.`);
@@ -347,7 +347,7 @@ async function listWorkDaysHandler(
   }
 }
 
-export const listWorkDaysTool: ToolDefinition = {
+export const listWorkDaysTool: ToolDefinition<ToolContext> = {
   name: "list_work_days",
   description:
     "List BuildTools work-day entries (per-user per-day hours logged on projects).",
@@ -360,7 +360,7 @@ export const listWorkDaysTool: ToolDefinition = {
 // Exported registry
 // ---------------------------------------------------------------------------
 
-export const workTrackingTools: ToolDefinition[] = [
+export const workTrackingTools: ToolDefinition<ToolContext>[] = [
   listCertificatesTool,
   listDailyLogsTool,
   listWeeklyReportsTool,

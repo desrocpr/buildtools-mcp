@@ -26,7 +26,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 
 import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 
-import type { ToolDefinition, ToolResult } from "./projects.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./projects.js";
 
 // ---------------------------------------------------------------------------
 // Markdown helpers (mirrors briefs.ts; duplicated to keep modules independent)
@@ -346,7 +346,7 @@ function hasPublishedSchedule(p: ProjectRow): boolean {
 }
 
 async function buildProjectForecast(
-  api: BuildToolsAPI,
+  ctx: ToolContext,
   projectId: number,
   granularity: "weekly" | "monthly" | "quarterly",
 ): Promise<ProjectForecast | null> {
@@ -366,7 +366,7 @@ async function buildProjectForecast(
 
   // 1. Project header — name, team, contract value
   try {
-    const project = await (api.db ?? api).getProject<ProjectRow>(projectId);
+    const project = await ctx.ops.getProject<ProjectRow>(projectId);
     if (project) {
       forecast.name = stripHtml(String(project.name ?? `#${projectId}`));
       const statusCode = Number(project.status_id ?? project.status);
@@ -381,21 +381,10 @@ async function buildProjectForecast(
     return forecast;
   }
 
-  // PR #84: budget-prime only needed for HTTP — the BT session has to
-  // "select" the project before /schedule/published/data returns rows.
-  // DB-backed getSchedule is project-scoped via SQL and doesn't need
-  // priming. Skip the prime when api.db is set; saves ~2s/project on
-  // team-wide forecasts (the prime triggers getBudget's expensive
-  // per-category subqueries).
-  if (!api.db) {
-    try {
-      await api.getBudget(projectId);
-    } catch (err) {
-      process.stderr.write(
-        `[cash_flow_forecast] budget prime failed for ${projectId}: ${err instanceof Error ? err.message : String(err)}\n`,
-      );
-    }
-  }
+  // The schedule read's budget-prime used to live here, gated on `api.db`.
+  // The adapter owns it now (BuildToolsOperationsAdapter.getSchedule) — it is
+  // the only layer that knows which back end is serving the read, and the
+  // precondition would have vanished silently on retarget otherwise.
 
   // 3. Parallel: FS + schedule.
   //    PR #78 v2: published schedule is the authoritative committed
@@ -404,14 +393,14 @@ async function buildProjectForecast(
   //    we don't drop those projects' Drafts to "unscheduled" entirely.
   // PR #84: also flip the FS fetch to DB (was missed by earlier sed).
   const [fsResult, publishedResult] = await Promise.all([
-    (api.db ?? api).getFinancialStatements(projectId).catch(() => null),
-    (api.db ?? api).getSchedule(projectId, "published").catch(() => null),
+    ctx.ops.getFinancialStatements(projectId).catch(() => null),
+    ctx.ops.getSchedule(projectId, "published").catch(() => null),
   ]);
   if (fsResult === null) forecast.errors.push("financial statements unavailable");
   let scheduleResult = publishedResult;
   if (!scheduleResult?.tasks || scheduleResult.tasks.length <= 1) {
     // Empty / stub published — try working as fallback.
-    scheduleResult = await (api.db ?? api).getSchedule(projectId, "working").catch(() => null);
+    scheduleResult = await ctx.ops.getSchedule(projectId, "working").catch(() => null);
     if (scheduleResult?.tasks && scheduleResult.tasks.length > 1) {
       forecast.errors.push("using working schedule (no published)");
     }
@@ -639,7 +628,7 @@ function renderForecast(
 
 const PROJECT_CONCURRENCY = 5;
 
-export const cashFlowForecastTool: ToolDefinition = {
+export const cashFlowForecastTool: ToolDefinition<ToolContext> = {
   name: "cash_flow_forecast",
   description:
     "Projects expected cash inflows over the next N weeks / months / quarters. Joins Draft financial statements to the published schedule via name match, buckets by task end date. Sent-but-unpaid FS surfaced separately as receivables (AR). " +
@@ -648,7 +637,7 @@ export const cashFlowForecastTool: ToolDefinition = {
     "No payment-lag modeling yet — Sent-unpaid shown as immediate AR.",
   inputSchema: zodToJsonSchema(CashFlowForecastSchema),
   permission: "read:projects",
-  handler: async (rawArgs: unknown, api: BuildToolsAPI) => {
+  handler: async (rawArgs: unknown, ctx: ToolContext) => {
     const parsed = CashFlowForecastSchema.safeParse(rawArgs ?? {});
     if (!parsed.success) {
       return errorMarkdown(
@@ -674,8 +663,8 @@ export const cashFlowForecastTool: ToolDefinition = {
         teamFilter === "all_active" ? ACTIVE_TEAM_CODES : [TEAM_STATUS_MAP[teamFilter]];
       let allProjects: ProjectRow[] = [];
       try {
-        const result = await (api.db ?? api).getProjects<{ data: ProjectRow[] }>({
-          length: 300,
+        const result = await ctx.ops.getProjects<{ data: ProjectRow[] }>({
+          limit: 300,
         });
         allProjects = result?.data ?? [];
       } catch (err) {
@@ -718,7 +707,7 @@ export const cashFlowForecastTool: ToolDefinition = {
     for (let i = 0; i < targetIds.length; i += PROJECT_CONCURRENCY) {
       const batch = targetIds.slice(i, i + PROJECT_CONCURRENCY);
       const batchResults = await Promise.all(
-        batch.map((id) => buildProjectForecast(api, id, granularity).catch(() => null)),
+        batch.map((id) => buildProjectForecast(ctx, id, granularity).catch(() => null)),
       );
       for (const f of batchResults) if (f) forecasts.push(f);
     }
@@ -734,7 +723,7 @@ export const cashFlowForecastTool: ToolDefinition = {
   },
 };
 
-export const forecastTools: ToolDefinition[] = [cashFlowForecastTool];
+export const forecastTools: ToolDefinition<ToolContext>[] = [cashFlowForecastTool];
 
 // Exported for tests
 export const __test__ = { nameMatch, bucketKey, iterBuckets, tokensFromDraftName, tokenize };
