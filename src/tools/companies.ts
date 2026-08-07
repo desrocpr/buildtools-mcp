@@ -24,7 +24,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 
-import type { ToolDefinition, ToolResult } from "./projects.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./projects.js";
 
 // ---------------------------------------------------------------------------
 // Local helpers (duplicated per the convention established in financial.ts
@@ -180,7 +180,7 @@ interface CompaniesDatatable {
 
 async function searchCompaniesHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = SearchCompaniesInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "search_companies");
@@ -190,8 +190,15 @@ async function searchCompaniesHandler(
   const limit = input.limit ?? SEARCH_COMPANIES_DEFAULT_LIMIT;
 
   try {
-    const result = await api.searchCompanies<CompaniesDatatable>(input.query, {
-      role,
+    // `searchCompanies` was `getCompanies` plus a search term and a role column
+    // filter — nothing more (BuildToolsAPI.searchCompanies). Expressing it as
+    // facets keeps both company tools on ONE read path, so they share the same
+    // id convention; leaving this one on the raw client would have meant
+    // `list_customers` returning normalised ids while `search_companies` still
+    // parsed `row_` off the very same grid.
+    const result = await ctx.ops.getCompanies<CompaniesDatatable>({
+      search: input.query,
+      companyType: role,
       limit,
     });
     const rows = result?.data ?? [];
@@ -253,7 +260,7 @@ async function searchCompaniesHandler(
   }
 }
 
-export const searchCompaniesTool: ToolDefinition = {
+export const searchCompaniesTool: ToolDefinition<ToolContext> = {
   name: "search_companies",
   description:
     "[v1 2026-06-23] Search the BuildTools companies/vendors directory by name, contact, email, address, or budget relations. " +
@@ -301,14 +308,14 @@ interface PurchaseOrdersDatatable {
 
 async function getCompanyHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = GetCompanyInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "get_company");
   const { company_id }: GetCompanyInput = parsed.data;
 
   try {
-    const row = (await (api.db ?? api).getCompany<CompanyRow>(company_id)) ?? null;
+    const row = (await ctx.ops.getCompany<CompanyRow>(company_id)) ?? null;
     if (!row) {
       return markdown(`No company found for ID **${company_id}**.`);
     }
@@ -332,10 +339,14 @@ async function getCompanyHandler(
         fullName
           .replace(/,?\s+(LLC|L\.?L\.?C\.?|Inc\.?|Corp\.?|Ltd\.?|Co\.?)\b.*$/i, "")
           .trim() || fullName;
-      const poResp = await api.searchPurchaseOrders<PurchaseOrdersDatatable>(
-        searchKey,
-        50,
-      );
+      // `searchPurchaseOrders` is `getPurchaseOrders` with a search term and a
+      // page size on both back ends — MossDb's is a one-line delegation — so
+      // the facet form is an exact equivalent and keeps this read on the
+      // adapter path.
+      const poResp = await ctx.ops.getPurchaseOrders<PurchaseOrdersDatatable>({
+        search: searchKey,
+        limit: 50,
+      });
       const poRows = (poResp?.data ?? []).filter((r) => {
         return String(r.company ?? "").trim() === fullName;
       });
@@ -399,7 +410,11 @@ async function getCompanyHandler(
     );
     if (poHistory.mostRecent) {
       const mr = poHistory.mostRecent;
+      // `id` first: it is the one field both back ends always carry. `info` is
+      // the HTTP grid's name for it, and `DT_RowId` is stripped by the adapter's
+      // normalisation — so reading those first rendered "?" on the DB path.
       const poId =
+        (mr.id as string | number | undefined) ??
         (mr.info as string | number | undefined) ??
         (typeof mr.DT_RowId === "string"
           ? mr.DT_RowId.replace(/^row_/, "")
@@ -419,7 +434,7 @@ async function getCompanyHandler(
   }
 }
 
-export const getCompanyTool: ToolDefinition = {
+export const getCompanyTool: ToolDefinition<ToolContext> = {
   name: "get_company",
   description:
     "[v1 2026-06-23] Get full BuildTools company detail by ID: role, contact, address, all associated budget categories (with the default highlighted), and purchase-order history summary (count + total + most-recent). " +
@@ -433,7 +448,7 @@ export const getCompanyTool: ToolDefinition = {
 // Exported registry
 // ---------------------------------------------------------------------------
 
-export const companyTools: ToolDefinition[] = [
+export const companyTools: ToolDefinition<ToolContext>[] = [
   searchCompaniesTool,
   getCompanyTool,
 ];

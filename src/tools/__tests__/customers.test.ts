@@ -15,7 +15,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
+import type { OperationsManagementApi } from "../../operations/types.js";
 import {
   BuildToolsAuthError,
   BuildToolsServerError,
@@ -26,17 +26,21 @@ import {
   getCustomerTool,
   listCustomersTool,
 } from "../customers.js";
-import { type ToolResult } from "../projects.js";
+import { type ToolContext, type ToolResult } from "../projects.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Build a fake tool context. These handlers read through the neutral operations
+ * interface (MOS-747), so the stubs hang off `ops`.
+ */
 function fakeApi(overrides: {
-  getCompanies?: BuildToolsAPI["getCompanies"];
-  getCustomer?: BuildToolsAPI["getCustomer"];
-}): BuildToolsAPI {
-  return overrides as unknown as BuildToolsAPI;
+  getCompanies?: OperationsManagementApi["getCompanies"];
+  getCustomer?: OperationsManagementApi["getCustomer"];
+}): ToolContext {
+  return { ops: overrides } as unknown as ToolContext;
 }
 
 function textOf(result: ToolResult): string {
@@ -135,7 +139,7 @@ describe("list_customers", () => {
       recordsFiltered: 2,
     });
     const api = fakeApi({
-      getCompanies: getCompanies as BuildToolsAPI["getCompanies"],
+      getCompanies: getCompanies as OperationsManagementApi["getCompanies"],
     });
 
     const result = await listCustomersTool.handler({}, api);
@@ -153,20 +157,22 @@ describe("list_customers", () => {
     expect(getCompanies).toHaveBeenCalledTimes(1);
   });
 
-  it("forwards name_search via the datatable's search[value]", async () => {
+  it("forwards name_search as the neutral search facet", async () => {
     const getCompanies = vi.fn().mockResolvedValue({
       data: [sampleActiveCustomerRow],
     });
     const api = fakeApi({
-      getCompanies: getCompanies as BuildToolsAPI["getCompanies"],
+      getCompanies: getCompanies as OperationsManagementApi["getCompanies"],
     });
 
     await listCustomersTool.handler({ name_search: "Acme" }, api);
 
+    // The tool names the facet; the adapter encodes it as the grid's
+    // `search[value]` / `length` keys (MOS-747).
     const callArgs = getCompanies.mock.calls[0][0];
     expect(callArgs).toMatchObject({
-      length: 200,
-      "search[value]": "Acme",
+      limit: 200,
+      search: "Acme",
     });
   });
 
@@ -175,7 +181,7 @@ describe("list_customers", () => {
       data: [sampleActiveCustomerRow, sampleInactiveCustomerRow],
     });
     const api = fakeApi({
-      getCompanies: getCompanies as BuildToolsAPI["getCompanies"],
+      getCompanies: getCompanies as OperationsManagementApi["getCompanies"],
     });
 
     const result = await listCustomersTool.handler(
@@ -195,7 +201,7 @@ describe("list_customers", () => {
       data: [sampleActiveCustomerRow, sampleInactiveCustomerRow],
     });
     const api = fakeApi({
-      getCompanies: getCompanies as BuildToolsAPI["getCompanies"],
+      getCompanies: getCompanies as OperationsManagementApi["getCompanies"],
     });
 
     const result = await listCustomersTool.handler(
@@ -213,7 +219,7 @@ describe("list_customers", () => {
   it("returns a Markdown 'no customers matched' message when result is empty (no isError)", async () => {
     const getCompanies = vi.fn().mockResolvedValue({ data: [] });
     const api = fakeApi({
-      getCompanies: getCompanies as BuildToolsAPI["getCompanies"],
+      getCompanies: getCompanies as OperationsManagementApi["getCompanies"],
     });
 
     const result = await listCustomersTool.handler(
@@ -231,7 +237,7 @@ describe("list_customers", () => {
       .fn()
       .mockResolvedValue({ data: [sampleInactiveCustomerRow] });
     const api = fakeApi({
-      getCompanies: getCompanies as BuildToolsAPI["getCompanies"],
+      getCompanies: getCompanies as OperationsManagementApi["getCompanies"],
     });
 
     const result = await listCustomersTool.handler(
@@ -247,7 +253,7 @@ describe("list_customers", () => {
   it("handles a null datatable envelope gracefully (treats as empty)", async () => {
     const getCompanies = vi.fn().mockResolvedValue(null);
     const api = fakeApi({
-      getCompanies: getCompanies as BuildToolsAPI["getCompanies"],
+      getCompanies: getCompanies as OperationsManagementApi["getCompanies"],
     });
 
     const result = await listCustomersTool.handler({}, api);
@@ -260,7 +266,7 @@ describe("list_customers", () => {
       .fn()
       .mockRejectedValue(new BuildToolsAuthError("Not authenticated"));
     const api = fakeApi({
-      getCompanies: getCompanies as BuildToolsAPI["getCompanies"],
+      getCompanies: getCompanies as OperationsManagementApi["getCompanies"],
     });
 
     const result = await listCustomersTool.handler({}, api);
@@ -290,7 +296,7 @@ describe("get_customer", () => {
   it("renders a structured Markdown detail view on the happy path", async () => {
     const getCustomer = vi.fn().mockResolvedValue(sampleCustomerDetail);
     const api = fakeApi({
-      getCustomer: getCustomer as BuildToolsAPI["getCustomer"],
+      getCustomer: getCustomer as OperationsManagementApi["getCustomer"],
     });
 
     const result = await getCustomerTool.handler({ customer_id: 300001 }, api);
@@ -322,7 +328,7 @@ describe("get_customer", () => {
         '<div title="Jones Addition">Jones Addition</div>',
     });
     const api = fakeApi({
-      getCustomer: getCustomer as BuildToolsAPI["getCustomer"],
+      getCustomer: getCustomer as OperationsManagementApi["getCustomer"],
     });
 
     const result = await getCustomerTool.handler({ customer_id: 300001 }, api);
@@ -338,7 +344,7 @@ describe("get_customer", () => {
       .fn()
       .mockResolvedValue({ id: 5, name: "Bare bones" });
     const api = fakeApi({
-      getCustomer: getCustomer as BuildToolsAPI["getCustomer"],
+      getCustomer: getCustomer as OperationsManagementApi["getCustomer"],
     });
 
     const result = await getCustomerTool.handler({ customer_id: 5 }, api);
@@ -354,7 +360,7 @@ describe("get_customer", () => {
   it("returns a Markdown 'not found' message when the client returns null", async () => {
     const getCustomer = vi.fn().mockResolvedValue(null);
     const api = fakeApi({
-      getCustomer: getCustomer as BuildToolsAPI["getCustomer"],
+      getCustomer: getCustomer as OperationsManagementApi["getCustomer"],
     });
 
     const result = await getCustomerTool.handler({ customer_id: 999 }, api);
@@ -369,7 +375,7 @@ describe("get_customer", () => {
         new BuildToolsServerError("Internal server error", { status: 500 }),
       );
     const api = fakeApi({
-      getCustomer: getCustomer as BuildToolsAPI["getCustomer"],
+      getCustomer: getCustomer as OperationsManagementApi["getCustomer"],
     });
 
     const result = await getCustomerTool.handler({ customer_id: 7 }, api);
