@@ -4,26 +4,27 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
+import type { OperationsManagementApi } from "../../operations/types.js";
+import type { ToolContext } from "../projects.js";
 import { briefTools, projectStatusBriefTool } from "../briefs.js";
 
 interface FakeApiOverrides {
-  getProject?: BuildToolsAPI["getProject"];
-  getProjects?: BuildToolsAPI["getProjects"];
-  getRFIs?: BuildToolsAPI["getRFIs"];
-  getTasks?: BuildToolsAPI["getTasks"];
-  getPurchaseOrders?: BuildToolsAPI["getPurchaseOrders"];
-  getChangeOrders?: BuildToolsAPI["getChangeOrders"];
-  getFinancialStatements?: BuildToolsAPI["getFinancialStatements"];
+  getProject?: OperationsManagementApi["getProject"];
+  getProjects?: OperationsManagementApi["getProjects"];
+  getRFIs?: OperationsManagementApi["getRFIs"];
+  getTasks?: OperationsManagementApi["getTasks"];
+  getPurchaseOrders?: OperationsManagementApi["getPurchaseOrders"];
+  getChangeOrders?: OperationsManagementApi["getChangeOrders"];
+  getFinancialStatements?: OperationsManagementApi["getFinancialStatements"];
   // PR #73 new sections use budget + selections.
-  getBudget?: BuildToolsAPI["getBudget"];
-  getSelections?: BuildToolsAPI["getSelections"];
+  getBudget?: OperationsManagementApi["getBudget"];
+  getSelections?: OperationsManagementApi["getSelections"];
   // PR #75: new section pulls the real BT Gantt schedule.
-  getSchedule?: BuildToolsAPI["getSchedule"];
+  getSchedule?: OperationsManagementApi["getSchedule"];
 }
 
-function fakeApi(overrides: FakeApiOverrides = {}): BuildToolsAPI {
-  return overrides as unknown as BuildToolsAPI;
+function fakeApi(overrides: FakeApiOverrides = {}): ToolContext {
+  return { ops: overrides } as unknown as ToolContext;
 }
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -712,9 +713,12 @@ describe("project_status_brief — PR #73 Moss-actual semantics", () => {
       { project_ids: [100002], include: ["unbilled_cos"] },
       api,
     );
-    // PR #74: verify the call site used PR[]=projectId, not search[value]=name.
+    // PR #74 verified this scopes by project id rather than by name. The
+    // handler now names the facet and the adapter encodes it as PR[], so the
+    // assertion moves to the facet — the encoding has its own tests in
+    // adapters/buildtools/__tests__/query.test.ts.
     expect(getChangeOrders).toHaveBeenCalledWith(
-      expect.objectContaining({ "PR[]": "100002" }),
+      expect.objectContaining({ projectId: "100002" }),
     );
     expect(getChangeOrders).not.toHaveBeenCalledWith(
       expect.objectContaining({ "search[value]": expect.anything() }),

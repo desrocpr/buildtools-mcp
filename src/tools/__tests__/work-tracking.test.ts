@@ -19,7 +19,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
+import type { OperationsManagementApi } from "../../operations/types.js";
+import type { ToolContext } from "../projects.js";
 import {
   BuildToolsAuthError,
   BuildToolsServerError,
@@ -39,13 +40,13 @@ import { type ToolResult } from "../projects.js";
 // ---------------------------------------------------------------------------
 
 function fakeApi(overrides: {
-  getCertificates?: BuildToolsAPI["getCertificates"];
-  searchCertificates?: BuildToolsAPI["searchCertificates"];
-  getDailyLogs?: BuildToolsAPI["getDailyLogs"];
-  getWeeklyReports?: BuildToolsAPI["getWeeklyReports"];
-  getWorkDays?: BuildToolsAPI["getWorkDays"];
-}): BuildToolsAPI {
-  return overrides as unknown as BuildToolsAPI;
+  getCertificates?: OperationsManagementApi["getCertificates"];
+  searchCertificates?: OperationsManagementApi["searchCertificates"];
+  getDailyLogs?: OperationsManagementApi["getDailyLogs"];
+  getWeeklyReports?: OperationsManagementApi["getWeeklyReports"];
+  getWorkDays?: OperationsManagementApi["getWorkDays"];
+}): ToolContext {
+  return { ops: overrides } as unknown as ToolContext;
 }
 
 function textOf(result: ToolResult): string {
@@ -149,7 +150,7 @@ describe("list_certificates", () => {
     });
     const api = fakeApi({
       getCertificates:
-        getCertificates as BuildToolsAPI["getCertificates"],
+        getCertificates as OperationsManagementApi["getCertificates"],
     });
 
     const result = await listCertificatesTool.handler({}, api);
@@ -164,7 +165,7 @@ describe("list_certificates", () => {
     expect(text).toContain("issued 01/01/2026, expires 12/31/2026");
     expect(text).toContain("issuer: Sample Insurance Co");
     // Default limit is 50.
-    expect(getCertificates).toHaveBeenCalledWith({ length: 50 });
+    expect(getCertificates).toHaveBeenCalledWith({ limit: 50 });
   });
 
   it("routes through searchCertificates when query is supplied", async () => {
@@ -178,9 +179,9 @@ describe("list_certificates", () => {
     });
     const api = fakeApi({
       searchCertificates:
-        searchCertificates as BuildToolsAPI["searchCertificates"],
+        searchCertificates as OperationsManagementApi["searchCertificates"],
       getCertificates:
-        getCertificates as BuildToolsAPI["getCertificates"],
+        getCertificates as OperationsManagementApi["getCertificates"],
     });
 
     const result = await listCertificatesTool.handler(
@@ -202,17 +203,17 @@ describe("list_certificates", () => {
       .mockResolvedValue({ data: [sampleCertificateRow] });
     const api = fakeApi({
       getCertificates:
-        getCertificates as BuildToolsAPI["getCertificates"],
+        getCertificates as OperationsManagementApi["getCertificates"],
     });
     await listCertificatesTool.handler({ limit: 10 }, api);
-    expect(getCertificates).toHaveBeenCalledWith({ length: 10 });
+    expect(getCertificates).toHaveBeenCalledWith({ limit: 10 });
   });
 
   it("returns a Markdown 'no certificates' message when result is empty (no isError)", async () => {
     const getCertificates = vi.fn().mockResolvedValue({ data: [] });
     const api = fakeApi({
       getCertificates:
-        getCertificates as BuildToolsAPI["getCertificates"],
+        getCertificates as OperationsManagementApi["getCertificates"],
     });
     const result = await listCertificatesTool.handler({}, api);
     expect(result.isError).toBeFalsy();
@@ -223,7 +224,7 @@ describe("list_certificates", () => {
     const getCertificates = vi.fn().mockResolvedValue(null);
     const api = fakeApi({
       getCertificates:
-        getCertificates as BuildToolsAPI["getCertificates"],
+        getCertificates as OperationsManagementApi["getCertificates"],
     });
     const result = await listCertificatesTool.handler({}, api);
     expect(result.isError).toBeFalsy();
@@ -236,7 +237,7 @@ describe("list_certificates", () => {
       .mockResolvedValue({ data: [{ id: 99, name: "Bare cert" }] });
     const api = fakeApi({
       getCertificates:
-        getCertificates as BuildToolsAPI["getCertificates"],
+        getCertificates as OperationsManagementApi["getCertificates"],
     });
     const result = await listCertificatesTool.handler({}, api);
     expect(result.isError).toBeFalsy();
@@ -253,7 +254,7 @@ describe("list_certificates", () => {
       .mockRejectedValue(new BuildToolsAuthError("Not authenticated"));
     const api = fakeApi({
       getCertificates:
-        getCertificates as BuildToolsAPI["getCertificates"],
+        getCertificates as OperationsManagementApi["getCertificates"],
     });
     const result = await listCertificatesTool.handler({}, api);
     expect(result.isError).toBe(true);
@@ -293,7 +294,7 @@ describe("list_daily_logs", () => {
       recordsFiltered: 1,
     });
     const api = fakeApi({
-      getDailyLogs: getDailyLogs as BuildToolsAPI["getDailyLogs"],
+      getDailyLogs: getDailyLogs as OperationsManagementApi["getDailyLogs"],
     });
 
     const result = await listDailyLogsTool.handler({}, api);
@@ -306,13 +307,13 @@ describe("list_daily_logs", () => {
     expect(text).toContain("8.5h");
     expect(text).toContain("Sunny, 72°F");
     expect(text).toContain("Framing inspection passed");
-    expect(getDailyLogs).toHaveBeenCalledWith({ length: 50 });
+    expect(getDailyLogs).toHaveBeenCalledWith({ limit: 50 });
   });
 
   it("returns 'no daily logs' message when the envelope's data is empty (no isError)", async () => {
     const getDailyLogs = vi.fn().mockResolvedValue({ data: [] });
     const api = fakeApi({
-      getDailyLogs: getDailyLogs as BuildToolsAPI["getDailyLogs"],
+      getDailyLogs: getDailyLogs as OperationsManagementApi["getDailyLogs"],
     });
     const result = await listDailyLogsTool.handler({}, api);
     expect(result.isError).toBeFalsy();
@@ -323,7 +324,7 @@ describe("list_daily_logs", () => {
     // Daily logs may legitimately return null (zero records) in production.
     const getDailyLogs = vi.fn().mockResolvedValue(null);
     const api = fakeApi({
-      getDailyLogs: getDailyLogs as BuildToolsAPI["getDailyLogs"],
+      getDailyLogs: getDailyLogs as OperationsManagementApi["getDailyLogs"],
     });
     const result = await listDailyLogsTool.handler({}, api);
     expect(result.isError).toBeFalsy();
@@ -337,7 +338,7 @@ describe("list_daily_logs", () => {
         new BuildToolsServerError("Internal server error", { status: 500 }),
       );
     const api = fakeApi({
-      getDailyLogs: getDailyLogs as BuildToolsAPI["getDailyLogs"],
+      getDailyLogs: getDailyLogs as OperationsManagementApi["getDailyLogs"],
     });
     const result = await listDailyLogsTool.handler({}, api);
     expect(result.isError).toBe(true);
@@ -367,7 +368,7 @@ describe("list_weekly_reports", () => {
     });
     const api = fakeApi({
       getWeeklyReports:
-        getWeeklyReports as BuildToolsAPI["getWeeklyReports"],
+        getWeeklyReports as OperationsManagementApi["getWeeklyReports"],
     });
 
     const result = await listWeeklyReportsTool.handler(
@@ -382,14 +383,14 @@ describe("list_weekly_reports", () => {
     expect(text).toContain("Jones Addition");
     expect(text).toContain("42.5h");
     expect(text).toContain("Framing completed");
-    expect(getWeeklyReports).toHaveBeenCalledWith({ length: 25 });
+    expect(getWeeklyReports).toHaveBeenCalledWith({ limit: 25 });
   });
 
   it("returns 'no weekly reports' message when the envelope's data is empty (no isError)", async () => {
     const getWeeklyReports = vi.fn().mockResolvedValue({ data: [] });
     const api = fakeApi({
       getWeeklyReports:
-        getWeeklyReports as BuildToolsAPI["getWeeklyReports"],
+        getWeeklyReports as OperationsManagementApi["getWeeklyReports"],
     });
     const result = await listWeeklyReportsTool.handler({}, api);
     expect(result.isError).toBeFalsy();
@@ -400,7 +401,7 @@ describe("list_weekly_reports", () => {
     const getWeeklyReports = vi.fn().mockResolvedValue(null);
     const api = fakeApi({
       getWeeklyReports:
-        getWeeklyReports as BuildToolsAPI["getWeeklyReports"],
+        getWeeklyReports as OperationsManagementApi["getWeeklyReports"],
     });
     const result = await listWeeklyReportsTool.handler({}, api);
     expect(result.isError).toBeFalsy();
@@ -413,7 +414,7 @@ describe("list_weekly_reports", () => {
       .mockRejectedValue(new BuildToolsAuthError("Not authenticated"));
     const api = fakeApi({
       getWeeklyReports:
-        getWeeklyReports as BuildToolsAPI["getWeeklyReports"],
+        getWeeklyReports as OperationsManagementApi["getWeeklyReports"],
     });
     const result = await listWeeklyReportsTool.handler({}, api);
     expect(result.isError).toBe(true);
@@ -442,7 +443,7 @@ describe("list_work_days", () => {
       data: [sampleWorkDayRow],
     });
     const api = fakeApi({
-      getWorkDays: getWorkDays as BuildToolsAPI["getWorkDays"],
+      getWorkDays: getWorkDays as OperationsManagementApi["getWorkDays"],
     });
 
     const result = await listWorkDaysTool.handler({}, api);
@@ -454,13 +455,13 @@ describe("list_work_days", () => {
     expect(text).toContain("Alex Doe");
     expect(text).toContain("Jones Addition");
     expect(text).toContain("8h");
-    expect(getWorkDays).toHaveBeenCalledWith({ length: 50 });
+    expect(getWorkDays).toHaveBeenCalledWith({ limit: 50 });
   });
 
   it("returns 'no work days' message when the envelope's data is empty (no isError)", async () => {
     const getWorkDays = vi.fn().mockResolvedValue({ data: [] });
     const api = fakeApi({
-      getWorkDays: getWorkDays as BuildToolsAPI["getWorkDays"],
+      getWorkDays: getWorkDays as OperationsManagementApi["getWorkDays"],
     });
     const result = await listWorkDaysTool.handler({}, api);
     expect(result.isError).toBeFalsy();
@@ -470,7 +471,7 @@ describe("list_work_days", () => {
   it("returns 'no work days' when the API returns a literal null envelope", async () => {
     const getWorkDays = vi.fn().mockResolvedValue(null);
     const api = fakeApi({
-      getWorkDays: getWorkDays as BuildToolsAPI["getWorkDays"],
+      getWorkDays: getWorkDays as OperationsManagementApi["getWorkDays"],
     });
     const result = await listWorkDaysTool.handler({}, api);
     expect(result.isError).toBeFalsy();
@@ -484,7 +485,7 @@ describe("list_work_days", () => {
         new BuildToolsServerError("Internal server error", { status: 500 }),
       );
     const api = fakeApi({
-      getWorkDays: getWorkDays as BuildToolsAPI["getWorkDays"],
+      getWorkDays: getWorkDays as OperationsManagementApi["getWorkDays"],
     });
     const result = await listWorkDaysTool.handler({}, api);
     expect(result.isError).toBe(true);

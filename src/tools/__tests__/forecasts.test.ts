@@ -1,18 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
+import type { OperationsManagementApi } from "../../operations/types.js";
+import type { ToolContext } from "../projects.js";
 import { cashFlowForecastTool, forecastTools, __test__ } from "../forecasts.js";
 
 interface FakeApiOverrides {
-  getProject?: BuildToolsAPI["getProject"];
-  getProjects?: BuildToolsAPI["getProjects"];
-  getBudget?: BuildToolsAPI["getBudget"];
-  getFinancialStatements?: BuildToolsAPI["getFinancialStatements"];
-  getSchedule?: BuildToolsAPI["getSchedule"];
+  getProject?: OperationsManagementApi["getProject"];
+  getProjects?: OperationsManagementApi["getProjects"];
+  getBudget?: OperationsManagementApi["getBudget"];
+  getFinancialStatements?: OperationsManagementApi["getFinancialStatements"];
+  getSchedule?: OperationsManagementApi["getSchedule"];
 }
 
-function fakeApi(overrides: FakeApiOverrides = {}): BuildToolsAPI {
-  return overrides as unknown as BuildToolsAPI;
+function fakeApi(overrides: FakeApiOverrides = {}): ToolContext {
+  return { ops: overrides } as unknown as ToolContext;
 }
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {

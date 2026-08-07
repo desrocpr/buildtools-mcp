@@ -17,9 +17,9 @@
 import { z } from "zod/v3";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
-import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 
-import type { ToolDefinition, ToolResult } from "./projects.js";
+import type { BudgetView } from "../operations/types.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./projects.js";
 
 // ---------------------------------------------------------------------------
 // Markdown helpers
@@ -338,16 +338,16 @@ function parseDollarAmount(s: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-async function fetchRfis(api: BuildToolsAPI, projectName: string): Promise<{ count: number; lines: string[] } | null> {
+async function fetchRfis(ctx: ToolContext, projectName: string): Promise<{ count: number; lines: string[] } | null> {
   try {
     // BT lists are tenant-wide; the search query gets us NEAR the right
     // rows but substring search means a project named "Smith" matches
     // RFIs from "Smith Plumbing", "Johnsmith Master Bath", etc.
     // (PR #66 review HIGH 3). We filter post-fetch by exact project
     // name match.
-    const result = await api.getRFIs<{ data: (RfiRow & { project?: string })[] }>({
-      "search[value]": projectName,
-      length: 50,
+    const result = await ctx.ops.getRFIs<{ data: (RfiRow & { project?: string })[] }>({
+      search: projectName,
+      limit: 50,
     });
     const rows = result?.data ?? [];
     const targetProjectKey = projectName.toLowerCase();
@@ -390,11 +390,11 @@ async function fetchRfis(api: BuildToolsAPI, projectName: string): Promise<{ cou
   }
 }
 
-async function fetchTasks(api: BuildToolsAPI, projectName: string): Promise<{ count: number; lines: string[] } | null> {
+async function fetchTasks(ctx: ToolContext, projectName: string): Promise<{ count: number; lines: string[] } | null> {
   try {
-    const result = await api.getTasks<{ data: (TaskRow & { project?: string })[] }>({
-      "search[value]": projectName,
-      length: 50,
+    const result = await ctx.ops.getTasks<{ data: (TaskRow & { project?: string })[] }>({
+      search: projectName,
+      limit: 50,
     });
     const rows = result?.data ?? [];
     const targetProjectKey = projectName.toLowerCase();
@@ -436,11 +436,11 @@ async function fetchTasks(api: BuildToolsAPI, projectName: string): Promise<{ co
   }
 }
 
-async function fetchPOs(api: BuildToolsAPI, projectName: string): Promise<{ count: number; totalApprox: number; lines: string[] } | null> {
+async function fetchPOs(ctx: ToolContext, projectName: string): Promise<{ count: number; totalApprox: number; lines: string[] } | null> {
   try {
-    const result = await api.getPurchaseOrders<{ data: (PoRow & { project?: string })[] }>({
-      "search[value]": projectName,
-      length: 30,
+    const result = await ctx.ops.getPurchaseOrders<{ data: (PoRow & { project?: string })[] }>({
+      search: projectName,
+      limit: 30,
     });
     const rows = result?.data ?? [];
     const targetProjectKey = projectName.toLowerCase();
@@ -476,11 +476,11 @@ async function fetchPOs(api: BuildToolsAPI, projectName: string): Promise<{ coun
   }
 }
 
-async function fetchCOs(api: BuildToolsAPI, projectName: string): Promise<ProjectDigest["cos"] | null> {
+async function fetchCOs(ctx: ToolContext, projectName: string): Promise<ProjectDigest["cos"] | null> {
   try {
-    const result = await api.getChangeOrders<{ data: (CoRow & { project?: string })[] }>({
-      "search[value]": projectName,
-      length: 30,
+    const result = await ctx.ops.getChangeOrders<{ data: (CoRow & { project?: string })[] }>({
+      search: projectName,
+      limit: 30,
     });
     const rows = result?.data ?? [];
     const targetProjectKey = projectName.toLowerCase();
@@ -519,9 +519,9 @@ async function fetchCOs(api: BuildToolsAPI, projectName: string): Promise<Projec
   }
 }
 
-async function fetchDraws(api: BuildToolsAPI, projectId: number): Promise<ProjectDigest["draws"] | null> {
+async function fetchDraws(ctx: ToolContext, projectId: number): Promise<ProjectDigest["draws"] | null> {
   try {
-    const result = await api.getFinancialStatements(projectId);
+    const result = await ctx.ops.getFinancialStatements(projectId);
     const statements = result?.statements ?? [];
     // Reverse-chronological for display.
     const sorted = [...statements].sort(
@@ -558,12 +558,12 @@ async function fetchDraws(api: BuildToolsAPI, projectId: number): Promise<Projec
 // progress section. The new fetchSchedule (below) pulls the real BT
 // Gantt schedule.
 async function fetchBilling(
-  api: BuildToolsAPI,
+  ctx: ToolContext,
   projectId: number,
   contractValue?: number,
 ): Promise<ProjectDigest["billing"] | null> {
   try {
-    const result = await api.getFinancialStatements(projectId);
+    const result = await ctx.ops.getFinancialStatements(projectId);
     const statements = result?.statements ?? [];
     const round = (n: number) => Math.round(n * 100) / 100;
     const fullHistory = [...statements]
@@ -630,7 +630,7 @@ const CO_STATUS_LABEL: Record<number, string> = {
 // (no actual Date.now() — that's banned in workflows; we accept
 // "today" in YYYY-MM-DD via the caller).
 async function fetchSchedule(
-  api: BuildToolsAPI,
+  ctx: ToolContext,
   projectId: number,
   today: Date,
 ): Promise<ProjectDigest["schedule"] | null> {
@@ -639,7 +639,7 @@ async function fetchSchedule(
     // not working (editable draft). Per Moss workflow the published
     // view is the authoritative "what we've actually committed to"
     // timeline; working is an in-progress draft.
-    const result = await (api.db ?? api).getSchedule(projectId, "published");
+    const result = await ctx.ops.getSchedule(projectId, "published");
     const tasks = result?.tasks ?? [];
     // Compute Monday of this week (ISO Monday → 1)
     const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -729,7 +729,7 @@ async function fetchSchedule(
 }
 
 async function fetchUnbilledCos(
-  api: BuildToolsAPI,
+  ctx: ToolContext,
   projectId: number,
   contractValue: number,
 ): Promise<ProjectDigest["unbilledCos"] | null> {
@@ -742,11 +742,11 @@ async function fetchUnbilledCos(
     // for a draw. Fetch in parallel with the CO list (which provides
     // supporting per-CO context).
     const [coResult, fs] = await Promise.all([
-      api.getChangeOrders<{ data: Record<string, unknown>[] }>({
-        "PR[]": String(projectId),
-        length: 200,
+      ctx.ops.getChangeOrders<{ data: Record<string, unknown>[] }>({
+        projectId: String(projectId),
+        limit: 200,
       }),
-      api.getFinancialStatements(projectId),
+      ctx.ops.getFinancialStatements(projectId),
     ]);
     const rows = coResult?.data ?? [];
     const round = (n: number) => Math.round(n * 100) / 100;
@@ -789,17 +789,17 @@ async function fetchUnbilledCos(
 }
 
 async function fetchSelectionsVsAllowances(
-  api: BuildToolsAPI,
+  ctx: ToolContext,
   projectId: number,
-  prefetchedBudget?: Awaited<ReturnType<BuildToolsAPI["getBudget"]>>,
+  prefetchedBudget?: BudgetView,
 ): Promise<ProjectDigest["selectionsVsAllowances"] | null> {
   try {
     // PR #75: budget is fetched ONCE in buildProjectDigest and passed
     // through; eliminates the double-getBudget called out in PR #73
     // review LOW. Falls back to fetching if not provided.
     const [budget, sel] = await Promise.all([
-      prefetchedBudget ? Promise.resolve(prefetchedBudget) : (api.db ?? api).getBudget(projectId),
-      (api.db ?? api).getSelections(projectId),
+      prefetchedBudget ? Promise.resolve(prefetchedBudget) : ctx.ops.getBudget(projectId),
+      ctx.ops.getSelections(projectId),
     ]);
     const allowances = (budget?.items ?? []).filter((i) => i.isAllowance);
     const round = (n: number) => Math.round(n * 100) / 100;
@@ -853,12 +853,12 @@ async function fetchSelectionsVsAllowances(
 }
 
 async function fetchBudgetVsPos(
-  api: BuildToolsAPI,
+  ctx: ToolContext,
   projectId: number,
-  prefetchedBudget?: Awaited<ReturnType<BuildToolsAPI["getBudget"]>>,
+  prefetchedBudget?: BudgetView,
 ): Promise<ProjectDigest["budgetVsPos"] | null> {
   try {
-    const budget = prefetchedBudget ?? (await (api.db ?? api).getBudget(projectId));
+    const budget = prefetchedBudget ?? (await ctx.ops.getBudget(projectId));
     const round = (n: number) => Math.round(n * 100) / 100;
     // PR #73 review MEDIUM fix: look up the SENT PO'S column index from
     // the columns header dynamically rather than hardcoding cells[9].
@@ -911,7 +911,7 @@ async function fetchBudgetVsPos(
 // ---------------------------------------------------------------------------
 
 async function buildProjectDigest(
-  api: BuildToolsAPI,
+  ctx: ToolContext,
   projectId: number,
   include: Set<string>,
   today_?: Date,
@@ -930,7 +930,7 @@ async function buildProjectDigest(
   // surfacing the underlying message — eliminates the differential
   // between "404 vs 403 vs timeout" that could leak project existence.
   try {
-    const project = await (api.db ?? api).getProject<ProjectRow>(projectId);
+    const project = await ctx.ops.getProject<ProjectRow>(projectId);
     if (project) {
       digest.name = stripHtml(String(project.name ?? `#${projectId}`));
       const statusCode = Number(project.status_id ?? project.status);
@@ -959,20 +959,19 @@ async function buildProjectDigest(
   // is reproducible inside tests. Default to NOW at digest time.
   const today = today_ ?? new Date();
 
-  // PR #75: hoist budget fetch out of fetchSelectionsVsAllowances +
-  // fetchBudgetVsPos (deduplication; fixes PR #73 review LOW), and use
-  // it to PRIME the BT session for the schedule endpoint. Live probe
-  // 2026-06-28 confirmed: /schedule/working/data only returns the full
-  // task list AFTER /budget has been requested for the project. Without
-  // priming the schedule endpoint returns just a project-root stub.
+  // PR #75: hoist the budget fetch out of fetchSelectionsVsAllowances +
+  // fetchBudgetVsPos so it happens once. This used to do double duty — it also
+  // PRIMED the BT session so /schedule/*/data would return more than a
+  // project-root stub — which is why "schedule" was in this condition. The
+  // adapter owns that precondition now
+  // (BuildToolsOperationsAdapter.getSchedule), so this is pure deduplication
+  // again and asking only for a schedule no longer drags a budget fetch along.
   const wantsBudget =
-    include.has("selections_vs_allowances") ||
-    include.has("budget_vs_pos") ||
-    include.has("schedule");
-  let prefetchedBudget: Awaited<ReturnType<BuildToolsAPI["getBudget"]>> | undefined;
+    include.has("selections_vs_allowances") || include.has("budget_vs_pos");
+  let prefetchedBudget: BudgetView | undefined;
   if (wantsBudget) {
     try {
-      prefetchedBudget = await (api.db ?? api).getBudget(projectId);
+      prefetchedBudget = await ctx.ops.getBudget(projectId);
     } catch (err) {
       process.stderr.write(
         `[project_status_brief] budget prefetch failed: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -984,18 +983,18 @@ async function buildProjectDigest(
     schedule, billing, unbilledCos, sva, bvp,
     rfis, tasks, pos, cos, draws,
   ] = await Promise.all([
-    include.has("schedule") ? fetchSchedule(api, projectId, today) : Promise.resolve(undefined),
-    include.has("billing") ? fetchBilling(api, projectId, digest.contractValue) : Promise.resolve(undefined),
+    include.has("schedule") ? fetchSchedule(ctx, projectId, today) : Promise.resolve(undefined),
+    include.has("billing") ? fetchBilling(ctx, projectId, digest.contractValue) : Promise.resolve(undefined),
     // PR #74: now project-id scoped (was name-based which BT didn't honor).
     // PR #76: needs contractValue to compute the budget_revised - sum(FS) gap.
-    include.has("unbilled_cos") ? fetchUnbilledCos(api, projectId, digest.contractValue ?? 0) : Promise.resolve(undefined),
-    include.has("selections_vs_allowances") ? fetchSelectionsVsAllowances(api, projectId, prefetchedBudget) : Promise.resolve(undefined),
-    include.has("budget_vs_pos") ? fetchBudgetVsPos(api, projectId, prefetchedBudget) : Promise.resolve(undefined),
-    include.has("rfis") && projectLookupOk ? fetchRfis(api, digest.name) : Promise.resolve(undefined),
-    include.has("tasks") && projectLookupOk ? fetchTasks(api, digest.name) : Promise.resolve(undefined),
-    include.has("purchase_orders") && projectLookupOk ? fetchPOs(api, digest.name) : Promise.resolve(undefined),
-    include.has("change_orders") && projectLookupOk ? fetchCOs(api, digest.name) : Promise.resolve(undefined),
-    include.has("draws") ? fetchDraws(api, projectId) : Promise.resolve(undefined),
+    include.has("unbilled_cos") ? fetchUnbilledCos(ctx, projectId, digest.contractValue ?? 0) : Promise.resolve(undefined),
+    include.has("selections_vs_allowances") ? fetchSelectionsVsAllowances(ctx, projectId, prefetchedBudget) : Promise.resolve(undefined),
+    include.has("budget_vs_pos") ? fetchBudgetVsPos(ctx, projectId, prefetchedBudget) : Promise.resolve(undefined),
+    include.has("rfis") && projectLookupOk ? fetchRfis(ctx, digest.name) : Promise.resolve(undefined),
+    include.has("tasks") && projectLookupOk ? fetchTasks(ctx, digest.name) : Promise.resolve(undefined),
+    include.has("purchase_orders") && projectLookupOk ? fetchPOs(ctx, digest.name) : Promise.resolve(undefined),
+    include.has("change_orders") && projectLookupOk ? fetchCOs(ctx, digest.name) : Promise.resolve(undefined),
+    include.has("draws") ? fetchDraws(ctx, projectId) : Promise.resolve(undefined),
   ]);
   if (schedule === null) digest.errors.push("Schedule unavailable");
   else if (schedule !== undefined) digest.schedule = schedule;
@@ -1267,7 +1266,7 @@ function renderDigest(d: ProjectDigest): string {
 // Tool definition
 // ---------------------------------------------------------------------------
 
-export const projectStatusBriefTool: ToolDefinition = {
+export const projectStatusBriefTool: ToolDefinition<ToolContext> = {
   name: "project_status_brief",
   description:
     "Read-only one-call project summary aligned to the Moss workflow. Returns four analysis sections per project plus the header (contract value, address, PMs, team):\n\n" +
@@ -1280,7 +1279,7 @@ export const projectStatusBriefTool: ToolDefinition = {
     "Default `include` covers the four sections above; legacy sections (rfis, tasks, purchase_orders, change_orders, draws) are still accepted for backward compat but are NOT in the default set. No mutations.",
   inputSchema: zodToJsonSchema(ProjectStatusBriefSchema),
   permission: "read:projects",
-  handler: async (rawArgs: unknown, api: BuildToolsAPI) => {
+  handler: async (rawArgs: unknown, ctx: ToolContext) => {
     const parsed = ProjectStatusBriefSchema.safeParse(rawArgs ?? {});
     if (!parsed.success) {
       const messages = parsed.error.errors.map(
@@ -1305,8 +1304,8 @@ export const projectStatusBriefTool: ToolDefinition = {
       // status code, then trim to `limit`.
       let allProjects: ProjectRow[] = [];
       try {
-        const result = await (api.db ?? api).getProjects<{ data: ProjectRow[] }>({
-          length: 200,
+        const result = await ctx.ops.getProjects<{ data: ProjectRow[] }>({
+          limit: 200,
         });
         allProjects = result?.data ?? [];
       } catch (err) {
@@ -1341,7 +1340,7 @@ export const projectStatusBriefTool: ToolDefinition = {
     for (let i = 0; i < targetIds.length; i += PROJECT_CONCURRENCY) {
       const batch = targetIds.slice(i, i + PROJECT_CONCURRENCY);
       const batchResults = await Promise.all(
-        batch.map((id) => buildProjectDigest(api, id, include)),
+        batch.map((id) => buildProjectDigest(ctx, id, include)),
       );
       digests.push(...batchResults);
     }
@@ -1357,4 +1356,4 @@ export const projectStatusBriefTool: ToolDefinition = {
   },
 };
 
-export const briefTools: ToolDefinition[] = [projectStatusBriefTool];
+export const briefTools: ToolDefinition<ToolContext>[] = [projectStatusBriefTool];
