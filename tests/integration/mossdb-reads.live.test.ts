@@ -91,3 +91,57 @@ describe.skipIf(!HOST)("MossDb.getCompanies — reconstructed relations", () => 
     expect(withContact[0]!.main_contact).toMatch(/\S/);
   });
 });
+
+describe.skipIf(!HOST)("MossDb.getProjects — status and search actually narrow", () => {
+  // These exist because a previous "fix" computed a search clause and then
+  // interpolated nothing into the query. It compiled, the tests passed (they
+  // only exercised the pure clause builder), and the read kept returning
+  // everything. Only a query against the real replica catches that.
+
+  it("narrows to the requested statuses", async () => {
+    const res = await db!.getProjects<{ data: Array<{ status: number }> }>({
+      length: 500,
+      "columns[1][search][value]": "5|6|7|8",
+      "columns[1][search][regex]": "true",
+    });
+    const rows = res.data ?? [];
+
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) expect([5, 6, 7, 8]).toContain(Number(r.status));
+  });
+
+  it("returns strictly fewer rows than an unfiltered read", async () => {
+    // The regression was that filtered and unfiltered were byte-identical.
+    const all = await db!.getProjects<{ data: unknown[] }>({ length: 500 });
+    const active = await db!.getProjects<{ data: unknown[] }>({
+      length: 500,
+      "columns[1][search][value]": "5|6|7|8",
+      "columns[1][search][regex]": "true",
+    });
+
+    expect((active.data ?? []).length).toBeLessThan((all.data ?? []).length);
+  });
+
+  it("honours a single status code without the regex form", async () => {
+    const res = await db!.getProjects<{ data: Array<{ status: number }> }>({
+      length: 500,
+      "columns[1][search][value]": "6",
+    });
+    for (const r of res.data ?? []) expect(Number(r.status)).toBe(6);
+  });
+
+  it("narrows on search, and combines search with status", async () => {
+    const miss = await db!.getProjects<{ data: unknown[] }>({
+      length: 500,
+      "search[value]": "zzzz-no-such-project",
+    });
+    expect((miss.data ?? []).length).toBe(0);
+
+    const combo = await db!.getProjects<{ data: Array<{ status: number }> }>({
+      length: 500,
+      "search[value]": "a",
+      "columns[1][search][value]": "6",
+    });
+    for (const r of combo.data ?? []) expect(Number(r.status)).toBe(6);
+  });
+});

@@ -315,3 +315,100 @@ describe("factory", () => {
     );
   });
 });
+
+describe("status filtering compensates for BuildTools ignoring column filters", () => {
+  // Verified live: BuildTools discards `columns[N][search][value]` entirely
+  // (while honouring `length`), so a status-filtered HTTP read came back
+  // unfiltered — list_projects asking for "Active" returned every project,
+  // including Completed ones, under a header saying "(status: Active)".
+  const MIXED = [
+    { id: 1, name: "a", status: 6 },
+    { id: 2, name: "b", status: 4 },
+    { id: 3, name: "c", status: 7 },
+    { id: 4, name: "d", status: 4 },
+  ];
+
+  function backend(rows: Array<Record<string, unknown>>) {
+    const seen: Array<Record<string, unknown>> = [];
+    return {
+      seen,
+      async getProjects(params: Record<string, unknown>) {
+        seen.push(params);
+        return { data: rows, recordsTotal: rows.length };
+      },
+    };
+  }
+
+  it("filters client-side on the HTTP path, where the server will not", async () => {
+    const http = backend(MIXED);
+    const adapter = new BuildToolsOperationsAdapter({
+      ...http,
+      db: null,
+    } as unknown as BuildToolsAPI);
+
+    const res = (await adapter.getProjects({ status: [6, 7] })) as {
+      data: Array<Record<string, unknown>>;
+      recordsTotal: number;
+    };
+
+    expect(res.data.map((r) => r.id)).toEqual([1, 3]);
+    expect(res.recordsTotal).toBe(2);
+  });
+
+  it("over-fetches before narrowing, so a page isn't a handful of survivors", async () => {
+    // Filtering a 50-row page of mixed statuses would return a few rows and
+    // present them as the page the caller asked for.
+    const http = backend(MIXED);
+    const adapter = new BuildToolsOperationsAdapter({
+      ...http,
+      db: null,
+    } as unknown as BuildToolsAPI);
+
+    await adapter.getProjects({ status: 6, limit: 2 });
+
+    expect(Number(http.seen[0]!.length)).toBeGreaterThan(2);
+  });
+
+  it("still honours the caller's limit after narrowing", async () => {
+    const http = backend(MIXED);
+    const adapter = new BuildToolsOperationsAdapter({
+      ...http,
+      db: null,
+    } as unknown as BuildToolsAPI);
+
+    const res = (await adapter.getProjects({ status: 4, limit: 1 })) as {
+      data: unknown[];
+    };
+
+    expect(res.data).toHaveLength(1);
+  });
+
+  it("leaves filtering to SQL on the DB path", async () => {
+    // MossDb narrows in the query, so re-filtering here would be redundant and
+    // would silently cap results at the scan size.
+    const db = backend([{ id: 9, name: "z", status: 6 }]);
+    const adapter = new BuildToolsOperationsAdapter({
+      ...backend(MIXED),
+      db,
+    } as unknown as BuildToolsAPI);
+
+    const res = (await adapter.getProjects({ status: [6] })) as {
+      data: unknown[];
+    };
+
+    expect(res.data).toHaveLength(1);
+    expect(Number(db.seen[0]!.length ?? 0)).not.toBe(500);
+  });
+
+  it("does not over-fetch when no status filter was asked for", async () => {
+    const http = backend(MIXED);
+    const adapter = new BuildToolsOperationsAdapter({
+      ...http,
+      db: null,
+    } as unknown as BuildToolsAPI);
+
+    await adapter.getProjects({ limit: 25 });
+
+    expect(http.seen[0]!.length).toBe(25);
+  });
+});
