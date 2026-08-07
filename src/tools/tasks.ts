@@ -26,10 +26,10 @@
 import { z } from "zod/v3";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
-import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 
-import type { ToolDefinition, ToolResult } from "./projects.js";
+import type { ListQuery } from "../operations/types.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./projects.js";
 
 // ---------------------------------------------------------------------------
 // Status + priority mappings — verified against desrocpr/buildtools CLAUDE.md
@@ -181,7 +181,7 @@ export type ListTasksInput = z.infer<typeof ListTasksInputSchema>;
 
 async function listTasksHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListTasksInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_tasks");
@@ -190,25 +190,19 @@ async function listTasksHandler(
   const status = input.status ?? "All";
   const limit = input.limit ?? 50;
 
-  const params: Record<string, string | number> = {
-    length: limit,
-  };
+  // Named facets: the status column index and the global-search key are the
+  // adapter's business now, not this handler's.
+  const query: ListQuery = { limit };
 
-  // Column index 1 is the status column on the tasks datatable.
-  // "All" => emit no status filter, mirroring `list_projects`.
   if (status !== "All") {
     const code = STATUS_LABEL_TO_CODE[status];
-    if (code !== undefined) {
-      params["columns[1][search][value]"] = code;
-    }
+    if (code !== undefined) query.status = code;
   }
 
-  if (input.query) {
-    params["search[value]"] = input.query;
-  }
+  if (input.query) query.search = input.query;
 
   try {
-    const result = await (api.db ?? api).getTasks<TasksDatatable>(params);
+    const result = await ctx.ops.getTasks<TasksDatatable>(query);
     const rows = result?.data ?? [];
     if (rows.length === 0) {
       const filterDesc: string[] = [`status: ${status}`];
@@ -226,7 +220,7 @@ async function listTasksHandler(
   }
 }
 
-export const listTasksTool: ToolDefinition = {
+export const listTasksTool: ToolDefinition<ToolContext> = {
   name: "list_tasks",
   description:
     "List or search BuildTools tasks. " +
@@ -242,4 +236,4 @@ export const listTasksTool: ToolDefinition = {
 // Exported registry
 // ---------------------------------------------------------------------------
 
-export const taskTools: ToolDefinition[] = [listTasksTool];
+export const taskTools: ToolDefinition<ToolContext>[] = [listTasksTool];

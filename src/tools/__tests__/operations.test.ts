@@ -20,7 +20,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
+import type { OperationsManagementApi } from "../../operations/types.js";
+import type { ToolContext } from "../projects.js";
 import {
   BuildToolsAuthError,
   BuildToolsServerError,
@@ -38,14 +39,16 @@ import { type ToolResult } from "../projects.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Build a fake tool context. These handlers read through the neutral operations
+ * interface (MOS-747), so the stubs hang off `ops`.
+ */
 function fakeApi(overrides: {
-  getRFIs?: BuildToolsAPI["getRFIs"];
-  getServices?: BuildToolsAPI["getServices"];
-  getUsers?: BuildToolsAPI["getUsers"];
-  searchUsers?: BuildToolsAPI["searchUsers"];
-  getEmployees?: BuildToolsAPI["getEmployees"];
-}): BuildToolsAPI {
-  return overrides as unknown as BuildToolsAPI;
+  getRFIs?: OperationsManagementApi["getRFIs"];
+  getServices?: OperationsManagementApi["getServices"];
+  getUsers?: OperationsManagementApi["getUsers"];
+}): ToolContext {
+  return { ops: overrides } as unknown as ToolContext;
 }
 
 function textOf(result: ToolResult): string {
@@ -140,7 +143,7 @@ describe("list_rfis", () => {
       recordsTotal: 1,
       recordsFiltered: 1,
     });
-    const api = fakeApi({ getRFIs: getRFIs as BuildToolsAPI["getRFIs"] });
+    const api = fakeApi({ getRFIs: getRFIs as OperationsManagementApi["getRFIs"] });
 
     const result = await listRfisTool.handler({}, api);
 
@@ -160,22 +163,22 @@ describe("list_rfis", () => {
     expect(getRFIs).toHaveBeenCalledTimes(1);
   });
 
-  it("forwards project_name via the datatable's search[value]", async () => {
+  it("forwards project_name as the neutral search facet", async () => {
     const getRFIs = vi.fn().mockResolvedValue({ data: [sampleRfiRow] });
-    const api = fakeApi({ getRFIs: getRFIs as BuildToolsAPI["getRFIs"] });
+    const api = fakeApi({ getRFIs: getRFIs as OperationsManagementApi["getRFIs"] });
 
     await listRfisTool.handler({ project_name: "Mentzer", limit: 25 }, api);
 
     const callArgs = getRFIs.mock.calls[0][0];
     expect(callArgs).toMatchObject({
-      length: 25,
-      "search[value]": "Mentzer",
+      limit: 25,
+      search: "Mentzer",
     });
   });
 
   it("returns a Markdown 'no RFIs' message when result is empty (no isError)", async () => {
     const getRFIs = vi.fn().mockResolvedValue({ data: [] });
-    const api = fakeApi({ getRFIs: getRFIs as BuildToolsAPI["getRFIs"] });
+    const api = fakeApi({ getRFIs: getRFIs as OperationsManagementApi["getRFIs"] });
 
     const result = await listRfisTool.handler(
       { project_name: "Nonesuch" },
@@ -190,7 +193,7 @@ describe("list_rfis", () => {
     const getRFIs = vi.fn().mockResolvedValue({
       data: [{ ...sampleRfiRow, status: 9 }],
     });
-    const api = fakeApi({ getRFIs: getRFIs as BuildToolsAPI["getRFIs"] });
+    const api = fakeApi({ getRFIs: getRFIs as OperationsManagementApi["getRFIs"] });
 
     const result = await listRfisTool.handler({}, api);
     const text = textOf(result);
@@ -202,7 +205,7 @@ describe("list_rfis", () => {
     const getRFIs = vi
       .fn()
       .mockRejectedValue(new BuildToolsAuthError("Not authenticated"));
-    const api = fakeApi({ getRFIs: getRFIs as BuildToolsAPI["getRFIs"] });
+    const api = fakeApi({ getRFIs: getRFIs as OperationsManagementApi["getRFIs"] });
 
     const result = await listRfisTool.handler({}, api);
     expect(result.isError).toBe(true);
@@ -230,7 +233,7 @@ describe("list_services", () => {
       recordsFiltered: 1,
     });
     const api = fakeApi({
-      getServices: getServices as BuildToolsAPI["getServices"],
+      getServices: getServices as OperationsManagementApi["getServices"],
     });
 
     const result = await listServicesTool.handler({}, api);
@@ -251,25 +254,25 @@ describe("list_services", () => {
     expect(getServices).toHaveBeenCalledTimes(1);
   });
 
-  it("forwards project_name via the datatable's search[value]", async () => {
+  it("forwards project_name as the neutral search facet", async () => {
     const getServices = vi.fn().mockResolvedValue({ data: [sampleServiceRow] });
     const api = fakeApi({
-      getServices: getServices as BuildToolsAPI["getServices"],
+      getServices: getServices as OperationsManagementApi["getServices"],
     });
 
     await listServicesTool.handler({ project_name: "Null", limit: 75 }, api);
 
     const callArgs = getServices.mock.calls[0][0];
     expect(callArgs).toMatchObject({
-      length: 75,
-      "search[value]": "Null",
+      limit: 75,
+      search: "Null",
     });
   });
 
   it("returns a Markdown 'no services' message when result is empty (no isError)", async () => {
     const getServices = vi.fn().mockResolvedValue({ data: [] });
     const api = fakeApi({
-      getServices: getServices as BuildToolsAPI["getServices"],
+      getServices: getServices as OperationsManagementApi["getServices"],
     });
 
     const result = await listServicesTool.handler({}, api);
@@ -284,7 +287,7 @@ describe("list_services", () => {
         new BuildToolsServerError("Internal server error", { status: 500 }),
       );
     const api = fakeApi({
-      getServices: getServices as BuildToolsAPI["getServices"],
+      getServices: getServices as OperationsManagementApi["getServices"],
     });
 
     const result = await listServicesTool.handler({}, api);
@@ -315,7 +318,7 @@ describe("list_users", () => {
       recordsTotal: 1,
       recordsFiltered: 1,
     });
-    const api = fakeApi({ getUsers: getUsers as BuildToolsAPI["getUsers"] });
+    const api = fakeApi({ getUsers: getUsers as OperationsManagementApi["getUsers"] });
 
     const result = await listUsersTool.handler({}, api);
 
@@ -341,7 +344,7 @@ describe("list_users", () => {
       .fn()
       .mockResolvedValue({ data: [client1, employee, client2] });
     const api = fakeApi({
-      getUsers: getUsers as BuildToolsAPI["getUsers"],
+      getUsers: getUsers as OperationsManagementApi["getUsers"],
     });
 
     const result = await listUsersTool.handler({ role: "Employee" }, api);
@@ -349,40 +352,40 @@ describe("list_users", () => {
     expect(result.isError).toBeFalsy();
     expect(getUsers).toHaveBeenCalledTimes(1);
     // Big batch — we filter locally
-    expect(getUsers.mock.calls[0][0]).toMatchObject({ length: 10000 });
+    expect(getUsers.mock.calls[0][0]).toMatchObject({ limit: 10000 });
     // The Markdown only renders the Employee row
     expect(textOf(result)).toContain("(role: Employee)");
     expect(textOf(result)).not.toContain("9001");
     expect(textOf(result)).not.toContain("9002");
   });
 
-  it("filters client-side when role=Client (no server-side column filter sent)", async () => {
+  it("filters client-side when role=Client (no server-side filter sent)", async () => {
     const c = { ...sampleUserRow, role: "Client" };
     const getUsers = vi.fn().mockResolvedValue({ data: [c, c, c] });
-    const api = fakeApi({ getUsers: getUsers as BuildToolsAPI["getUsers"] });
+    const api = fakeApi({ getUsers: getUsers as OperationsManagementApi["getUsers"] });
 
     await listUsersTool.handler({ role: "Client", limit: 250 }, api);
 
     const callArgs = getUsers.mock.calls[0][0];
-    expect(callArgs.length).toBe(10000);
+    expect(callArgs.limit).toBe(10000);
     expect(callArgs).not.toHaveProperty("columns[4][search][value]");
   });
 
   it("does NOT pass a column filter when role=All", async () => {
     const getUsers = vi.fn().mockResolvedValue({ data: [sampleUserRow] });
-    const api = fakeApi({ getUsers: getUsers as BuildToolsAPI["getUsers"] });
+    const api = fakeApi({ getUsers: getUsers as OperationsManagementApi["getUsers"] });
 
     await listUsersTool.handler({ role: "All" }, api);
 
     const callArgs = getUsers.mock.calls[0][0];
     expect(callArgs).not.toHaveProperty("columns[4][search][value]");
     // For "All" we keep the request small (no need to over-fetch).
-    expect(callArgs.length).toBe(100);
+    expect(callArgs.limit).toBe(100);
   });
 
   it("returns a Markdown 'no users' message when result is empty (no isError)", async () => {
     const getUsers = vi.fn().mockResolvedValue({ data: [] });
-    const api = fakeApi({ getUsers: getUsers as BuildToolsAPI["getUsers"] });
+    const api = fakeApi({ getUsers: getUsers as OperationsManagementApi["getUsers"] });
 
     const result = await listUsersTool.handler({ role: "Company Rep" }, api);
     expect(result.isError).toBeFalsy();
@@ -394,7 +397,7 @@ describe("list_users", () => {
     const getUsers = vi
       .fn()
       .mockRejectedValue(new BuildToolsAuthError("Session expired"));
-    const api = fakeApi({ getUsers: getUsers as BuildToolsAPI["getUsers"] });
+    const api = fakeApi({ getUsers: getUsers as OperationsManagementApi["getUsers"] });
 
     const result = await listUsersTool.handler({}, api);
     expect(result.isError).toBe(true);
@@ -420,15 +423,15 @@ describe("list_users", () => {
 describe("list_users + query", () => {
   it("forwards query via the datatable's search[value]", async () => {
     const getUsers = vi.fn().mockResolvedValue({ data: [] });
-    const api = fakeApi({ getUsers: getUsers as BuildToolsAPI["getUsers"] });
+    const api = fakeApi({ getUsers: getUsers as OperationsManagementApi["getUsers"] });
     await listUsersTool.handler({ query: "Smith" }, api);
     const call = getUsers.mock.calls[0][0];
-    expect(call["search[value]"]).toBe("Smith");
+    expect(call.search).toBe("Smith");
   });
 
   it("PR #71 review HIGH 2: no-match message includes the query", async () => {
     const getUsers = vi.fn().mockResolvedValue({ data: [] });
-    const api = fakeApi({ getUsers: getUsers as BuildToolsAPI["getUsers"] });
+    const api = fakeApi({ getUsers: getUsers as OperationsManagementApi["getUsers"] });
     const result = await listUsersTool.handler(
       { query: "nonesuch" },
       api,
@@ -453,7 +456,7 @@ describe("list_users + query", () => {
         { id: 2, first_name: "Bob", last_name: "Smith", role: "Client", DT_RowId: "row_2" },
       ],
     });
-    const api = fakeApi({ getUsers: getUsers as BuildToolsAPI["getUsers"] });
+    const api = fakeApi({ getUsers: getUsers as OperationsManagementApi["getUsers"] });
     const result = await listUsersTool.handler(
       { query: "Smith", role: "Employee" },
       api,
@@ -464,7 +467,7 @@ describe("list_users + query", () => {
     expect(text).not.toContain("Bob Smith"); // filtered out by role
     // Confirm query reached the server
     const call = getUsers.mock.calls[0][0];
-    expect(call["search[value]"]).toBe("Smith");
+    expect(call.search).toBe("Smith");
   });
 });
 
