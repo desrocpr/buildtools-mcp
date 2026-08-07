@@ -136,6 +136,13 @@ export class MockOperationsApi implements OperationsManagementApi {
       out = out.filter((r) => wanted.has(String(r.status)));
     }
 
+    if (query.projectId !== undefined) {
+      const wanted = String(query.projectId);
+      out = out.filter(
+        (r) => String(r.project_id ?? r.projectId ?? "") === wanted,
+      );
+    }
+
     if (query.companyType !== undefined) {
       const wanted = new Set(
         (Array.isArray(query.companyType)
@@ -166,6 +173,10 @@ export class MockOperationsApi implements OperationsManagementApi {
   async getCompanies<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getCompanies", query);
     return this.list("companies", this.seed.companies, query) as T;
+  }
+  async getChangeOrders<T = unknown>(query: ListQuery = {}): Promise<T | null> {
+    this.record("getChangeOrders", query);
+    return this.list("changeOrders", this.seed.changeOrders, query) as T;
   }
   async getPurchaseOrders<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getPurchaseOrders", query);

@@ -61,6 +61,16 @@ export interface ListQuery {
    */
   status?: string | number | Array<string | number>;
   /**
+   * Scope the read to one project.
+   *
+   * A first-class facet rather than stuffing the id into `search`. That hack
+   * was in `list_change_orders` and it did not work: verified live, the
+   * change-orders grid returns ZERO rows for `search[value]=<project id>` and
+   * zero for the project NAME, while `PR[]=<id>` returns the project's 18 rows
+   * correctly. MossDb reads `PR[]` too, so one facet is right on both paths.
+   */
+  projectId?: string | number;
+  /**
    * Filter companies by type (Vendor / Subcontractor / Customer).
    *
    * Separate from `status`: BuildTools keeps company type in its own grid
@@ -267,6 +277,7 @@ export interface OperationsManagementApi {
   // --- list reads (datatable-shaped) ------------------------------------
   getProjects<T = unknown>(query?: ListQuery): Promise<T | null>;
   getCompanies<T = unknown>(query?: ListQuery): Promise<T | null>;
+  getChangeOrders<T = unknown>(query?: ListQuery): Promise<T | null>;
   getPurchaseOrders<T = unknown>(query?: ListQuery): Promise<T | null>;
   getTasks<T = unknown>(query?: ListQuery): Promise<T | null>;
   getRFIs<T = unknown>(query?: ListQuery): Promise<T | null>;

@@ -30,7 +30,8 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 
-import type { ToolDefinition, ToolResult } from "./projects.js";
+import type { ListQuery } from "../operations/types.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./projects.js";
 
 // ---------------------------------------------------------------------------
 // Status mapping (inferred — see file header)
@@ -195,20 +196,20 @@ export type ListPurchaseOrdersInput = z.infer<typeof ListPurchaseOrdersInputSche
 
 async function listPurchaseOrdersHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListPurchaseOrdersInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_purchase_orders");
   const input = parsed.data;
 
   const limit = input.limit ?? 50;
-  const params: Record<string, string | number> = { length: limit };
+  const query: ListQuery = { limit };
   if (input.query) {
-    params["search[value]"] = input.query;
+    query.search = input.query;
   }
 
   try {
-    const result = await (api.db ?? api).getPurchaseOrders<PurchaseOrdersDatatable>(params);
+    const result = await ctx.ops.getPurchaseOrders<PurchaseOrdersDatatable>(query);
     const rows = result?.data ?? [];
     if (rows.length === 0) {
       const filter = input.query
@@ -228,7 +229,7 @@ async function listPurchaseOrdersHandler(
   }
 }
 
-export const listPurchaseOrdersTool: ToolDefinition = {
+export const listPurchaseOrdersTool: ToolDefinition<ToolContext> = {
   name: "list_purchase_orders",
   description:
     "List or search BuildTools purchase orders. " +
@@ -261,14 +262,14 @@ const usd = new Intl.NumberFormat("en-US", {
 
 async function getPurchaseOrderHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = GetPurchaseOrderInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "get_purchase_order");
   const { purchase_order_id }: GetPurchaseOrderInput = parsed.data;
 
   try {
-    const detail = await (api.db ?? api).getPurchaseOrder(purchase_order_id);
+    const detail = await ctx.ops.getPurchaseOrder(purchase_order_id);
     if (!detail) {
       return markdown(`No detail found for purchase order #${purchase_order_id}.`);
     }
@@ -360,7 +361,7 @@ async function getPurchaseOrderHandler(
   }
 }
 
-export const getPurchaseOrderTool: ToolDefinition = {
+export const getPurchaseOrderTool: ToolDefinition<ToolContext> = {
   name: "get_purchase_order",
   description:
     "[v1 2026-06-23] Get full detail for a single BuildTools purchase order: vendor (with company_id), project, PO number, line items (with budget category code + names, qty, unit, total, notes), and invoiced/unpaid summary. " +
@@ -374,7 +375,7 @@ export const getPurchaseOrderTool: ToolDefinition = {
 // Exported registry — ORDER MATTERS (criterion 2).
 // ---------------------------------------------------------------------------
 
-export const purchaseOrderTools: ToolDefinition[] = [
+export const purchaseOrderTools: ToolDefinition<ToolContext>[] = [
   listPurchaseOrdersTool,
   getPurchaseOrderTool,
 ];

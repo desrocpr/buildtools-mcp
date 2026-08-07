@@ -19,7 +19,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
+import type { OperationsManagementApi } from "../../operations/types.js";
+import type { ToolContext } from "../projects.js";
 import {
   BuildToolsAuthError,
   BuildToolsServerError,
@@ -41,12 +42,15 @@ import { type ToolResult } from "../projects.js";
  * cast is intentional — we are stubbing exactly the surface this module uses,
  * not the entire class.
  */
+/**
+ * Build a fake tool context. These handlers read through the neutral operations
+ * interface (MOS-747), so the stubs hang off `ops`.
+ */
 function fakeApi(overrides: {
-  getPurchaseOrders?: BuildToolsAPI["getPurchaseOrders"];
-  searchPurchaseOrders?: BuildToolsAPI["searchPurchaseOrders"];
-  getPurchaseOrder?: BuildToolsAPI["getPurchaseOrder"];
-}): BuildToolsAPI {
-  return overrides as unknown as BuildToolsAPI;
+  getPurchaseOrders?: OperationsManagementApi["getPurchaseOrders"];
+  getPurchaseOrder?: OperationsManagementApi["getPurchaseOrder"];
+}): ToolContext {
+  return { ops: overrides } as unknown as ToolContext;
 }
 
 function textOf(result: ToolResult): string {
@@ -137,7 +141,7 @@ describe("list_purchase_orders", () => {
     });
     const api = fakeApi({
       getPurchaseOrders:
-        getPurchaseOrders as BuildToolsAPI["getPurchaseOrders"],
+        getPurchaseOrders as OperationsManagementApi["getPurchaseOrders"],
     });
 
     const result = await listPurchaseOrdersTool.handler({}, api);
@@ -179,10 +183,10 @@ describe("list_purchase_orders", () => {
     // Default length used.
     expect(getPurchaseOrders).toHaveBeenCalledTimes(1);
     const callArg = getPurchaseOrders.mock.calls[0][0] as Record<string, unknown>;
-    expect(callArg.length).toBe(50);
+    expect(callArg.limit).toBe(50);
   });
 
-  it("forwards query as the datatable global search and respects limit", async () => {
+  it("forwards query as the neutral search facet and respects limit", async () => {
     const getPurchaseOrders = vi.fn().mockResolvedValue({
       data: [samplePurchaseOrderRow],
       recordsTotal: 37644,
@@ -190,7 +194,7 @@ describe("list_purchase_orders", () => {
     });
     const api = fakeApi({
       getPurchaseOrders:
-        getPurchaseOrders as BuildToolsAPI["getPurchaseOrders"],
+        getPurchaseOrders as OperationsManagementApi["getPurchaseOrders"],
     });
 
     const result = await listPurchaseOrdersTool.handler(
@@ -200,8 +204,8 @@ describe("list_purchase_orders", () => {
 
     expect(result.isError).toBeFalsy();
     const callArg = getPurchaseOrders.mock.calls[0][0] as Record<string, unknown>;
-    expect(callArg["search[value]"]).toBe("Cabero");
-    expect(callArg.length).toBe(25);
+    expect(callArg.search).toBe("Cabero");
+    expect(callArg.limit).toBe(25);
     expect(textOf(result)).toContain('project filter: "Cabero"');
   });
 
@@ -209,7 +213,7 @@ describe("list_purchase_orders", () => {
     const getPurchaseOrders = vi.fn().mockResolvedValue({ data: [] });
     const api = fakeApi({
       getPurchaseOrders:
-        getPurchaseOrders as BuildToolsAPI["getPurchaseOrders"],
+        getPurchaseOrders as OperationsManagementApi["getPurchaseOrders"],
     });
 
     const result = await listPurchaseOrdersTool.handler(
@@ -227,7 +231,7 @@ describe("list_purchase_orders", () => {
     const getPurchaseOrders = vi.fn().mockResolvedValue(null);
     const api = fakeApi({
       getPurchaseOrders:
-        getPurchaseOrders as BuildToolsAPI["getPurchaseOrders"],
+        getPurchaseOrders as OperationsManagementApi["getPurchaseOrders"],
     });
 
     const result = await listPurchaseOrdersTool.handler({}, api);
@@ -242,7 +246,7 @@ describe("list_purchase_orders", () => {
       .mockRejectedValue(new BuildToolsAuthError("Not authenticated"));
     const api = fakeApi({
       getPurchaseOrders:
-        getPurchaseOrders as BuildToolsAPI["getPurchaseOrders"],
+        getPurchaseOrders as OperationsManagementApi["getPurchaseOrders"],
     });
 
     const result = await listPurchaseOrdersTool.handler({}, api);
@@ -275,7 +279,7 @@ describe("list_purchase_orders", () => {
     const getPurchaseOrders = vi.fn().mockResolvedValue({ data: [sparseRow] });
     const api = fakeApi({
       getPurchaseOrders:
-        getPurchaseOrders as BuildToolsAPI["getPurchaseOrders"],
+        getPurchaseOrders as OperationsManagementApi["getPurchaseOrders"],
     });
 
     const result = await listPurchaseOrdersTool.handler({}, api);
@@ -322,7 +326,7 @@ describe("get_purchase_order", () => {
       totalNumeric: 300,
     });
     const api = fakeApi({
-      getPurchaseOrder: getPurchaseOrder as BuildToolsAPI["getPurchaseOrder"],
+      getPurchaseOrder: getPurchaseOrder as OperationsManagementApi["getPurchaseOrder"],
     });
 
     const result = await getPurchaseOrderTool.handler(
@@ -342,7 +346,7 @@ describe("get_purchase_order", () => {
   it("handles 'PO not found' cleanly", async () => {
     const getPurchaseOrder = vi.fn().mockResolvedValue(null);
     const api = fakeApi({
-      getPurchaseOrder: getPurchaseOrder as BuildToolsAPI["getPurchaseOrder"],
+      getPurchaseOrder: getPurchaseOrder as OperationsManagementApi["getPurchaseOrder"],
     });
     const result = await getPurchaseOrderTool.handler(
       { purchase_order_id: 99999 },
