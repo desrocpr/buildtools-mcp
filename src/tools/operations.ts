@@ -40,7 +40,6 @@
 import { z } from "zod/v3";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
-import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 
 import type { ListQuery } from "../operations/types.js";
