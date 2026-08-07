@@ -14,7 +14,6 @@
 import { z } from "zod/v3";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
-import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 
 import type { ToolContext, ToolDefinition, ToolResult } from "./projects.js";
