@@ -15,7 +15,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
+import type { OperationsManagementApi } from "../../operations/types.js";
+import type { ToolContext } from "../projects.js";
 import {
   BuildToolsAuthError,
   BuildToolsServerError,
@@ -39,13 +40,18 @@ import { type ToolResult } from "../projects.js";
  * cast is intentional — we are stubbing exactly the surface this module uses,
  * not the entire class.
  */
+/**
+ * Build a fake tool context. These handlers read through the neutral operations
+ * interface (MOS-747), so the stubs hang off `ops`.
+ */
 function fakeApi(overrides: {
-  getChangeOrders?: BuildToolsAPI["getChangeOrders"];
-  getChangeOrder?: BuildToolsAPI["getChangeOrder"];
-  findUnbilledChangeOrders?: BuildToolsAPI["findUnbilledChangeOrders"];
-  getFinancialStatement?: BuildToolsAPI["getFinancialStatement"];
-}): BuildToolsAPI {
-  return overrides as unknown as BuildToolsAPI;
+  getChangeOrders?: OperationsManagementApi["getChangeOrders"];
+  getChangeOrder?: OperationsManagementApi["getChangeOrder"];
+  findUnbilledChangeOrders?: OperationsManagementApi["findUnbilledChangeOrders"];
+  getFinancialStatement?: OperationsManagementApi["getFinancialStatement"];
+  getFinancialStatements?: OperationsManagementApi["getFinancialStatements"];
+}): ToolContext {
+  return { ops: overrides } as unknown as ToolContext;
 }
 
 function textOf(result: ToolResult): string {
@@ -160,7 +166,7 @@ describe("list_change_orders", () => {
       recordsFiltered: 2,
     });
     const api = fakeApi({
-      getChangeOrders: getChangeOrders as BuildToolsAPI["getChangeOrders"],
+      getChangeOrders: getChangeOrders as OperationsManagementApi["getChangeOrders"],
     });
 
     const result = await listChangeOrdersTool.handler({ project_id: 100002 }, api);
@@ -181,7 +187,7 @@ describe("list_change_orders", () => {
   it("returns a Markdown 'no change orders' message when result is empty", async () => {
     const getChangeOrders = vi.fn().mockResolvedValue({ data: [] });
     const api = fakeApi({
-      getChangeOrders: getChangeOrders as BuildToolsAPI["getChangeOrders"],
+      getChangeOrders: getChangeOrders as OperationsManagementApi["getChangeOrders"],
     });
 
     const result = await listChangeOrdersTool.handler({ project_id: 100002 }, api);
@@ -195,7 +201,7 @@ describe("list_change_orders", () => {
       .fn()
       .mockRejectedValue(new BuildToolsAuthError("Not authenticated"));
     const api = fakeApi({
-      getChangeOrders: getChangeOrders as BuildToolsAPI["getChangeOrders"],
+      getChangeOrders: getChangeOrders as OperationsManagementApi["getChangeOrders"],
     });
 
     const result = await listChangeOrdersTool.handler({ project_id: 1 }, api);
@@ -216,7 +222,7 @@ describe("list_change_orders", () => {
   it("handles a null datatable envelope gracefully (treats as empty)", async () => {
     const getChangeOrders = vi.fn().mockResolvedValue(null);
     const api = fakeApi({
-      getChangeOrders: getChangeOrders as BuildToolsAPI["getChangeOrders"],
+      getChangeOrders: getChangeOrders as OperationsManagementApi["getChangeOrders"],
     });
     const result = await listChangeOrdersTool.handler({ project_id: 9 }, api);
     expect(result.isError).toBeFalsy();
@@ -232,7 +238,7 @@ describe("get_change_order", () => {
   it("renders a structured Markdown detail view on the happy path", async () => {
     const getChangeOrder = vi.fn().mockResolvedValue(sampleChangeOrderDetail);
     const api = fakeApi({
-      getChangeOrder: getChangeOrder as BuildToolsAPI["getChangeOrder"],
+      getChangeOrder: getChangeOrder as OperationsManagementApi["getChangeOrder"],
     });
 
     const result = await getChangeOrderTool.handler(
@@ -259,7 +265,7 @@ describe("get_change_order", () => {
   it("returns a Markdown 'not found' message when the client returns null", async () => {
     const getChangeOrder = vi.fn().mockResolvedValue(null);
     const api = fakeApi({
-      getChangeOrder: getChangeOrder as BuildToolsAPI["getChangeOrder"],
+      getChangeOrder: getChangeOrder as OperationsManagementApi["getChangeOrder"],
     });
 
     const result = await getChangeOrderTool.handler(
@@ -276,7 +282,7 @@ describe("get_change_order", () => {
       .fn()
       .mockResolvedValue({ id: 1, name: "Tiny CO" });
     const api = fakeApi({
-      getChangeOrder: getChangeOrder as BuildToolsAPI["getChangeOrder"],
+      getChangeOrder: getChangeOrder as OperationsManagementApi["getChangeOrder"],
     });
 
     const result = await getChangeOrderTool.handler({ change_order_id: 1 }, api);
@@ -296,7 +302,7 @@ describe("get_change_order", () => {
         new BuildToolsServerError("Internal server error", { status: 500 }),
       );
     const api = fakeApi({
-      getChangeOrder: getChangeOrder as BuildToolsAPI["getChangeOrder"],
+      getChangeOrder: getChangeOrder as OperationsManagementApi["getChangeOrder"],
     });
 
     const result = await getChangeOrderTool.handler({ change_order_id: 7 }, api);
@@ -345,7 +351,7 @@ describe("find_unbilled_change_orders", () => {
     ]);
     const api = fakeApi({
       findUnbilledChangeOrders:
-        findUnbilled as BuildToolsAPI["findUnbilledChangeOrders"],
+        findUnbilled as OperationsManagementApi["findUnbilledChangeOrders"],
     });
 
     const result = await findUnbilledChangeOrdersTool.handler({}, api);
@@ -376,7 +382,7 @@ describe("find_unbilled_change_orders", () => {
     ]);
     const api = fakeApi({
       findUnbilledChangeOrders:
-        findUnbilled as BuildToolsAPI["findUnbilledChangeOrders"],
+        findUnbilled as OperationsManagementApi["findUnbilledChangeOrders"],
     });
 
     const result = await findUnbilledChangeOrdersTool.handler(
@@ -392,7 +398,7 @@ describe("find_unbilled_change_orders", () => {
     const findUnbilled = vi.fn().mockResolvedValue([]);
     const api = fakeApi({
       findUnbilledChangeOrders:
-        findUnbilled as BuildToolsAPI["findUnbilledChangeOrders"],
+        findUnbilled as OperationsManagementApi["findUnbilledChangeOrders"],
     });
 
     const result = await findUnbilledChangeOrdersTool.handler(
@@ -412,7 +418,7 @@ describe("find_unbilled_change_orders", () => {
       .mockRejectedValue(new BuildToolsAuthError("Session expired"));
     const api = fakeApi({
       findUnbilledChangeOrders:
-        findUnbilled as BuildToolsAPI["findUnbilledChangeOrders"],
+        findUnbilled as OperationsManagementApi["findUnbilledChangeOrders"],
     });
 
     const result = await findUnbilledChangeOrdersTool.handler({}, api);
@@ -447,7 +453,7 @@ describe("get_financial_statement", () => {
       .mockResolvedValue(sampleFinancialStatement);
     const api = fakeApi({
       getFinancialStatement:
-        getFinancialStatement as BuildToolsAPI["getFinancialStatement"],
+        getFinancialStatement as OperationsManagementApi["getFinancialStatement"],
     });
 
     const result = await getFinancialStatementTool.handler(
@@ -477,7 +483,7 @@ describe("get_financial_statement", () => {
       .mockResolvedValue({ name: "Stub" });
     const api = fakeApi({
       getFinancialStatement:
-        getFinancialStatement as BuildToolsAPI["getFinancialStatement"],
+        getFinancialStatement as OperationsManagementApi["getFinancialStatement"],
     });
 
     const result = await getFinancialStatementTool.handler(
@@ -496,7 +502,7 @@ describe("get_financial_statement", () => {
     const getFinancialStatement = vi.fn().mockResolvedValue(null);
     const api = fakeApi({
       getFinancialStatement:
-        getFinancialStatement as BuildToolsAPI["getFinancialStatement"],
+        getFinancialStatement as OperationsManagementApi["getFinancialStatement"],
     });
 
     const result = await getFinancialStatementTool.handler(
@@ -516,7 +522,7 @@ describe("get_financial_statement", () => {
       .mockRejectedValue(new BuildToolsServerError("Bad gateway", { status: 502 }));
     const api = fakeApi({
       getFinancialStatement:
-        getFinancialStatement as BuildToolsAPI["getFinancialStatement"],
+        getFinancialStatement as OperationsManagementApi["getFinancialStatement"],
     });
 
     const result = await getFinancialStatementTool.handler(

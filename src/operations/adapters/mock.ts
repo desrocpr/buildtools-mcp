@@ -167,6 +167,10 @@ export class MockOperationsApi implements OperationsManagementApi {
     this.record("getCompanies", query);
     return this.list("companies", this.seed.companies, query) as T;
   }
+  async getChangeOrders<T = unknown>(query: ListQuery = {}): Promise<T | null> {
+    this.record("getChangeOrders", query);
+    return this.list("changeOrders", this.seed.changeOrders, query) as T;
+  }
   async getPurchaseOrders<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     this.record("getPurchaseOrders", query);
     return this.list("purchaseOrders", this.seed.purchaseOrders, query) as T;

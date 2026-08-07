@@ -43,7 +43,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 
-import type { ToolDefinition, ToolResult } from "./projects.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./projects.js";
 
 // ---------------------------------------------------------------------------
 // Status mapping (best-guess pending live verification)
@@ -198,7 +198,7 @@ export type ListChangeOrdersInput = z.infer<typeof ListChangeOrdersInputSchema>;
 
 async function listChangeOrdersHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListChangeOrdersInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_change_orders");
@@ -210,9 +210,9 @@ async function listChangeOrdersHandler(
     // pass the project ID as a free-text `search[value]` (best-effort —
     // refine after live verification). We also bump `length` to 200 to
     // surface more than a default page of results.
-    const result = await api.getChangeOrders<ChangeOrdersDatatable>({
-      "search[value]": String(project_id),
-      length: 200,
+    const result = await ctx.ops.getChangeOrders<ChangeOrdersDatatable>({
+      search: String(project_id),
+      limit: 200,
     });
     const rows = result?.data ?? [];
     if (rows.length === 0) {
@@ -226,7 +226,7 @@ async function listChangeOrdersHandler(
   }
 }
 
-export const listChangeOrdersTool: ToolDefinition = {
+export const listChangeOrdersTool: ToolDefinition<ToolContext> = {
   name: "list_change_orders",
   description:
     "List change orders for a BuildTools project. Returns CO number, status, amount, description.",
@@ -316,14 +316,14 @@ function formatChangeOrderDetail(co: ChangeOrderDetail): string {
 
 async function getChangeOrderHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = GetChangeOrderInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "get_change_order");
   const { change_order_id } = parsed.data;
 
   try {
-    const co = await (api.db ?? api).getChangeOrder<ChangeOrderDetail>(change_order_id);
+    const co = await ctx.ops.getChangeOrder<ChangeOrderDetail>(change_order_id);
     if (!co) {
       return markdown(`No change order found with ID #${change_order_id}.`);
     }
@@ -333,7 +333,7 @@ async function getChangeOrderHandler(
   }
 }
 
-export const getChangeOrderTool: ToolDefinition = {
+export const getChangeOrderTool: ToolDefinition<ToolContext> = {
   name: "get_change_order",
   description:
     "Get full detail for a single change order by ID, including line items and current billing status.",
@@ -359,7 +359,7 @@ export type FindUnbilledChangeOrdersInput = z.infer<
 
 async function findUnbilledChangeOrdersHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = FindUnbilledChangeOrdersInputSchema.safeParse(args ?? {});
   if (!parsed.success) {
@@ -368,7 +368,7 @@ async function findUnbilledChangeOrdersHandler(
   const { min_amount } = parsed.data;
 
   try {
-    const matches = await (api.db ?? api).findUnbilledChangeOrders({ min_amount });
+    const matches = await ctx.ops.findUnbilledChangeOrders({ min_amount });
 
     if (matches.length === 0) {
       const filterText = min_amount !== undefined ? ` (min ${formatUsd(min_amount)})` : "";
@@ -410,7 +410,7 @@ async function findUnbilledChangeOrdersHandler(
   }
 }
 
-export const findUnbilledChangeOrdersTool: ToolDefinition = {
+export const findUnbilledChangeOrdersTool: ToolDefinition<ToolContext> = {
   name: "find_unbilled_change_orders",
   description:
     "Find active projects (Nexus/Omega/Invicta/Alpha) where the revised contract exceeds total billing — the project-level 'unbilled gap'. Matches the logic in find-unbilled-cos.js.",
@@ -536,7 +536,7 @@ function formatCurrencyOrDash(value: unknown): string {
 
 async function getFinancialStatementHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = GetFinancialStatementInputSchema.safeParse(args ?? {});
   if (!parsed.success) {
@@ -545,7 +545,7 @@ async function getFinancialStatementHandler(
   const { project_id } = parsed.data;
 
   try {
-    const statement = await (api.db ?? api).getFinancialStatement<FinancialStatementDetail>(
+    const statement = await ctx.ops.getFinancialStatement<FinancialStatementDetail>(
       project_id,
     );
     if (!statement) {
@@ -559,7 +559,7 @@ async function getFinancialStatementHandler(
   }
 }
 
-export const getFinancialStatementTool: ToolDefinition = {
+export const getFinancialStatementTool: ToolDefinition<ToolContext> = {
   name: "get_financial_statement",
   description:
     "Get the project-level financial overview: original contract, approved COs, revised contract, total billing, costs, and margin. For individual statement records, use list_financial_statements.",
@@ -582,7 +582,7 @@ const ListFinancialStatementsInputSchema = z.object({
 
 async function listFinancialStatementsHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListFinancialStatementsInputSchema.safeParse(args ?? {});
   if (!parsed.success) {
@@ -591,7 +591,7 @@ async function listFinancialStatementsHandler(
   const { project_id, status } = parsed.data;
 
   try {
-    const result = await api.getFinancialStatements(project_id);
+    const result = await ctx.ops.getFinancialStatements(project_id);
     let statements = result.statements;
 
     if (status && status !== "All") {
@@ -640,7 +640,7 @@ async function listFinancialStatementsHandler(
   }
 }
 
-export const listFinancialStatementsTool: ToolDefinition = {
+export const listFinancialStatementsTool: ToolDefinition<ToolContext> = {
   name: "list_financial_statements",
   description:
     "List individual financial statements (draw requests / client bills) for a project. Shows ID, status, name, amount, paid, balance, and date. Optionally filter by status (Draft/Pending/Partial/Sent/Paid).",
@@ -653,7 +653,7 @@ export const listFinancialStatementsTool: ToolDefinition = {
 // Exported registry — ORDER MATTERS (criterion 1).
 // ---------------------------------------------------------------------------
 
-export const financialTools: ToolDefinition[] = [
+export const financialTools: ToolDefinition<ToolContext>[] = [
   listChangeOrdersTool,
   getChangeOrderTool,
   findUnbilledChangeOrdersTool,

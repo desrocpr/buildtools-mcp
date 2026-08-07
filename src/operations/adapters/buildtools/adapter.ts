@@ -45,6 +45,7 @@ export type ReadBackend = Pick<
   | "getProjects"
   | "getProject"
   | "getCompanies"
+  | "getChangeOrders"
   | "getCompany"
   | "getCustomer"
   | "getChangeOrder"
@@ -173,6 +174,11 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
   async getCompanies<T = unknown>(query: ListQuery = {}): Promise<T | null> {
     return this.listRead<T>("companies", query, (p) =>
       this.reader.getCompanies(p),
+    );
+  }
+  async getChangeOrders<T = unknown>(query: ListQuery = {}): Promise<T | null> {
+    return this.listRead<T>("changeOrders", query, (p) =>
+      this.reader.getChangeOrders(p),
     );
   }
   async getPurchaseOrders<T = unknown>(

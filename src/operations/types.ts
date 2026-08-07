@@ -267,6 +267,7 @@ export interface OperationsManagementApi {
   // --- list reads (datatable-shaped) ------------------------------------
   getProjects<T = unknown>(query?: ListQuery): Promise<T | null>;
   getCompanies<T = unknown>(query?: ListQuery): Promise<T | null>;
+  getChangeOrders<T = unknown>(query?: ListQuery): Promise<T | null>;
   getPurchaseOrders<T = unknown>(query?: ListQuery): Promise<T | null>;
   getTasks<T = unknown>(query?: ListQuery): Promise<T | null>;
   getRFIs<T = unknown>(query?: ListQuery): Promise<T | null>;
