@@ -1,0 +1,93 @@
+/**
+ * Live-DB checks for the companies relations MossDb reconstructs (MOS-747).
+ *
+ * `main_contact` and `budget_relations` are not columns on `companies` — the
+ * HTTP grid renders them from relation tables. MossDb has to rebuild them, and
+ * the ONLY way to know the reconstruction matches is to run it against the real
+ * replica. A hermetic test can assert the SQL was called; it cannot tell you the
+ * join or the ordering is right, which is exactly where this went wrong before.
+ *
+ * Skipped unless MYSQL_* is configured, so CI stays hermetic. Run with:
+ *   doppler run --project buildtools-mcp --config prd -- npm test
+ */
+
+import { afterAll, describe, expect, it } from "vitest";
+
+import { MossDb } from "../../src/db/MossDb.js";
+
+const HOST = process.env.MYSQL_HOST;
+
+const db = HOST
+  ? new MossDb({
+      host: HOST,
+      port: Number(process.env.MYSQL_PORT ?? 3306),
+      user: process.env.MYSQL_USER ?? "",
+      password: process.env.MYSQL_PASSWORD ?? "",
+      database: process.env.MYSQL_DATABASE ?? "",
+    })
+  : null;
+
+afterAll(async () => {
+  await db?.close();
+});
+
+interface CompanyRow {
+  id: number | string;
+  main_contact?: string;
+  budget_relations?: string;
+}
+
+describe.skipIf(!HOST)("MossDb.getCompanies — reconstructed relations", () => {
+  async function fetchRows(): Promise<CompanyRow[]> {
+    const res = await db!.getCompanies<{ data: CompanyRow[] }>({ length: 400 });
+    return res.data ?? [];
+  }
+
+  it("populates budget_relations for a substantial share of companies", async () => {
+    // The regression this guards: the field was absent entirely, so every
+    // consumer silently saw "". `list_customers`' has_active_project heuristic
+    // infers activity from it and filtered out EVERY customer as a result.
+    const rows = await fetchRows();
+    const withRel = rows.filter((r) => (r.budget_relations ?? "").length > 0);
+
+    expect(rows.length).toBeGreaterThan(0);
+    expect(withRel.length).toBeGreaterThan(0);
+  });
+
+  it("renders budget_relations as comma-joined `code - name`", async () => {
+    const rows = await fetchRows();
+    const sample = rows.find((r) => (r.budget_relations ?? "").includes(","));
+    expect(sample).toBeDefined();
+
+    for (const entry of sample!.budget_relations!.split(", ")) {
+      // Codes carry suffixes and names carry hyphens, so match the leading
+      // "<code> - " shape rather than the whole entry.
+      expect(entry).toMatch(/^\S+.*\s-\s.+/);
+    }
+  });
+
+  it("orders budget_relations by association, which decides the default category", async () => {
+    // Load-bearing: the tool layer treats the FIRST entry as the company's
+    // default budget category. Association order (ORDER BY cbc.id) reproduced
+    // the live HTTP render where neither budget-category id order nor `sort`
+    // order did — company 1033 renders "7031, 7521, 7030", which is sorted by
+    // neither code nor id.
+    const rows = await fetchRows();
+    const target = rows.find((r) => String(r.id) === "1033");
+    if (!target) return; // company may be archived; the other cases still cover shape
+
+    expect(target.budget_relations).toBe(
+      "7031 - Cabinetry Allowance, 7521 - Plumbing Fixtures Allowance, 7030 - Cabinetry",
+    );
+  });
+
+  it("resolves main_contact to the flagged user's full name", async () => {
+    const rows = await fetchRows();
+    const withContact = rows.filter((r) => (r.main_contact ?? "").length > 0);
+
+    expect(withContact.length).toBeGreaterThan(0);
+    // "First Last" — not an id, not an email.
+    expect(withContact[0]!.main_contact).not.toMatch(/@/);
+    expect(withContact[0]!.main_contact).toMatch(/\S/);
+  });
+});

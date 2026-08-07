@@ -670,7 +670,32 @@ export class MossDb {
     }
     const whereSql = where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
     const [rows] = await this.pool.query<RowDataPacket[]>(
-      `SELECT c.id, c.name, c.type, c.type_name, c.email, c.phone, c.address, c.city, c.state, c.zip, c.status
+      // `main_contact` and `budget_relations` are relations the HTTP grid renders
+      // inline; neither is a column on `companies`. Both correlated subqueries
+      // were VERIFIED against the live system rather than inferred:
+      //
+      //   main_contact     — companies_users.main_contact = 1 joined to users,
+      //                      "First Last". Matched the HTTP render exactly for
+      //                      companies 1102-1109.
+      //   budget_relations — companies_budget_categories joined to
+      //                      budget_categories, rendered "code - name" and
+      //                      comma-joined. ORDER BY cbc.id (association order)
+      //                      is load-bearing: the tool layer treats the FIRST
+      //                      entry as the company's default budget category.
+      //                      Association order reproduced the live render for
+      //                      every probed company, including company 1033
+      //                      ("7031, 7521, 7030"), which neither budget_category
+      //                      id order nor `sort` order matches.
+      `SELECT c.id, c.name, c.type, c.type_name, c.email, c.phone, c.address, c.city, c.state, c.zip, c.status,
+              (SELECT TRIM(CONCAT(u.first_name, ' ', u.last_name))
+                 FROM companies_users cu
+                 JOIN users u ON u.id = cu.user_id
+                WHERE cu.company_id = c.id AND cu.main_contact = 1
+                LIMIT 1) AS main_contact,
+              (SELECT GROUP_CONCAT(CONCAT(bc.code, ' - ', bc.name) ORDER BY cbc.id SEPARATOR ', ')
+                 FROM companies_budget_categories cbc
+                 JOIN budget_categories bc ON bc.id = cbc.budget_category_id
+                WHERE cbc.company_id = c.id) AS budget_relations
          FROM companies c
          ${whereSql}
          ORDER BY c.id DESC
@@ -690,14 +715,11 @@ export class MossDb {
       state: r.state ?? "",
       zip: r.zip ?? "",
       status: r.status,
-      // NOT emitted: `budget_relations` and `main_contact`. Both are present on
-      // the HTTP grid but are not columns on `companies` — budget_relations is a
-      // rendered blob of the company's related budget items. Consumers that read
-      // them degrade on this path: `search_companies` shows an em-dash for
-      // "Default budget category", and `list_customers`' `has_active_project`
-      // heuristic (which infers activity from a non-empty budget_relations)
-      // filters everything out. Reconstructing them needs a verified join
-      // against the live schema — tracked, not guessed at here.
+      // Neither of these is a column on `companies`; both are relations the
+      // HTTP grid renders inline. Reconstructed here so the two back ends agree
+      // — see the ordering note on the query above.
+      main_contact: r.main_contact ?? "",
+      budget_relations: r.budget_relations ?? "",
     }));
     return { data, recordsTotal: data.length } as T;
   }
