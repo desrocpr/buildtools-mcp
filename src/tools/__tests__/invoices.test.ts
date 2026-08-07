@@ -1,16 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
+import type { OperationsManagementApi } from "../../operations/types.js";
 import { invoiceTools, uncollectedInvoicesTool, __test__ } from "../invoices.js";
+import type { ToolContext } from "../projects.js";
 
 interface FakeApiOverrides {
-  getProject?: BuildToolsAPI["getProject"];
-  getProjects?: BuildToolsAPI["getProjects"];
-  getFinancialStatements?: BuildToolsAPI["getFinancialStatements"];
+  getProject?: OperationsManagementApi["getProject"];
+  getProjects?: OperationsManagementApi["getProjects"];
+  getFinancialStatements?: OperationsManagementApi["getFinancialStatements"];
 }
 
-function fakeApi(overrides: FakeApiOverrides = {}): BuildToolsAPI {
-  return overrides as unknown as BuildToolsAPI;
+/**
+ * Build a fake tool context. This tool reads through the neutral operations
+ * interface (MOS-747), so the stubs hang off `ops`.
+ */
+function fakeApi(overrides: FakeApiOverrides = {}): ToolContext {
+  return { ops: overrides } as unknown as ToolContext;
 }
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {

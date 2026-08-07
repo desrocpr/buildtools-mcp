@@ -17,7 +17,7 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 
-import type { ToolDefinition, ToolResult } from "./projects.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./projects.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -80,14 +80,14 @@ const ListSelectionsInputSchema = z.object({
 
 async function listSelectionsHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListSelectionsInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_selections");
   const { project_id, status } = parsed.data;
 
   try {
-    const result = await (api.db ?? api).getSelections(project_id);
+    const result = await ctx.ops.getSelections(project_id);
     let selections = result.selections;
 
     if (status && status !== "All") {
@@ -125,7 +125,7 @@ async function listSelectionsHandler(
   }
 }
 
-export const listSelectionsTool: ToolDefinition = {
+export const listSelectionsTool: ToolDefinition<ToolContext> = {
   name: "list_selections",
   description:
     "[v3 2026-06-12] List material/finish selections for a project. Shows status, budget category, location, item, price, AND lifecycle dates (opened/approved/rejected/due) — useful for aging and cycle-time analysis. Item column now carries the actual selection name (was previously bleeding Location/status badge text). Optionally filter by status (Open/Selected/Approved/Rejected/Complete).",
@@ -145,7 +145,7 @@ const GetSelectionInputSchema = z.object({
 
 async function getSelectionHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = GetSelectionInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "get_selection");
@@ -157,8 +157,8 @@ async function getSelectionHandler(
     // not the parent. `getSelectionName` is best-effort — degrades to
     // null without blocking the rest of the render.
     const [detail, parentName] = await Promise.all([
-      (api.db ?? api).getSelectionDetail(selection_id, project_id),
-      (api.db ?? api).getSelectionName(selection_id, project_id),
+      ctx.ops.getSelectionDetail(selection_id, project_id),
+      ctx.ops.getSelectionName(selection_id, project_id),
     ]);
     if (!detail || detail.items.length === 0) {
       return markdown(`No detail found for selection #${selection_id} on project #${project_id}.`);
@@ -253,7 +253,7 @@ async function getSelectionHandler(
   }
 }
 
-export const getSelectionTool: ToolDefinition = {
+export const getSelectionTool: ToolDefinition<ToolContext> = {
   name: "get_selection",
   description:
     "[v2 2026-06-12] Get full detail for a selection including all options/choices, descriptions, models, vendor info, prices, and attached files (installation specs, PDFs, images). Header now includes the parent selection name (e.g. 'Kitchen Cabinets') and option labels fall back to description/vendor when the option title is blank. Requires both selection_id and project_id.",
@@ -272,7 +272,7 @@ const ListAllowancesInputSchema = z.object({
 
 async function listAllowancesHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListAllowancesInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_allowances");
@@ -281,8 +281,8 @@ async function listAllowancesHandler(
   try {
     // Get allowance categories from budget + selections for reconciliation
     const [allowances, selData] = await Promise.all([
-      (api.db ?? api).getAllowances(project_id),
-      (api.db ?? api).getSelections(project_id),
+      ctx.ops.getAllowances(project_id),
+      ctx.ops.getSelections(project_id),
     ]);
 
     if (allowances.length === 0) {
@@ -352,7 +352,7 @@ async function listAllowancesHandler(
   }
 }
 
-export const listAllowancesTool: ToolDefinition = {
+export const listAllowancesTool: ToolDefinition<ToolContext> = {
   name: "list_allowances",
   description:
     "[v3 2026-06-12] List allowance budget categories for a project with reconciliation: budgeted amount, total spent on selections, and remaining balance. Each selection now shows its real name (previously rendered as 'Incomplete' / 'Pending' / location), price, and opened/approved dates when available.",
@@ -371,14 +371,14 @@ const ListSelectionCategoriesInputSchema = z.object({
 
 async function listSelectionCategoriesHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListSelectionCategoriesInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_selection_categories");
   const { project_id } = parsed.data;
 
   try {
-    const categories = await (api.db ?? api).getSelectionBudgetCategories(project_id);
+    const categories = await ctx.ops.getSelectionBudgetCategories(project_id);
     if (categories.length === 0) {
       return markdown(`No budget categories available for selections on project #${project_id}.`);
     }
@@ -392,7 +392,7 @@ async function listSelectionCategoriesHandler(
   }
 }
 
-export const listSelectionCategoriesTool: ToolDefinition = {
+export const listSelectionCategoriesTool: ToolDefinition<ToolContext> = {
   name: "list_selection_categories",
   description:
     "List the budget categories available for creating selections on a project. Returns category IDs needed for create_selection.",
@@ -459,7 +459,7 @@ function priceToNumeric(raw: string): string {
 
 async function exportSelectionsHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ExportSelectionsInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "export_selections");
@@ -482,9 +482,9 @@ async function exportSelectionsHandler(
 
   try {
     // ONE bulk fetch for project names; then per-project selections in parallel.
-    const projectsResp = await (api.db ?? api).getProjects<{
+    const projectsResp = await ctx.ops.getProjects<{
       data?: Array<{ id: number | string; name?: string }>;
-    }>({ length: 5000 });
+    }>({ limit: 5000 });
     const nameById = new Map<string, string>();
     for (const row of projectsResp?.data ?? []) {
       nameById.set(String(row.id), String(row.name ?? ""));
@@ -513,7 +513,7 @@ async function exportSelectionsHandler(
         const id = String(pid);
         const projectName = nameById.get(id) ?? "";
         try {
-          const result = await (api.db ?? api).getSelections(id);
+          const result = await ctx.ops.getSelections(id);
           for (const sel of result.selections) {
             if (canonicalStatuses && !canonicalStatuses.has(sel.status)) continue;
             lines.push(
@@ -555,7 +555,7 @@ async function exportSelectionsHandler(
   }
 }
 
-export const exportSelectionsTool: ToolDefinition = {
+export const exportSelectionsTool: ToolDefinition<ToolContext> = {
   name: "export_selections",
   description:
     "[v2 2026-06-12] Bulk export selections across multiple projects as a single CSV. " +
@@ -573,7 +573,7 @@ export const exportSelectionsTool: ToolDefinition = {
 // Exported registry
 // ---------------------------------------------------------------------------
 
-export const selectionTools: ToolDefinition[] = [
+export const selectionTools: ToolDefinition<ToolContext>[] = [
   listSelectionsTool,
   getSelectionTool,
   listAllowancesTool,
