@@ -136,6 +136,13 @@ export class MockOperationsApi implements OperationsManagementApi {
       out = out.filter((r) => wanted.has(String(r.status)));
     }
 
+    if (query.projectId !== undefined) {
+      const wanted = String(query.projectId);
+      out = out.filter(
+        (r) => String(r.project_id ?? r.projectId ?? "") === wanted,
+      );
+    }
+
     if (query.companyType !== undefined) {
       const wanted = new Set(
         (Array.isArray(query.companyType)

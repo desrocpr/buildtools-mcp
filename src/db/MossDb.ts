@@ -453,6 +453,10 @@ export class MossDb {
   async getChangeOrders<T = { data: Array<Record<string, unknown>>; recordsTotal?: number }>(
     opts: Record<string, unknown> = {},
   ): Promise<T> {
+    // No searchable columns are mapped for this grid, and silently ignoring a
+    // search is how `list_change_orders` came to return portfolio-wide rows for
+    // a single-project request.
+    rejectUnsupportedSearch(opts, "getChangeOrders");
     const projectId = opts["PR[]"];
     const limit = Math.max(1, Math.min(Number(opts["length"] ?? 50), 500));
     // PR #82 fix: qualify deleted_at with co.* — projects table also

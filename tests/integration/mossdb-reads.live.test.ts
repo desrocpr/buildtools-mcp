@@ -184,3 +184,31 @@ describe.skipIf(!HOST)("MossDb.getTasks / getCompanies — status filters run in
     for (const r of filtered.data ?? []) expect(Number(r.status)).toBe(target);
   });
 });
+
+describe.skipIf(!HOST)("MossDb.getChangeOrders — project scoping", () => {
+  // list_change_orders asked for one project and, on this path, would have
+  // received the 200 most recent change orders portfolio-wide — real rows,
+  // plausible-looking, attributed to the wrong project.
+  it("returns only the requested project's change orders", async () => {
+    const all = await db!.getChangeOrders<{
+      data: Array<{ project_id?: number }>;
+    }>({ length: 200 });
+    const rows = all.data ?? [];
+    const target = rows.find((r) => r.project_id !== undefined)?.project_id;
+    if (target === undefined) return;
+
+    const scoped = await db!.getChangeOrders<{
+      data: Array<{ project_id?: number }>;
+    }>({ length: 200, "PR[]": target });
+
+    const projects = new Set((scoped.data ?? []).map((r) => r.project_id));
+    expect(projects.size).toBeLessThanOrEqual(1);
+    if (projects.size === 1) expect([...projects][0]).toBe(target);
+  });
+
+  it("refuses a search it cannot honour rather than ignoring it", async () => {
+    await expect(
+      db!.getChangeOrders({ length: 10, "search[value]": "anything" }),
+    ).rejects.toThrow(/cannot honour search/);
+  });
+});

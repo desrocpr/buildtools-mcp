@@ -143,3 +143,27 @@ describe("toDatatableParams — combined", () => {
     });
   });
 });
+
+describe("toDatatableParams — project scoping", () => {
+  it("maps projectId onto the grid's PR[] param, not onto search", () => {
+    // Verified live on the change-orders grid: PR[]=<id> returns that project's
+    // 18 rows, while search[value]=<id> and search[value]=<project name> BOTH
+    // return zero. `list_change_orders` used the search form and therefore
+    // found nothing for every project.
+    expect(toDatatableParams("changeOrders", { projectId: 185922 })).toEqual({
+      "PR[]": 185922,
+    });
+  });
+
+  it("combines project scoping with paging", () => {
+    expect(
+      toDatatableParams("changeOrders", { projectId: 185922, limit: 200 }),
+    ).toEqual({ "PR[]": 185922, length: 200 });
+  });
+
+  it("omits PR[] entirely when no project was named", () => {
+    expect(toDatatableParams("changeOrders", { limit: 50 })).toEqual({
+      length: 50,
+    });
+  });
+});

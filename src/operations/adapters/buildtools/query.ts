@@ -110,6 +110,9 @@ export function toDatatableParams(
   }
 
   if (query.limit !== undefined) params.length = query.limit;
+  // Project scoping uses the grid's own `PR[]` param — verified working on the
+  // change-orders grid, where a search-based scope returns nothing at all.
+  if (query.projectId !== undefined) params["PR[]"] = query.projectId;
   if (query.offset !== undefined) params.start = query.offset;
 
   if (query.status !== undefined) {

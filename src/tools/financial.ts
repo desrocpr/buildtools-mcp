@@ -205,13 +205,13 @@ async function listChangeOrdersHandler(
   const { project_id } = parsed.data;
 
   try {
-    // Filter the change-orders datatable to a single project. The actual
-    // column index for project ID is not documented in the source, so we
-    // pass the project ID as a free-text `search[value]` (best-effort —
-    // refine after live verification). We also bump `length` to 200 to
-    // surface more than a default page of results.
+    // Scope to one project via the grid's `PR[]` param. This previously passed
+    // the id as free-text search, described in-code as "best-effort — refine
+    // after live verification". The verification says it never worked: that
+    // form returns ZERO rows for every project. `length` stays at 200 to
+    // surface more than a default page.
     const result = await ctx.ops.getChangeOrders<ChangeOrdersDatatable>({
-      search: String(project_id),
+      projectId: project_id,
       limit: 200,
     });
     const rows = result?.data ?? [];
