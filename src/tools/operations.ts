@@ -43,7 +43,8 @@ import { zodToJsonSchema } from "zod-to-json-schema";
 import type { BuildToolsAPI } from "../client/BuildToolsAPI.js";
 import { BuildToolsError } from "../client/errors.js";
 
-import type { ToolDefinition, ToolResult } from "./projects.js";
+import type { ListQuery } from "../operations/types.js";
+import type { ToolContext, ToolDefinition, ToolResult } from "./projects.js";
 
 // ---------------------------------------------------------------------------
 // Rendering helpers (intentionally inline-duplicated, see file header)
@@ -180,20 +181,19 @@ function formatRfiRow(row: Record<string, unknown>): string {
 
 async function listRfisHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListRfisInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_rfis");
   const { project_name, limit } = parsed.data;
 
-  const length = limit ?? 50;
-  const params: Record<string, string | number> = { length };
-  if (project_name) {
-    params["search[value]"] = project_name;
-  }
+  // The project filter rides the grid's global free-text search. Naming the
+  // facet keeps the wire key out of this handler.
+  const query: ListQuery = { limit: limit ?? 50 };
+  if (project_name) query.search = project_name;
 
   try {
-    const result = await (api.db ?? api).getRFIs<Datatable>(params);
+    const result = await ctx.ops.getRFIs<Datatable>(query);
     const rows = result?.data ?? [];
     if (rows.length === 0) {
       const trailer = project_name ? ` (project_name: "${project_name}")` : "";
@@ -207,7 +207,7 @@ async function listRfisHandler(
   }
 }
 
-export const listRfisTool: ToolDefinition = {
+export const listRfisTool: ToolDefinition<ToolContext> = {
   name: "list_rfis",
   description:
     "List BuildTools RFIs (requests for information) with optional project-name filter.",
@@ -258,20 +258,19 @@ function formatServiceRow(row: Record<string, unknown>): string {
 
 async function listServicesHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListServicesInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_services");
   const { project_name, limit } = parsed.data;
 
-  const length = limit ?? 50;
-  const params: Record<string, string | number> = { length };
-  if (project_name) {
-    params["search[value]"] = project_name;
-  }
+  // The project filter rides the grid's global free-text search. Naming the
+  // facet keeps the wire key out of this handler.
+  const query: ListQuery = { limit: limit ?? 50 };
+  if (project_name) query.search = project_name;
 
   try {
-    const result = await (api.db ?? api).getServices<Datatable>(params);
+    const result = await ctx.ops.getServices<Datatable>(query);
     const rows = result?.data ?? [];
     if (rows.length === 0) {
       const trailer = project_name ? ` (project_name: "${project_name}")` : "";
@@ -285,7 +284,7 @@ async function listServicesHandler(
   }
 }
 
-export const listServicesTool: ToolDefinition = {
+export const listServicesTool: ToolDefinition<ToolContext> = {
   name: "list_services",
   description:
     "List BuildTools services (project service-line tasks) with optional project-name filter.",
@@ -370,7 +369,7 @@ function formatUserRow(row: Record<string, unknown>): string {
 
 async function listUsersHandler(
   args: unknown,
-  api: BuildToolsAPI,
+  ctx: ToolContext,
 ): Promise<ToolResult> {
   const parsed = ListUsersInputSchema.safeParse(args ?? {});
   if (!parsed.success) return formatZodError(parsed.error, "list_users");
@@ -387,13 +386,16 @@ async function listUsersHandler(
   const fetchLength = effectiveRole === "All" ? targetLimit : 10000;
 
   try {
-    const params: Record<string, string | number> = { length: fetchLength };
-    // PR #71: query forwarded as global free-text search (was the
-    // entire job of the standalone search_users tool).
-    if (query) {
-      params["search[value]"] = query;
-    }
-    const result = await (api.db ?? api).getUsers<Datatable>(params);
+    // Role filtering stays CLIENT-SIDE deliberately: BuildTools honours no
+    // server-side role filter on this grid (see the note above), so the
+    // over-fetch-then-narrow shape is preserved rather than pushed into the
+    // neutral query, which would imply a filter the back end does not apply.
+    //
+    // PR #71: query forwarded as global free-text search (was the entire job
+    // of the standalone search_users tool).
+    const listQuery: ListQuery = { limit: fetchLength };
+    if (query) listQuery.search = query;
+    const result = await ctx.ops.getUsers<Datatable>(listQuery);
     const allRows = result?.data ?? [];
     const filtered =
       effectiveRole === "All"
@@ -424,7 +426,7 @@ async function listUsersHandler(
   }
 }
 
-export const listUsersTool: ToolDefinition = {
+export const listUsersTool: ToolDefinition<ToolContext> = {
   name: "list_users",
   description:
     "List or search BuildTools users. " +
@@ -441,7 +443,7 @@ export const listUsersTool: ToolDefinition = {
 // Exported registry
 // ---------------------------------------------------------------------------
 
-export const operationTools: ToolDefinition[] = [
+export const operationTools: ToolDefinition<ToolContext>[] = [
   listRfisTool,
   listServicesTool,
   listUsersTool,

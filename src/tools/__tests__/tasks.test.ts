@@ -20,7 +20,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
+import type { OperationsManagementApi } from "../../operations/types.js";
+import type { ToolContext } from "../projects.js";
 import {
   BuildToolsAuthError,
   BuildToolsServerError,
@@ -36,11 +37,14 @@ import { type ToolResult } from "../projects.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Build a fake tool context. This handler reads through the neutral operations
+ * interface (MOS-747), so the stubs hang off `ops`.
+ */
 function fakeApi(overrides: {
-  getTasks?: BuildToolsAPI["getTasks"];
-  searchTasks?: BuildToolsAPI["searchTasks"];
-}): BuildToolsAPI {
-  return overrides as unknown as BuildToolsAPI;
+  getTasks?: OperationsManagementApi["getTasks"];
+}): ToolContext {
+  return { ops: overrides } as unknown as ToolContext;
 }
 
 function textOf(result: ToolResult): string {
@@ -118,7 +122,7 @@ describe("list_tasks", () => {
       recordsFiltered: 1,
     });
     const api = fakeApi({
-      getTasks: getTasks as BuildToolsAPI["getTasks"],
+      getTasks: getTasks as OperationsManagementApi["getTasks"],
     });
 
     const result = await listTasksTool.handler({}, api);
@@ -143,90 +147,90 @@ describe("list_tasks", () => {
     expect(getTasks).toHaveBeenCalledTimes(1);
   });
 
-  it('passes columns[1][search][value]="2" when status is "In Progress"', async () => {
+  it('passes status facet "2" when status is "In Progress"', async () => {
     const getTasks = vi.fn().mockResolvedValue({
       data: [sampleInProgressTaskRow],
     });
     const api = fakeApi({
-      getTasks: getTasks as BuildToolsAPI["getTasks"],
+      getTasks: getTasks as OperationsManagementApi["getTasks"],
     });
 
     await listTasksTool.handler({ status: "In Progress" }, api);
 
     const callArgs = getTasks.mock.calls[0][0];
     expect(callArgs).toMatchObject({
-      length: 50,
-      "columns[1][search][value]": "2",
+      limit: 50,
+      status: "2",
     });
   });
 
-  it('passes columns[1][search][value]="1" when status is "Open"', async () => {
+  it('passes status facet "1" when status is "Open"', async () => {
     const getTasks = vi.fn().mockResolvedValue({ data: [sampleTaskRow] });
     const api = fakeApi({
-      getTasks: getTasks as BuildToolsAPI["getTasks"],
+      getTasks: getTasks as OperationsManagementApi["getTasks"],
     });
 
     await listTasksTool.handler({ status: "Open" }, api);
 
     const callArgs = getTasks.mock.calls[0][0];
-    expect(callArgs["columns[1][search][value]"]).toBe("1");
+    expect(callArgs.status).toBe("1");
   });
 
-  it('passes columns[1][search][value]="3" when status is "Complete"', async () => {
+  it('passes status facet "3" when status is "Complete"', async () => {
     const getTasks = vi.fn().mockResolvedValue({ data: [] });
     const api = fakeApi({
-      getTasks: getTasks as BuildToolsAPI["getTasks"],
+      getTasks: getTasks as OperationsManagementApi["getTasks"],
     });
 
     await listTasksTool.handler({ status: "Complete" }, api);
 
     const callArgs = getTasks.mock.calls[0][0];
-    expect(callArgs["columns[1][search][value]"]).toBe("3");
+    expect(callArgs.status).toBe("3");
   });
 
   it('emits NO status filter when status is "All" (the default)', async () => {
     const getTasks = vi.fn().mockResolvedValue({ data: [sampleTaskRow] });
     const api = fakeApi({
-      getTasks: getTasks as BuildToolsAPI["getTasks"],
+      getTasks: getTasks as OperationsManagementApi["getTasks"],
     });
 
     await listTasksTool.handler({}, api);
 
     const callArgs = getTasks.mock.calls[0][0];
-    expect(callArgs["columns[1][search][value]"]).toBeUndefined();
+    expect(callArgs.status).toBeUndefined();
   });
 
-  it("forwards query via the datatable's search[value]", async () => {
+  it("forwards query as the neutral search facet", async () => {
     const getTasks = vi.fn().mockResolvedValue({ data: [sampleTaskRow] });
     const api = fakeApi({
-      getTasks: getTasks as BuildToolsAPI["getTasks"],
+      getTasks: getTasks as OperationsManagementApi["getTasks"],
     });
 
     await listTasksTool.handler({ query: "Doe" }, api);
 
     const callArgs = getTasks.mock.calls[0][0];
     expect(callArgs).toMatchObject({
-      length: 50,
-      "search[value]": "Doe",
+      limit: 50,
+      search: "Doe",
     });
   });
 
   it("honours an explicit limit value", async () => {
     const getTasks = vi.fn().mockResolvedValue({ data: [sampleTaskRow] });
     const api = fakeApi({
-      getTasks: getTasks as BuildToolsAPI["getTasks"],
+      getTasks: getTasks as OperationsManagementApi["getTasks"],
     });
 
     await listTasksTool.handler({ limit: 25 }, api);
 
     const callArgs = getTasks.mock.calls[0][0];
-    expect(callArgs.length).toBe(25);
+    expect(callArgs.limit).toBe(25);
   });
 
   it("returns a Markdown 'no tasks matched' message when result is empty (no isError)", async () => {
     const getTasks = vi.fn().mockResolvedValue({ data: [] });
     const api = fakeApi({
-      getTasks: getTasks as BuildToolsAPI["getTasks"],
+      getTasks: getTasks as OperationsManagementApi["getTasks"],
     });
 
     const result = await listTasksTool.handler(
@@ -242,7 +246,7 @@ describe("list_tasks", () => {
   it("handles a null datatable envelope gracefully (treats as empty)", async () => {
     const getTasks = vi.fn().mockResolvedValue(null);
     const api = fakeApi({
-      getTasks: getTasks as BuildToolsAPI["getTasks"],
+      getTasks: getTasks as OperationsManagementApi["getTasks"],
     });
 
     const result = await listTasksTool.handler({}, api);
@@ -255,7 +259,7 @@ describe("list_tasks", () => {
       .fn()
       .mockRejectedValue(new BuildToolsAuthError("Not authenticated"));
     const api = fakeApi({
-      getTasks: getTasks as BuildToolsAPI["getTasks"],
+      getTasks: getTasks as OperationsManagementApi["getTasks"],
     });
 
     const result = await listTasksTool.handler({}, api);
@@ -291,7 +295,7 @@ describe("list_tasks", () => {
       data: [{ id: 7, name: "Sparse" }],
     });
     const api = fakeApi({
-      getTasks: getTasks as BuildToolsAPI["getTasks"],
+      getTasks: getTasks as OperationsManagementApi["getTasks"],
     });
 
     const result = await listTasksTool.handler({}, api);
