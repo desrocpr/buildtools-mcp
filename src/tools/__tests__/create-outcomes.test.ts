@@ -434,3 +434,110 @@ describe("an ambiguous draw request is cached, so a retry does not re-fire it", 
     expect(calls.n).toBe(2);
   });
 });
+
+describe("retry safety on the plain creates", () => {
+  // Rendering "do NOT retry blindly" is advice; advice is not a mechanism.
+  // These four creates can all return ambiguous, and the caller is a model
+  // that retries errors, so each needs a key that makes a repeat replay.
+  async function idempotentTool(
+    name: string,
+    upstream: Upstream,
+  ): Promise<{ tool: ToolDefinition; api: BuildToolsAPI }> {
+    const api = upstream as unknown as BuildToolsAPI;
+    const { IdempotencyStore } = await import("../../idempotency/index.js");
+    const tool = createMutationTools(
+      () => api,
+      new ConfirmationStore(),
+      undefined,
+      new IdempotencyStore(),
+    ).find((t) => t.name === name)!;
+    return { tool, api };
+  }
+
+  it.each([
+    ["create_project", "createProjectRaw", { name: "Katchmark Kitchen", project_manager_id: 42 }],
+    ["create_change_order", "createChangeOrderRaw", { name: "Extra tile", project_id: 1, total: 5 }],
+    [
+      "create_invoice",
+      "createInvoiceRaw",
+      { company_id: 1, number: "INV-9", date: "01/02/2026", due_date: "02/01/2026" },
+    ],
+    [
+      "create_financial_statement",
+      "createFinancialStatementWithAmountRaw",
+      { project_id: 1, name: "Q1", amount: 100 },
+    ],
+  ])("%s replays an ambiguous result rather than writing twice", async (
+    toolName,
+    rawMethod,
+    args,
+  ) => {
+    let calls = 0;
+    const { tool, api } = await idempotentTool(toolName, {
+      [rawMethod]: async () => {
+        calls += 1;
+        return dispatched(500, "");
+      },
+    } as Upstream);
+    const withKey = { ...args, idempotency_key: `retry-${toolName}` };
+
+    const prompt = await tool.handler(withKey, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const first = await tool.handler({ ...withKey, confirmation_id: cid }, api);
+    expect(textOf(first)).toContain("Outcome unknown");
+    expect(calls).toBe(1);
+
+    const retry = await tool.handler(withKey, api);
+
+    expect(textOf(retry)).toContain("Idempotency replay");
+    expect(calls).toBe(1);
+  });
+
+  it("an expired confirmation does not poison the key", async () => {
+    // `isExecuteCall` is inferred from confirmation_id being PRESENT, which it
+    // is when the id is stale. The framework returns "expired" WITHOUT
+    // executing, and that message leaves isError unset — so it used to be
+    // cached as if it were a result, and every later call under that key
+    // replayed "your confirmation expired" for a write never attempted.
+    let calls = 0;
+    const { tool, api } = await idempotentTool("create_project", {
+      createProjectRaw: async () => {
+        calls += 1;
+        return dispatched(200, "{}", { r: 1, projectId: 77 });
+      },
+    });
+    const args = { name: "Katchmark Kitchen", project_manager_id: 42, idempotency_key: "poison-me" };
+
+    const stale = await tool.handler(
+      { ...args, confirmation_id: "conf_does_not_exist" },
+      api,
+    );
+    expect(textOf(stale)).toContain("expired, unknown");
+    expect(calls).toBe(0);
+
+    // The key must still work for a real confirm/execute.
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const done = await tool.handler({ ...args, confirmation_id: cid }, api);
+
+    expect(textOf(done)).toContain("#77");
+    expect(calls).toBe(1);
+  });
+
+  it("tells a caller who verified the write did not land how to proceed", async () => {
+    // Caching ambiguous results would otherwise leave someone who checked
+    // BuildTools with no way to say "I looked, it isn't there" for an hour.
+    const { tool, api } = await idempotentTool("create_project", {
+      createProjectRaw: async () => dispatched(500, ""),
+    });
+    const args = { name: "Katchmark Kitchen", project_manager_id: 42, idempotency_key: "verified" };
+
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...args, confirmation_id: cid }, api);
+
+    expect(textOf(await tool.handler(args, api))).toContain(
+      "retry with a fresh idempotency_key",
+    );
+  });
+});

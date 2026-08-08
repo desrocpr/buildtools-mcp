@@ -259,6 +259,12 @@ const CreateProjectSchema = z.object({
   state: z.string().optional(),
   zip: z.string().optional(),
   description: z.string().optional(),
+  idempotency_key: z
+    .string()
+    .optional()
+    .describe(
+      "Optional retry-safety key. Reuse it when retrying THIS create; a repeat returns the cached result instead of creating a second record.",
+    ),
   confirmation_id: z.string().optional(),
 });
 type CreateProjectArgs = z.infer<typeof CreateProjectSchema>;
@@ -276,6 +282,12 @@ const CreateChangeOrderSchema = z.object({
     }))
     .optional()
     .describe("Line items. If omitted, a single item is created from the total."),
+  idempotency_key: z
+    .string()
+    .optional()
+    .describe(
+      "Optional retry-safety key. Reuse it when retrying THIS create; a repeat returns the cached result instead of creating a second record.",
+    ),
   confirmation_id: z.string().optional(),
 });
 type CreateChangeOrderArgs = z.infer<typeof CreateChangeOrderSchema>;
@@ -448,6 +460,12 @@ const CreateInvoiceSchema = z.object({
   due_date: z.string().describe("Due date (MM/DD/YYYY)."),
   payment_days: z.string().optional().describe("Payment terms in days. Default: '30'."),
   notes: z.string().optional(),
+  idempotency_key: z
+    .string()
+    .optional()
+    .describe(
+      "Optional retry-safety key. Reuse it when retrying THIS create; a repeat returns the cached result instead of creating a second record.",
+    ),
   confirmation_id: z.string().optional(),
 });
 type CreateInvoiceArgs = z.infer<typeof CreateInvoiceSchema>;
@@ -458,6 +476,12 @@ const CreateFinancialStatementSchema = z.object({
   amount: z.number().describe("Dollar amount for the statement."),
   notes: z.string().optional(),
   status: z.number().optional().describe("1=Draft (default), 2=Pending, 4=Partial, 5=Sent, 6=Paid."),
+  idempotency_key: z
+    .string()
+    .optional()
+    .describe(
+      "Optional retry-safety key. Reuse it when retrying THIS create; a repeat returns the cached result instead of creating a second record.",
+    ),
   confirmation_id: z.string().optional(),
 });
 type CreateFinancialStatementArgs = z.infer<typeof CreateFinancialStatementSchema>;
@@ -2529,15 +2553,80 @@ export function createMutationTools(
     };
   }
 
+  /**
+   * `makeTool`, plus retry safety.
+   *
+   * Every create wrapped here can now return AMBIGUOUS, and the rendered
+   * message tells the caller not to retry blindly. Advice is not a mechanism:
+   * the caller is usually a model, and a model that retries anyway would create
+   * a second project, change order, invoice, or client bill. This is what makes
+   * the advice enforceable — a repeat under the same key replays instead.
+   *
+   * The outcome (not just `isError`) drives the cache decision, so an ambiguous
+   * write IS cached. See `storeIdempotencyResult`.
+   */
+  function makeIdempotentTool(
+    name: string,
+    description: string,
+    schema: z.ZodTypeAny,
+    confirmed: (
+      args: any,
+      store: ConfirmationStore,
+      sessionId?: string,
+    ) => Promise<ToolResult>,
+    permission: string,
+  ): ToolDefinition {
+    const base = makeTool(name, description, schema, confirmed, permission);
+    return {
+      ...base,
+      handler: async (rawArgs: unknown, _api: BuildToolsAPI) => {
+        const parsed = schema.safeParse(rawArgs ?? {});
+        if (!parsed.success) return formatZodError(parsed.error, name);
+        const data = parsed.data as {
+          confirmation_id?: string;
+          idempotency_key?: string;
+        };
+
+        // Meta fields are stripped before fingerprinting: the key is the
+        // namespace, not part of what is being written, and confirmation_id
+        // changes between the prompt and the execute call.
+        const {
+          confirmation_id: _c,
+          idempotency_key: _k,
+          ...fingerprintInput
+        } = data;
+
+        const idemContext = checkIdempotency({
+          toolName: name,
+          idempotencyStore,
+          sessionId,
+          idempotencyKey: data.idempotency_key,
+          fingerprintInput,
+        });
+        if (idemContext.replayResult) return idemContext.replayResult;
+        if (idemContext.mismatchError) return idemContext.mismatchError;
+
+        const result = await confirmed(data, store, sessionId);
+        storeIdempotencyResult({
+          context: idemContext,
+          result,
+          isExecuteCall: !!data.confirmation_id,
+          outcome: outcomeOf(result),
+        });
+        return result;
+      },
+    };
+  }
+
   return [
-    makeTool(
+    makeIdempotentTool(
       "create_project",
       "Create a new BuildTools project. Requires confirmation. Default status: Omega (6).",
       CreateProjectSchema,
       createProjectConfirmed,
       "write:project",
     ),
-    makeTool(
+    makeIdempotentTool(
       "create_change_order",
       "Create a change order on a project. Requires confirmation. Default status: Draft (1).",
       CreateChangeOrderSchema,
@@ -3031,14 +3120,14 @@ export function createMutationTools(
       createRFIConfirmed,
       "write:tasks",
     ),
-    makeTool(
+    makeIdempotentTool(
       "create_invoice",
       "Create a vendor invoice. Requires confirmation. Note: 'invoices' in BuildTools are vendor bills, not client billing (that's financial statements).",
       CreateInvoiceSchema,
       createInvoiceConfirmed,
       "write:financial",
     ),
-    makeTool(
+    makeIdempotentTool(
       "create_financial_statement",
       "Create a financial statement (client bill / draw request) on a project with a specific dollar amount. Requires confirmation. Use ASCII-only titles.",
       CreateFinancialStatementSchema,
