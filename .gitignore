@@ -22,3 +22,6 @@ run-*.ts
 # went stale; vitest discovered its duplicate tests and ran them against dead
 # source. Anchored to the root so it only guards against that recurrence.
 /buildtools-mcp/
+
+# Ad-hoc replica probe scratch script — never checked in.
+bt-probe.ts

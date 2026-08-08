@@ -292,3 +292,69 @@ describe("egress safety", () => {
     expect(asMessage.details).toEqual({ message: "Duplicate number" });
   });
 });
+
+describe("the raw body never reaches the outcome", () => {
+  // `RawWriteResponse.body` is documented "NEVER copied into an outcome", and
+  // until now that was enforced by the comment alone. A BuildTools 500 is a
+  // Laravel debug page: it carries absolute filesystem paths, framework
+  // internals, and sometimes the request URL with its query string. Outcomes
+  // are rendered to users and cross the gateway, so a body that leaks into
+  // `reason` or `details` leaks all of that with it.
+  const LEAKY_BODY =
+    "<html><b>Fatal error</b> in /var/www/buildtools/app/Http/Controllers/" +
+    "ProjectController.php:214 — session=abcd1234 — " +
+    "https://moss.buildtools.app/projects/save?_token=SECRETVALUE</html>";
+
+  const SPEC = {
+    isSuccess: (p: Record<string, unknown>) => p.r === 1,
+    extract: (p: Record<string, unknown>) => p.projectId,
+  };
+
+  function serialise(outcome: unknown): string {
+    return JSON.stringify(outcome);
+  }
+
+  it.each([
+    ["a drifted body that does not parse", { status: 200, body: LEAKY_BODY }],
+    ["a 500 debug page", { status: 500, body: LEAKY_BODY }],
+    ["a 302 with a body", { status: 302, body: LEAKY_BODY }],
+    ["a 401 with a body", { status: 401, body: LEAKY_BODY }],
+  ])("keeps the body out of the outcome for %s", (_label, res) => {
+    const text = serialise(classifyWriteResponse(res, SPEC));
+
+    expect(text).not.toContain("ProjectController.php");
+    expect(text).not.toContain("SECRETVALUE");
+    expect(text).not.toContain("session=abcd1234");
+  });
+
+  it("keeps a parsed-but-unrecognised envelope out of the outcome too", () => {
+    // The envelope parsed, so `body` is not the only carrier — the PAYLOAD can
+    // be just as leaky, and this is the branch that reports "no recognisable
+    // success or rejection envelope".
+    const text = serialise(
+      classifyWriteResponse(
+        {
+          status: 200,
+          body: "{}",
+          json: { trace: "/var/www/app/Foo.php", token: "SECRETVALUE" },
+        },
+        SPEC,
+      ),
+    );
+
+    expect(text).not.toContain("SECRETVALUE");
+    expect(text).not.toContain("/var/www");
+  });
+
+  it("still forwards a genuine rejection message, which is the point of the distinction", () => {
+    // The guard above must not be satisfied by suppressing everything —
+    // upstream's own validation text is what makes `failed` actionable.
+    const outcome = classifyWriteResponse(
+      { status: 422, body: "{}", json: { e: { name: ["Name is required"] } } },
+      SPEC,
+    );
+
+    expect(outcome.status).toBe("failed");
+    expect(serialise(outcome)).toContain("Name is required");
+  });
+});
