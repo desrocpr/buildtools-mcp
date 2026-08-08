@@ -849,6 +849,31 @@ export class BuildToolsAPI {
     path: string,
     data: PostData,
   ): Promise<T | { status: number; body: string }> {
+    const raw = await this.postRaw(path, data);
+    if (raw.json !== undefined) return raw.json as T;
+    return { status: raw.status, body: raw.body };
+  }
+
+  /**
+   * Form-urlencoded POST that PRESERVES the HTTP status (MOS-747).
+   *
+   * `post()` above returns the parsed body when it parses, and a
+   * `{status, body}` object only when it does not — so on the success path the
+   * status is thrown away. That is what makes a 500 carrying a JSON error body
+   * indistinguishable from a business rejection, and it is why a write could
+   * only ever report `{success: false}` for an outcome that may in fact have
+   * landed.
+   *
+   * The write path needs the status to tell those apart, so it uses this and
+   * classifies the result (`operations/adapters/buildtools/classify.ts`).
+   * `post()` is kept as a thin wrapper over the same request rather than a
+   * parallel implementation — two request paths would drift, and the
+   * form-bracket encoding is exactly the fiddly part that must not.
+   */
+  async postRaw(
+    path: string,
+    data: PostData,
+  ): Promise<{ status: number; body: string; json?: unknown }> {
     await this.ensureAuthenticated();
 
     const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
@@ -879,8 +904,14 @@ export class BuildToolsAPI {
     );
 
     try {
-      return JSON.parse(response.body) as T;
+      return {
+        status: response.status,
+        body: response.body,
+        json: JSON.parse(response.body),
+      };
     } catch {
+      // Unparseable body — BuildTools drifted. `json` stays undefined, which
+      // the classifier reads as ambiguous rather than as failure.
       return { status: response.status, body: response.body };
     }
   }

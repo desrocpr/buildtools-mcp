@@ -2234,3 +2234,87 @@ describe("BuildToolsAPI — token cache consolidation (PR #70)", () => {
     expect(api.tokens.upload).toBeNull();
   });
 });
+
+describe("postRaw — preserves the HTTP status post() discards (MOS-747)", () => {
+  // post() returns the parsed body when it parses, and {status, body} only
+  // when it doesn't — so on the success path the status is gone. That is what
+  // made a 500 carrying a JSON error body indistinguishable from a business
+  // rejection, and why a write could only ever report {success:false} for an
+  // outcome that may in fact have landed.
+  function authedApi(responses: StubResponse[]) {
+    const { stub, recorded } = makeFetchStub([
+      // authenticate(): login POST -> redirect -> dashboard -> base
+      { status: 200, body: '<input name="_token" value="tok">' },
+      { status: 302, location: "https://core.buildtools.app/dashboard" },
+      { status: 200, body: "<html>dashboard ok</html>" },
+      { status: 200, body: "<html>welcome — logout link here</html>" },
+      ...responses,
+    ]);
+    return { api: new BuildToolsAPI({ fetch: stub }), recorded };
+  }
+
+  it("reports the status alongside a parsed body", async () => {
+    const { api } = authedApi([
+      { status: 200, body: JSON.stringify({ r: 1, projectId: 7 }) },
+    ]);
+    await api.authenticate("u@example.com", "pw");
+
+    const raw = await api.postRaw("/projects/save", { "Project[name]": "x" });
+
+    expect(raw.status).toBe(200);
+    expect(raw.json).toEqual({ r: 1, projectId: 7 });
+  });
+
+  it("reports a 500 that carries a JSON body — the case post() could not express", async () => {
+    // Through post() this is indistinguishable from a business rejection: the
+    // body parses, so the 500 is discarded and only `r !== 1` survives.
+    const { api } = authedApi([
+      { status: 500, body: JSON.stringify({ error: "Internal Server Error" }) },
+    ]);
+    await api.authenticate("u@example.com", "pw");
+
+    const raw = await api.postRaw("/projects/save", {});
+
+    expect(raw.status).toBe(500);
+    expect(raw.json).toEqual({ error: "Internal Server Error" });
+  });
+
+  it("leaves json undefined when the body does not parse", async () => {
+    // BuildTools drifted. The classifier reads undefined json as ambiguous
+    // rather than as failure.
+    const { api } = authedApi([
+      { status: 200, body: "<html>Unexpected template</html>" },
+    ]);
+    await api.authenticate("u@example.com", "pw");
+
+    const raw = await api.postRaw("/projects/save", {});
+
+    expect(raw.status).toBe(200);
+    expect(raw.json).toBeUndefined();
+    expect(raw.body).toContain("Unexpected template");
+  });
+
+  it("post() still behaves exactly as before, now delegating to postRaw", async () => {
+    // One request path, not two — the form-bracket encoding is the fiddly part
+    // that must not drift between them.
+    const { api } = authedApi([
+      { status: 200, body: JSON.stringify({ r: 1 }) },
+      { status: 200, body: "not json" },
+    ]);
+    await api.authenticate("u@example.com", "pw");
+
+    expect(await api.post("/x", {})).toEqual({ r: 1 });
+    expect(await api.post("/x", {})).toEqual({ status: 200, body: "not json" });
+  });
+
+  it("encodes array values as key[] on the raw path too", async () => {
+    const { api, recorded } = authedApi([{ status: 200, body: "{}" }]);
+    await api.authenticate("u@example.com", "pw");
+
+    await api.postRaw("/x", { employees: [1, 2] });
+
+    const body = String(recorded[recorded.length - 1]!.init.body);
+    expect(body).toContain("employees%5B%5D=1");
+    expect(body).toContain("employees%5B%5D=2");
+  });
+});

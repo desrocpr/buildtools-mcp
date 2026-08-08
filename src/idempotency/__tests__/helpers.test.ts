@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { ambiguous, failed, ok } from "../../operations/outcomes.js";
 import { IdempotencyStore } from "../IdempotencyStore.js";
 import { checkIdempotency, storeIdempotencyResult } from "../helpers.js";
 import type { ToolResult } from "../../tools/projects.js";
@@ -234,5 +235,107 @@ describe("storeIdempotencyResult", () => {
       result: mkResult("x"),
       isExecuteCall: true,
     });
+  });
+});
+
+describe("storeIdempotencyResult — caching an ambiguous write (MOS-747)", () => {
+  // The hazard this closes: an ambiguous write MAY have landed upstream. Under
+  // the old gate it rendered as an error, wasn't cached, and a retry carrying
+  // the same idempotency_key re-issued it — the mechanism built to prevent
+  // duplicates producing one, in the exact case it exists for.
+  const ctx = () => {
+    const store = new IdempotencyStore();
+    return {
+      store,
+      context: {
+        store,
+        cacheKey: "k1",
+        argsFingerprint: "f1",
+      },
+    };
+  };
+  const errorResult = {
+    content: [{ type: "text" as const, text: "could not tell" }],
+    isError: true,
+  };
+
+  it("caches an ambiguous outcome even though it renders as an error", () => {
+    const { store, context } = ctx();
+
+    storeIdempotencyResult({
+      context,
+      result: errorResult,
+      isExecuteCall: true,
+      outcome: ambiguous("upstream timed out"),
+    });
+
+    expect(store.lookup("k1", "f1").kind).toBe("hit");
+  });
+
+  it("does NOT cache a failed outcome — that one is safe to retry", () => {
+    const { store, context } = ctx();
+
+    storeIdempotencyResult({
+      context,
+      result: errorResult,
+      isExecuteCall: true,
+      outcome: failed("validation rejected it"),
+    });
+
+    expect(store.lookup("k1", "f1").kind).toBe("miss");
+  });
+
+  it("caches an ok outcome", () => {
+    const { store, context } = ctx();
+
+    storeIdempotencyResult({
+      context,
+      result: { content: [{ type: "text" as const, text: "done" }] },
+      isExecuteCall: true,
+      outcome: ok({ id: 1 }),
+    });
+
+    expect(store.lookup("k1", "f1").kind).toBe("hit");
+  });
+
+  it("falls back to isError when the caller has no outcome", () => {
+    // Un-migrated callers keep their existing behaviour: isError stays correct
+    // for anything that cannot be ambiguous.
+    const { store, context } = ctx();
+
+    storeIdempotencyResult({ context, result: errorResult, isExecuteCall: true });
+
+    expect(store.lookup("k1", "f1").kind).toBe("miss");
+  });
+
+  it("still refuses to cache on the prompt call, outcome or not", () => {
+    const { store, context } = ctx();
+
+    storeIdempotencyResult({
+      context,
+      result: { content: [{ type: "text" as const, text: "x" }] },
+      isExecuteCall: false,
+      outcome: ok({ id: 1 }),
+    });
+
+    expect(store.lookup("k1", "f1").kind).toBe("miss");
+  });
+
+  it("a retry of an ambiguous write replays instead of re-firing", () => {
+    // The end-to-end property. Before the fix this second lookup was a miss,
+    // and the caller would have gone back to BuildTools.
+    const { store, context } = ctx();
+    storeIdempotencyResult({
+      context,
+      result: errorResult,
+      isExecuteCall: true,
+      outcome: ambiguous("connection reset after dispatch"),
+    });
+
+    const replay = store.lookup("k1", "f1");
+
+    expect(replay.kind).toBe("hit");
+    if (replay.kind !== "hit") throw new Error("expected hit");
+    expect(replay.result.isError).toBe(true);
   });
 });

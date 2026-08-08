@@ -34,6 +34,7 @@
 
 import type { ToolResult } from "../tools/projects.js";
 
+import { isCacheable, type WriteOutcome } from "../operations/outcomes.js";
 import { IdempotencyStore } from "./IdempotencyStore.js";
 
 // ---------------------------------------------------------------------------
@@ -122,6 +123,14 @@ export interface StoreIdempotencyResultOptions {
    * the first/prompt call.
    */
   isExecuteCall: boolean;
+  /**
+   * The write's outcome, when the caller has one.
+   *
+   * Supplying it is what lets an AMBIGUOUS write be cached — without it the
+   * decision falls back to `isError`, which cannot tell "definitely did not
+   * land" from "may have landed", and a retry re-fires the write.
+   */
+  outcome?: WriteOutcome<unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -194,31 +203,37 @@ export function checkIdempotency(
  *
  * Returns nothing — the cache write is a side effect.
  *
- * ⚠ MOS-747 — MUST CHANGE BEFORE WRITES ARE WIRED TO `WriteOutcome`.
+ * THE `isError` GATE IS NOT ENOUGH ON ITS OWN.
  *
- * The `isError` gate below implements "failures stay uncached so the next
- * attempt gets a fresh shot at BT". That is correct for a *failed* write and
- * WRONG for an *ambiguous* one. An ambiguous write (unreadable, non-2xx, or
- * timed-out — see `src/operations/outcomes.ts`) may already have landed
- * upstream. If it renders as `isError: true` it will not be cached, so a retry
- * carrying the same `idempotency_key` re-issues the write to BuildTools and
- * creates a duplicate — through the very mechanism built to prevent one.
+ * "Failures stay uncached so the next attempt gets a fresh shot at BT" is
+ * correct for a write that DEFINITELY did not land, and dangerous for one that
+ * MIGHT have. An ambiguous write — unreadable response, non-2xx, or timeout
+ * (`src/operations/outcomes.ts`) — renders as an error, so under the old gate
+ * it was not cached, and a retry carrying the same `idempotency_key` re-issued
+ * it to BuildTools. The mechanism built to prevent duplicates produced them, in
+ * exactly the case it exists for.
  *
- * When the operations adapter starts returning `WriteOutcome`, gate on
- * `isCacheable(outcome)` (cache `ok` AND `ambiguous`, skip only `failed`)
- * instead of on `isError`, and make an ambiguous replay return
- * "unknown — reconcile first" rather than re-firing.
+ * So callers that have a `WriteOutcome` pass it, and the decision is made on
+ * the outcome (`isCacheable`: cache `ok` AND `ambiguous`, skip only `failed`).
+ * Callers that don't fall back to `isError`, which stays correct for
+ * everything that cannot be ambiguous.
  */
 export function storeIdempotencyResult(opts: StoreIdempotencyResultOptions): void {
   if (
     !opts.context.store ||
     !opts.context.cacheKey ||
     !opts.context.argsFingerprint ||
-    !opts.isExecuteCall ||
-    opts.result.isError === true
+    !opts.isExecuteCall
   ) {
     return;
   }
+
+  // An outcome, when the caller has one, is strictly better evidence than
+  // `isError` — it distinguishes "did not land" from "might have".
+  const cacheable = opts.outcome
+    ? isCacheable(opts.outcome)
+    : opts.result.isError !== true;
+  if (!cacheable) return;
   opts.context.store.store(
     opts.context.cacheKey,
     opts.context.argsFingerprint,
