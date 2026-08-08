@@ -15,12 +15,22 @@
  */
 
 import type { BuildToolsAPI } from "../../../client/BuildToolsAPI.js";
+import type { RawWriteAttempt } from "../../../client/types.js";
 import { normalizeEnvelope, normalizeMaybeRow } from "../../normalize.js";
+import { failed, type WriteOutcome } from "../../outcomes.js";
+import {
+  classifyWriteError,
+  classifyWriteResponse,
+  type ClassifySpec,
+} from "./classify.js";
 import { toDatatableParams, type GridName } from "./query.js";
 import type {
   AllowanceItem,
   BudgetCategoryRef,
   BudgetView,
+  CreateChangeOrderInput,
+  CreatedRecord,
+  CreateProjectInput,
   ListQuery,
   OperationsManagementApi,
   PurchaseOrderView,
@@ -334,6 +344,118 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
   ): Promise<UnbilledChangeOrderRow[]> {
     return this.reader.findUnbilledChangeOrders(filters);
   }
+
+  // --- writes ---------------------------------------------------------------
+  //
+  // Writes always go to the vendor client. There is no DB path: the replica is
+  // read-only, and `this.reader` may BE the replica.
+
+  async createProject(
+    input: CreateProjectInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    return this.runWrite(
+      () =>
+        this.api.createProjectRaw({
+          name: input.name,
+          status: input.status,
+          projectManager: input.projectManager,
+          address: input.address,
+          city: input.city,
+          state: input.state,
+          zip: input.zip,
+          description: input.description,
+          clientIds: input.clientIds,
+        }),
+      {
+        // `r === 1` is the project-save discriminator; the id field is
+        // `projectId` and may legitimately be absent on a landed write, which
+        // is why success is read separately from extraction.
+        isSuccess: (p) => p.r === 1,
+        extract: (p) => ({ id: asId(p.projectId) }),
+        probe: { kind: "search", resource: "projects", query: input.name },
+      },
+    );
+  }
+
+  async createChangeOrder(
+    input: CreateChangeOrderInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    const items = input.items?.map((i) => ({
+      name: i.name,
+      total: i.total,
+      budget_category_id: i.budgetCategoryId ?? 0,
+    }));
+
+    return this.runWrite(
+      () =>
+        this.api.createChangeOrderRaw({
+          name: input.name,
+          projectId: input.projectId,
+          status: input.status,
+          description: input.description,
+          total: input.total,
+          items,
+        }),
+      {
+        // Change orders answer `result: "success"`, NOT `r: 1`. Getting this
+        // wrong reports a landed write as failed — see the note on `message`
+        // in classify.ts.
+        isSuccess: (p) => p.result === "success",
+        extract: (p) => ({ id: asId(p.id), message: asMessage(p.message) }),
+        probe: {
+          kind: "search",
+          resource: "changeOrders",
+          query: input.name,
+        },
+      },
+    );
+  }
+
+  /**
+   * Run a vendor write and classify whatever comes back — including a throw.
+   *
+   * The catch is the point. `runWrite`'s caller has already committed the write
+   * to the wire by the time most errors can happen, and an escaping exception
+   * would leave the tool layer with an error it cannot distinguish from a
+   * refusal. `dispatched` is taken from the attempt itself, so a pre-flight
+   * guard failure classifies as `failed` and anything after dispatch as
+   * ambiguous.
+   */
+  private async runWrite<T>(
+    attempt: () => Promise<RawWriteAttempt>,
+    spec: ClassifySpec<T>,
+  ): Promise<WriteOutcome<T>> {
+    let result: RawWriteAttempt;
+    try {
+      result = await attempt();
+    } catch (err) {
+      // The client throws from inside the request, so by here the write may
+      // well have been applied. `dispatched: true` is the conservative and
+      // correct reading — see classifyWriteError.
+      return classifyWriteError(err, { dispatched: true, probe: spec.probe });
+    }
+    if (!result.dispatched) {
+      return failed(result.reason);
+    }
+    return classifyWriteResponse(result, spec);
+  }
+}
+
+/** Coerce an upstream id field to the neutral shape, dropping junk. */
+function asId(value: unknown): string | number | undefined {
+  if (typeof value === "number" || typeof value === "string") return value;
+  return undefined;
+}
+
+/**
+ * Upstream's confirmation text, when it is actually text.
+ *
+ * BuildTools types `message` as `unknown` because it is sometimes an object.
+ * Only a string is forwarded — an arbitrary object could carry unrelated
+ * records across the interface and eventually the gateway.
+ */
+function asMessage(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }
 
 /** Build the adapter over an authenticated client. */

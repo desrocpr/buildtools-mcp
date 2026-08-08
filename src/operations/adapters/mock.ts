@@ -22,10 +22,20 @@
  */
 
 import { assertStatusFilterSupported, type GridName } from "./buildtools/query.js";
+import {
+  ambiguous,
+  failed,
+  ok,
+  type ReconcileProbe,
+  type WriteOutcome,
+} from "../outcomes.js";
 import type {
   AllowanceItem,
   BudgetCategoryRef,
   BudgetView,
+  CreateChangeOrderInput,
+  CreatedRecord,
+  CreateProjectInput,
   ListQuery,
   OperationsManagementApi,
   PurchaseOrderView,
@@ -331,6 +341,90 @@ export class MockOperationsApi implements OperationsManagementApi {
     }
     return rows;
   }
+
+  // --- writes ---------------------------------------------------------------
+
+  async createProject(
+    input: CreateProjectInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    this.record("createProject", input);
+    return this.write("projects", { name: input.name }, {
+      kind: "search",
+      resource: "projects",
+      query: input.name,
+    });
+  }
+
+  async createChangeOrder(
+    input: CreateChangeOrderInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    this.record("createChangeOrder", input);
+    return this.write(
+      "changeOrders",
+      {
+        name: input.name,
+        project_id: input.projectId,
+        total:
+          input.items?.reduce((sum, i) => sum + i.total, 0) ?? input.total ?? 0,
+      },
+      { kind: "search", resource: "changeOrders", query: input.name },
+    );
+  }
+
+  /**
+   * Perform a seeded write.
+   *
+   * The mock's job here is NOT to imitate BuildTools' wire format — that is the
+   * BuildTools adapter's problem, and `classify.test.ts` covers it. Its job is
+   * to let a caller rehearse each of the three outcomes, because the ambiguous
+   * branch is the one that is hard to reach against a real server and therefore
+   * the one that ships untested.
+   *
+   * A successful write MUTATES the seeded grid, so a test can assert that a
+   * follow-up read sees the new row — the property a caller actually depends
+   * on, and one a call-spy cannot express.
+   */
+  private write(
+    grid: "projects" | "changeOrders",
+    row: Record<string, unknown>,
+    probe: ReconcileProbe,
+  ): WriteOutcome<CreatedRecord> {
+    const scripted = this.nextOutcome(grid);
+    if (scripted === "failed") {
+      return failed(`mock: ${grid} write refused`, "mock rejection");
+    }
+    if (scripted === "ambiguous") {
+      // Deliberately NOT recorded in the grid. "Ambiguous" means the mock does
+      // not know either — a test that wants "landed but unacknowledged" seeds
+      // the row itself and then scripts an ambiguous outcome.
+      return ambiguous("mock: outcome unknown", probe);
+    }
+
+    const id = this.nextId++;
+    const rows = (this.seed[grid] ??= []);
+    rows.push({ id, ...row } as MockRow);
+    return ok({ id });
+  }
+
+  /** Pop the next scripted outcome for a grid, defaulting to success. */
+  private nextOutcome(grid: string): "ok" | "failed" | "ambiguous" {
+    return this.scriptedOutcomes[grid]?.shift() ?? "ok";
+  }
+
+  /**
+   * Script the outcomes a grid's next writes will produce, in order.
+   * Anything past the end of the list succeeds.
+   */
+  scriptWrites(
+    grid: "projects" | "changeOrders",
+    outcomes: Array<"ok" | "failed" | "ambiguous">,
+  ): void {
+    this.scriptedOutcomes[grid] = [...outcomes];
+  }
+
+  private scriptedOutcomes: Record<string, Array<"ok" | "failed" | "ambiguous">> =
+    {};
+  private nextId = 9000;
 }
 
 export function buildMockOperationsApi(seed: MockSeed = {}): MockOperationsApi {

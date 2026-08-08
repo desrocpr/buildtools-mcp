@@ -142,3 +142,64 @@ describe("documented divergences", () => {
     });
   });
 });
+
+describe("writes: mock and BuildTools adapter agree on the outcome vocabulary", () => {
+  // The mock does NOT imitate BuildTools' wire format — the classifier owns
+  // that, and classify.test.ts covers it. What must agree is the SHAPE of what
+  // comes back, because that is what tool handlers branch on. A mock that only
+  // ever returned `ok` would let the ambiguity branch ship untested, which is
+  // the branch that exists to stop duplicate writes.
+
+  it("returns ok with an id, and the row becomes readable", async () => {
+    const mock = new MockOperationsApi();
+
+    const outcome = await mock.createProject({ name: "Katchmark" });
+
+    expect(outcome.status).toBe("ok");
+    // A write that claims success must be visible to the next read. Asserting
+    // only the return value would pass against a mock that recorded nothing.
+    const rows = (await mock.getProjects({ search: "Katchmark" })) as {
+      data: unknown[];
+    };
+    expect(rows.data).toHaveLength(1);
+  });
+
+  it("returns failed with a reason, and does NOT record the row", async () => {
+    const mock = new MockOperationsApi();
+    mock.scriptWrites("projects", ["failed"]);
+
+    const outcome = await mock.createProject({ name: "Rejected" });
+
+    expect(outcome.status).toBe("failed");
+    const rows = (await mock.getProjects({})) as { data: unknown[] };
+    expect(rows.data).toHaveLength(0);
+  });
+
+  it("returns ambiguous carrying a probe the caller can act on", async () => {
+    const mock = new MockOperationsApi();
+    mock.scriptWrites("changeOrders", ["ambiguous"]);
+
+    const outcome = await mock.createChangeOrder({
+      name: "Extra tile",
+      projectId: 1,
+    });
+
+    expect(outcome.status).toBe("ambiguous");
+    // Without a probe, "ambiguous" tells a caller to worry and not what to do.
+    expect(outcome.status === "ambiguous" && outcome.probe).toEqual({
+      kind: "search",
+      resource: "changeOrders",
+      query: "Extra tile",
+    });
+  });
+
+  it("never throws for a scripted refusal — the contract is return-not-throw", async () => {
+    // A throw would put the caller back where the boolean contract left them:
+    // unable to tell refused from unknown.
+    const mock = new MockOperationsApi();
+    mock.scriptWrites("projects", ["failed", "ambiguous"]);
+
+    await expect(mock.createProject({ name: "a" })).resolves.toBeDefined();
+    await expect(mock.createProject({ name: "b" })).resolves.toBeDefined();
+  });
+});

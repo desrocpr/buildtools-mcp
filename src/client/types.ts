@@ -138,6 +138,32 @@ export const SuccessSaveResultSchema = z.object({
 export type SuccessSaveResult = z.infer<typeof SuccessSaveResultSchema>;
 
 // ---------------------------------------------------------------------------
+// Raw write attempts (MOS-747)
+// ---------------------------------------------------------------------------
+
+/**
+ * The result of ATTEMPTING a write, with enough fidelity to classify it.
+ *
+ * `SuccessSaveResult` above cannot express the one thing that matters on a
+ * retry: whether the write may have landed. It collapses a 500, a drifted
+ * template, and a clean validation refusal into the same `success:false`, so a
+ * caller retrying a create it believed had failed can create a second one.
+ *
+ * The discriminant is DISPATCH, not success. Everything that happens before the
+ * save request goes out — a missing required field, a form page that would not
+ * load, a CSRF token that could not be parsed — is proof the write did not land
+ * and is reported as `dispatched: false`. Once the request is on the wire, the
+ * status and body are handed over verbatim and the operations adapter's
+ * classifier decides (`operations/adapters/buildtools/classify.ts`).
+ *
+ * `json` is `undefined` when the body did not parse — which is a signal in its
+ * own right (BuildTools drifted), not an error to swallow.
+ */
+export type RawWriteAttempt =
+  | { dispatched: false; reason: string }
+  | { dispatched: true; status: number; body: string; json?: unknown };
+
+// ---------------------------------------------------------------------------
 // Datatable param helper
 // ---------------------------------------------------------------------------
 

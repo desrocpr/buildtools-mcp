@@ -53,7 +53,32 @@ import {
 import type {
   BuildToolsClientOptions,
   DatatableParams,
+  RawWriteAttempt,
 } from "./types.js";
+
+/**
+ * Split a response into status / body / parsed-json.
+ *
+ * `json` stays `undefined` when the body is not JSON. That is deliberately NOT
+ * an error: an unparseable body means BuildTools drifted, which the write
+ * classifier reads as AMBIGUOUS — the write may still have been applied.
+ * Throwing here, or substituting `{}`, would erase that distinction.
+ */
+function parseRawBody(response: { status: number; body: string }): {
+  status: number;
+  body: string;
+  json?: unknown;
+} {
+  try {
+    return {
+      status: response.status,
+      body: response.body,
+      json: JSON.parse(response.body),
+    };
+  } catch {
+    return { status: response.status, body: response.body };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -903,25 +928,49 @@ export class BuildToolsAPI {
       false,
     );
 
-    try {
-      return {
-        status: response.status,
-        body: response.body,
-        json: JSON.parse(response.body),
-      };
-    } catch {
-      // Unparseable body — BuildTools drifted. `json` stays undefined, which
-      // the classifier reads as ambiguous rather than as failure.
-      return { status: response.status, body: response.body };
-    }
+    return parseRawBody(response);
   }
 
   // ========================================================================
   // PROJECT METHODS
   // ========================================================================
 
-  /** Source L270–296. */
-  async createProject(projectData: {
+  /**
+   * Authenticate before a write, converting an auth failure into a
+   * PRE-DISPATCH result rather than a throw.
+   *
+   * Every `*Raw` write starts here. Without it, a session that could not be
+   * established throws out of the write, the adapter catches it, and — having
+   * no way to tell where in the sequence it happened — conservatively reports
+   * AMBIGUOUS. So an expired session would tell the user "the project may or
+   * may not have been created, go and check" when nothing was ever sent.
+   *
+   * That is the cheap direction to be wrong in, which is exactly why it would
+   * have survived: it is never dramatic, just persistently useless.
+   *
+   * Returns `null` when authenticated, so callers read as
+   * `const blocked = await this.preflight(); if (blocked) return blocked;`.
+   */
+  private async preflight(): Promise<
+    Extract<RawWriteAttempt, { dispatched: false }> | null
+  > {
+    try {
+      await this.ensureAuthenticated();
+      return null;
+    } catch (err) {
+      return {
+        dispatched: false,
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
+   * Source L270–296. The form shape lives here and only here — the boolean
+   * `createProject` below reads this method's result rather than issuing its
+   * own request, so the two can never drift.
+   */
+  async createProjectRaw(projectData: {
     name: string;
     status?: string | number;
     projectManager?: string | number | Array<string | number>;
@@ -933,8 +982,9 @@ export class BuildToolsAPI {
     country?: string;
     description?: string;
     clientIds?: string | number | Array<string | number>;
-  }): Promise<{ success: boolean; projectId?: string | number; errors?: unknown }> {
-    await this.ensureAuthenticated();
+  }): Promise<RawWriteAttempt> {
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
 
     const data: PostData = {
       "Project[name]": projectData.name,
@@ -954,17 +1004,8 @@ export class BuildToolsAPI {
       data["Client[ids]"] = this.toFormFieldValue(projectData.clientIds);
     }
 
-    const result = (await this.post("/projects/save", data)) as {
-      r?: number;
-      projectId?: string | number;
-      e?: unknown;
-      errors?: unknown;
-    };
-
-    if (result?.r === 1) {
-      return { success: true, projectId: result.projectId };
-    }
-    return { success: false, errors: result?.e ?? result?.errors };
+    const raw = await this.postRaw("/projects/save", data);
+    return { dispatched: true, ...raw };
   }
 
   /** Source L298–300. */
@@ -2654,7 +2695,7 @@ export class BuildToolsAPI {
   }
 
   /** Source L383–418. */
-  async createChangeOrder(coData: {
+  async createChangeOrderRaw(coData: {
     name: string;
     projectId: string | number;
     status?: string | number;
@@ -2665,56 +2706,32 @@ export class BuildToolsAPI {
       total: number;
       budget_category_id: number;
     }>;
-  }): Promise<{
-    success: boolean;
-    changeOrderId?: string | number;
-    message?: unknown;
-    errors?: unknown;
-  }> {
-    await this.ensureAuthenticated();
+  }): Promise<RawWriteAttempt> {
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
 
     const items = coData.items ?? [
       { name: "Item", total: coData.total ?? 0, budget_category_id: 0 },
     ];
 
-    const formData = new URLSearchParams();
-    formData.append("ChangeOrder[name]", coData.name);
-    formData.append("ChangeOrder[project_id]", String(coData.projectId));
-    formData.append("ChangeOrder[status]", String(coData.status ?? "1"));
-    formData.append("ChangeOrderItems[items]", JSON.stringify({ items }));
+    const data: PostData = {
+      "ChangeOrder[name]": coData.name,
+      "ChangeOrder[project_id]": String(coData.projectId),
+      "ChangeOrder[status]": String(coData.status ?? "1"),
+      "ChangeOrderItems[items]": JSON.stringify({ items }),
+    };
     if (coData.description) {
-      formData.append("ChangeOrder[description]", coData.description);
+      data["ChangeOrder[description]"] = coData.description;
     }
 
-    const response = await this.request(
-      `${this.baseUrl}/change-orders/save`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "X-Requested-With": "XMLHttpRequest",
-          Accept: "application/json",
-          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
-        },
-        body: formData.toString(),
-      },
-      false,
-    );
-
-    try {
-      const result = JSON.parse(response.body) as {
-        result?: string;
-        id?: string | number;
-        message?: unknown;
-      };
-      if (result?.result === "success") {
-        return { success: true, changeOrderId: result.id, message: result.message };
-      }
-      return { success: false, errors: result?.message };
-    } catch {
-      return { success: false, errors: "Server error" };
-    }
+    // Through `postRaw`, not a hand-rolled request. This method used to build
+    // its own URLSearchParams and headers, which is precisely the second
+    // request path `postRaw`'s own docstring warns about — and it had already
+    // appeared by the second of nineteen writes.
+    const raw = await this.postRaw("/change-orders/save", data);
+    return { dispatched: true, ...raw };
   }
+
 
   /**
    * Fetches a single change order by ID. BuildTools does not expose a JSON
