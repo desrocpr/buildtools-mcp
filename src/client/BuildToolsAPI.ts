@@ -936,6 +936,36 @@ export class BuildToolsAPI {
   // ========================================================================
 
   /**
+   * Authenticate before a write, converting an auth failure into a
+   * PRE-DISPATCH result rather than a throw.
+   *
+   * Every `*Raw` write starts here. Without it, a session that could not be
+   * established throws out of the write, the adapter catches it, and — having
+   * no way to tell where in the sequence it happened — conservatively reports
+   * AMBIGUOUS. So an expired session would tell the user "the project may or
+   * may not have been created, go and check" when nothing was ever sent.
+   *
+   * That is the cheap direction to be wrong in, which is exactly why it would
+   * have survived: it is never dramatic, just persistently useless.
+   *
+   * Returns `null` when authenticated, so callers read as
+   * `const blocked = await this.preflight(); if (blocked) return blocked;`.
+   */
+  private async preflight(): Promise<
+    Extract<RawWriteAttempt, { dispatched: false }> | null
+  > {
+    try {
+      await this.ensureAuthenticated();
+      return null;
+    } catch (err) {
+      return {
+        dispatched: false,
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  /**
    * Source L270–296. The form shape lives here and only here — the boolean
    * `createProject` below reads this method's result rather than issuing its
    * own request, so the two can never drift.
@@ -953,7 +983,8 @@ export class BuildToolsAPI {
     description?: string;
     clientIds?: string | number | Array<string | number>;
   }): Promise<RawWriteAttempt> {
-    await this.ensureAuthenticated();
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
 
     const data: PostData = {
       "Project[name]": projectData.name,
@@ -975,41 +1006,6 @@ export class BuildToolsAPI {
 
     const raw = await this.postRaw("/projects/save", data);
     return { dispatched: true, ...raw };
-  }
-
-  /**
-   * Legacy boolean-shaped create. Retained for callers not yet on the neutral
-   * write surface; new code should go through `OperationsManagementApi`, which
-   * can tell a refusal from an unknown.
-   */
-  async createProject(projectData: {
-    name: string;
-    status?: string | number;
-    projectManager?: string | number | Array<string | number>;
-    employees?: string | number | Array<string | number>;
-    address?: string;
-    city?: string;
-    state?: string;
-    zip?: string;
-    country?: string;
-    description?: string;
-    clientIds?: string | number | Array<string | number>;
-  }): Promise<{ success: boolean; projectId?: string | number; errors?: unknown }> {
-    const attempt = await this.createProjectRaw(projectData);
-    if (!attempt.dispatched) {
-      return { success: false, errors: attempt.reason };
-    }
-    const result = (attempt.json ?? {}) as {
-      r?: number;
-      projectId?: string | number;
-      e?: unknown;
-      errors?: unknown;
-    };
-
-    if (result?.r === 1) {
-      return { success: true, projectId: result.projectId };
-    }
-    return { success: false, errors: result?.e ?? result?.errors };
   }
 
   /** Source L298–300. */
@@ -2711,74 +2707,31 @@ export class BuildToolsAPI {
       budget_category_id: number;
     }>;
   }): Promise<RawWriteAttempt> {
-    await this.ensureAuthenticated();
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
 
     const items = coData.items ?? [
       { name: "Item", total: coData.total ?? 0, budget_category_id: 0 },
     ];
 
-    const formData = new URLSearchParams();
-    formData.append("ChangeOrder[name]", coData.name);
-    formData.append("ChangeOrder[project_id]", String(coData.projectId));
-    formData.append("ChangeOrder[status]", String(coData.status ?? "1"));
-    formData.append("ChangeOrderItems[items]", JSON.stringify({ items }));
-    if (coData.description) {
-      formData.append("ChangeOrder[description]", coData.description);
-    }
-
-    const response = await this.request(
-      `${this.baseUrl}/change-orders/save`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "X-Requested-With": "XMLHttpRequest",
-          Accept: "application/json",
-          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
-        },
-        body: formData.toString(),
-      },
-      false,
-    );
-
-    return { dispatched: true, ...parseRawBody(response) };
-  }
-
-  /**
-   * Legacy boolean-shaped create. See `createProject` — same reasoning: it
-   * reads `createChangeOrderRaw` rather than issuing a second request.
-   */
-  async createChangeOrder(coData: {
-    name: string;
-    projectId: string | number;
-    status?: string | number;
-    description?: string;
-    total?: number;
-    items?: Array<{
-      name: string;
-      total: number;
-      budget_category_id: number;
-    }>;
-  }): Promise<{
-    success: boolean;
-    changeOrderId?: string | number;
-    message?: unknown;
-    errors?: unknown;
-  }> {
-    const attempt = await this.createChangeOrderRaw(coData);
-    if (!attempt.dispatched) return { success: false, errors: attempt.reason };
-    if (attempt.json === undefined) return { success: false, errors: "Server error" };
-
-    const result = attempt.json as {
-      result?: string;
-      id?: string | number;
-      message?: unknown;
+    const data: PostData = {
+      "ChangeOrder[name]": coData.name,
+      "ChangeOrder[project_id]": String(coData.projectId),
+      "ChangeOrder[status]": String(coData.status ?? "1"),
+      "ChangeOrderItems[items]": JSON.stringify({ items }),
     };
-    if (result?.result === "success") {
-      return { success: true, changeOrderId: result.id, message: result.message };
+    if (coData.description) {
+      data["ChangeOrder[description]"] = coData.description;
     }
-    return { success: false, errors: result?.message };
+
+    // Through `postRaw`, not a hand-rolled request. This method used to build
+    // its own URLSearchParams and headers, which is precisely the second
+    // request path `postRaw`'s own docstring warns about — and it had already
+    // appeared by the second of nineteen writes.
+    const raw = await this.postRaw("/change-orders/save", data);
+    return { dispatched: true, ...raw };
   }
+
 
   /**
    * Fetches a single change order by ID. BuildTools does not expose a JSON

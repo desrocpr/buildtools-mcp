@@ -28,7 +28,7 @@ import {
   checkIdempotency,
   storeIdempotencyResult,
 } from "../idempotency/index.js";
-import { buildBuildToolsOperationsAdapter } from "../operations/adapters/buildtools/adapter.js";
+import { getOperationsManagementApi } from "../operations/factory.js";
 import { isOk, type WriteOutcome } from "../operations/outcomes.js";
 import type {
   CreatedRecord,
@@ -102,13 +102,16 @@ function formatError(err: unknown, toolName: string): ToolResult {
  *
  * Transports attach a fully-wired adapter as `api.ops`, and that is what
  * production uses. When it is absent — a caller that built a client directly —
- * an adapter is constructed over the same client rather than falling back to
- * the legacy boolean methods. That distinction matters: a fallback would mean
- * the ambiguity handling silently disappears exactly where nobody is looking
- * for it, which is the failure mode this whole phase exists to remove.
+ * one is built HERE, through the factory rather than by importing the
+ * BuildTools adapter directly. `factory.ts` states the rule: nothing above it
+ * ever learns a vendor name, and a tool handler naming one would be the first
+ * crack in the thing this migration exists to build.
  */
 function opsOf(api: BuildToolsAPI): OperationsManagementApi {
-  return api.ops ?? buildBuildToolsOperationsAdapter(api);
+  return (
+    api.ops ??
+    getOperationsManagementApi({ provider: "buildtools" }, { buildToolsApi: api })
+  );
 }
 
 /**

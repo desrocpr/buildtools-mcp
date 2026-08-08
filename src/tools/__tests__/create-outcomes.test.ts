@@ -19,7 +19,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
+import { BuildToolsAPI } from "../../client/BuildToolsAPI.js";
 import type { RawWriteAttempt } from "../../client/types.js";
 import { BuildToolsNetworkError } from "../../client/errors.js";
 import { ConfirmationStore } from "../../confirm/index.js";
@@ -212,6 +212,37 @@ describe("create_change_order — outcome rendering", () => {
 
     expect(text).toContain("projectId is required");
     expect(text).not.toContain("do NOT retry");
+  });
+});
+
+describe("an unestablished session is a definite failure, not an unknown", () => {
+  it("drives a real client auth failure through to a clean failure", async () => {
+    // Deliberately NOT a stub returning {dispatched:false}: that shape is easy
+    // to assert and proves only that the renderer handles it. This drives the
+    // REAL client with no credentials, so the pre-dispatch seam has to produce
+    // the shape itself. Before that seam existed, this rendered "may or may
+    // not have been created — go and check" for a write that was never sent.
+    const recorded: unknown[] = [];
+    const api = new BuildToolsAPI({
+      fetch: (async (url: string) => {
+        recorded.push(url);
+        throw new Error("fetch should not be reached");
+      }) as unknown as typeof fetch,
+    });
+    const tool = createMutationTools(
+      () => api,
+      new ConfirmationStore(),
+    ).find((t) => t.name === "create_project")!;
+
+    const prompt = await tool.handler(PROJECT_ARGS, api);
+    const id = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const text = textOf(
+      await tool.handler({ ...PROJECT_ARGS, confirmation_id: id }, api),
+    );
+
+    expect(text).toContain("Failed to create project");
+    expect(text).not.toContain("Outcome unknown");
+    expect(recorded).toHaveLength(0);
   });
 });
 

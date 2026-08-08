@@ -31,6 +31,7 @@
  */
 
 import { BuildToolsNetworkError } from "../../../client/errors.js";
+import type { RawWriteAttempt } from "../../../client/types.js";
 import {
   ambiguous,
   failed,
@@ -46,21 +47,25 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * A write response with the HTTP status PRESERVED.
+ * A dispatched write response, with the HTTP status PRESERVED.
  *
- * `BuildToolsAPI.post()` parses the body and throws the status away whenever
- * parsing succeeds (`BuildToolsAPI.ts:866-870`), which is what makes a
- * JSON-bodied 500 indistinguishable from a business rejection. Writes must
- * therefore surface this shape rather than `post()`'s return value — see
- * `postRaw()` in the adapter.
+ * `post()` parses the body and throws the status away whenever parsing
+ * succeeds, which is what makes a JSON-bodied 500 indistinguishable from a
+ * business rejection. Writes therefore go through `postRaw()`.
+ *
+ * Derived from `RawWriteAttempt` rather than redeclared, so the two cannot
+ * drift. They were structurally identical by coincidence — `runWrite` passed
+ * one into the other and it compiled only because the shapes happened to
+ * match. A field added to either would then have been silently ignored here
+ * instead of failing the build.
+ *
+ * `body` is for parse diagnostics and is NEVER copied into an outcome; see the
+ * leak tests in `__tests__/classify.test.ts`.
  */
-export interface RawWriteResponse {
-  status: number;
-  /** Raw body, for parse diagnostics. NEVER copied into an outcome. */
-  body: string;
-  /** Parsed body, or `undefined` when it did not parse as JSON. */
-  json?: unknown;
-}
+export type RawWriteResponse = Omit<
+  Extract<RawWriteAttempt, { dispatched: true }>,
+  "dispatched"
+>;
 
 /** How a caller reads success and rejection out of a parsed envelope. */
 export interface ClassifySpec<T> {

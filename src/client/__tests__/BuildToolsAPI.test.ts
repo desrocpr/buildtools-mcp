@@ -435,20 +435,23 @@ describe("cookie jar", () => {
 // createProject / getProject / createChangeOrder happy paths
 // ---------------------------------------------------------------------------
 
-describe("createProject()", () => {
-  it("posts to /projects/save and maps r:1 to {success:true, projectId}", async () => {
+describe("createProjectRaw()", () => {
+  it("posts to /projects/save and hands back the raw envelope", async () => {
     const { stub, recorded } = makeFetchStub([
       { status: 200, body: JSON.stringify(createProjectSuccessPayload) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
 
-    const out = await api.createProject({
+    const out = await api.createProjectRaw({
       name: "New House",
       projectManager: "6",
       address: "9 Oak Ln",
     });
-    expect(out).toEqual({ success: true, projectId: 999 });
+    // The status travels with the body now — interpreting the envelope is the
+    // operations classifier's job, not the client's.
+    expect(out).toMatchObject({ dispatched: true, status: 200 });
+    expect(out.dispatched && out.json).toEqual(createProjectSuccessPayload);
     expect(recorded[0].url).toBe("https://moss.buildtools.app/projects/save");
     const body = String(recorded[0].init.body);
     expect(body).toContain("Project%5Bname%5D=New+House");
@@ -457,15 +460,28 @@ describe("createProject()", () => {
     expect(body).toContain("Project%5Baddress%5D=9+Oak+Ln");
   });
 
-  it("maps r:0 to {success:false, errors}", async () => {
+  it("hands back a rejection envelope without judging it", async () => {
     const { stub } = makeFetchStub([
       { status: 200, body: JSON.stringify(createProjectFailurePayload) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createProject({ name: "", projectManager: "6" });
-    expect(out.success).toBe(false);
-    expect(out.errors).toEqual({ name: ["Name is required"] });
+    const out = await api.createProjectRaw({ name: "", projectManager: "6" });
+    expect(out.dispatched && out.json).toEqual(createProjectFailurePayload);
+  });
+
+  it("reports an auth failure as NOT dispatched", async () => {
+    // The distinction the whole write surface rests on: nothing went to the
+    // wire, so there is nothing to reconcile. Without this the adapter cannot
+    // tell an unestablished session from a write that may have landed, and
+    // conservatively reports the latter.
+    const { stub, recorded } = makeFetchStub([]);
+    const api = new BuildToolsAPI({ fetch: stub });
+
+    const out = await api.createProjectRaw({ name: "X", projectManager: "6" });
+
+    expect(out.dispatched).toBe(false);
+    expect(recorded).toHaveLength(0);
   });
 });
 
@@ -505,7 +521,7 @@ describe("getProject()", () => {
   });
 });
 
-describe("createChangeOrder()", () => {
+describe("createChangeOrderRaw()", () => {
   it("posts to /change-orders/save with JSON-encoded items", async () => {
     const { stub, recorded } = makeFetchStub([
       { status: 200, body: JSON.stringify(createChangeOrderSuccessPayload) },
@@ -513,17 +529,13 @@ describe("createChangeOrder()", () => {
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
 
-    const out = await api.createChangeOrder({
+    const out = await api.createChangeOrderRaw({
       name: "Extra trim",
       projectId: 101,
       total: 750.5,
       description: "scope add",
     });
-    expect(out).toEqual({
-      success: true,
-      changeOrderId: 444,
-      message: "Change order created",
-    });
+    expect(out.dispatched && out.json).toEqual(createChangeOrderSuccessPayload);
     expect(recorded[0].url).toBe(
       "https://moss.buildtools.app/change-orders/save",
     );
@@ -541,22 +553,21 @@ describe("createChangeOrder()", () => {
     expect(body).toContain("ChangeOrder%5Bdescription%5D=scope+add");
   });
 
-  it("returns success:false with errors when server says non-success", async () => {
-    const { stub } = makeFetchStub([
-      { status: 200, body: JSON.stringify({ result: "error", message: "bad" }) },
-    ]);
-    const api = new BuildToolsAPI({ fetch: stub });
-    api.authenticated = true;
-    const out = await api.createChangeOrder({ name: "X", projectId: 1 });
-    expect(out).toEqual({ success: false, errors: "bad" });
-  });
-
-  it("returns success:false 'Server error' on non-JSON body", async () => {
+  it("preserves the status on a non-JSON error page instead of flattening it", async () => {
+    // This case used to return {success:false, errors:"Server error"} — the
+    // same value a clean refusal produced. The 500 and the unparseable body
+    // now both survive, which is what lets the classifier call it ambiguous.
     const { stub } = makeFetchStub([{ status: 500, body: "html error page" }]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createChangeOrder({ name: "X", projectId: 1 });
-    expect(out).toEqual({ success: false, errors: "Server error" });
+
+    const out = await api.createChangeOrderRaw({ name: "X", projectId: 1 });
+
+    expect(out).toEqual({
+      dispatched: true,
+      status: 500,
+      body: "html error page",
+    });
   });
 });
 
