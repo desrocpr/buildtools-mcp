@@ -1367,7 +1367,7 @@ describe("createService()", () => {
   });
 });
 
-describe("createInvoice()", () => {
+describe("createInvoiceRaw()", () => {
   it("harvests fresh _token from /invoices/form before posting save", async () => {
     const formHtml = '<input name="_token" value="FRESH_TOKEN_X"/>';
     const { stub, recorded } = makeFetchStub([
@@ -1379,14 +1379,18 @@ describe("createInvoice()", () => {
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createInvoice({
+    const out = await api.createInvoiceRaw({
       companyId: 1,
       number: "INV-1",
       date: "01/01/2025",
       dueDate: "01/31/2025",
       notes: "thanks",
     });
-    expect(out).toEqual({ success: true, invoiceId: 9, message: "ok" });
+    expect(out.dispatched && out.json).toEqual({
+      result: "success",
+      id: 9,
+      message: "ok",
+    });
     expect(recorded[0].url).toBe("https://moss.buildtools.app/invoices/form");
     expect(recorded[1].url).toBe("https://moss.buildtools.app/invoices/save");
     const body = String(recorded[1].init.body);
@@ -1396,36 +1400,42 @@ describe("createInvoice()", () => {
     expect(body).toContain("items=%5B%5D");
   });
 
-  it("returns failure on non-success", async () => {
+  it("hands back a rejection envelope without judging it", async () => {
     const { stub } = makeFetchStub([
       { status: 200, body: '<input name="_token" value="t"/>' },
       { status: 200, body: JSON.stringify({ result: "error", message: "no" }) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createInvoice({
+    const out = await api.createInvoiceRaw({
       companyId: 1,
       number: "1",
       date: "01/01/2025",
       dueDate: "01/31/2025",
     });
-    expect(out).toEqual({ success: false, errors: "no" });
+    expect(out.dispatched && out.json).toEqual({
+      result: "error",
+      message: "no",
+    });
   });
 
-  it("returns 'Server error' on non-JSON save response", async () => {
+  it("keeps the 500 on an empty save response instead of flattening it", async () => {
+    // An empty body on a 500 is the single most ambiguous thing BuildTools can
+    // do to an invoice write: nothing says whether it was recorded. This used
+    // to collapse to errors:"Server error", identical to a clean refusal.
     const { stub } = makeFetchStub([
       { status: 200, body: '<input name="_token" value="t"/>' },
       { status: 500, body: "" },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createInvoice({
+    const out = await api.createInvoiceRaw({
       companyId: 1,
       number: "1",
       date: "01/01/2025",
       dueDate: "01/31/2025",
     });
-    expect(out.success).toBe(false);
+    expect(out).toEqual({ dispatched: true, status: 500, body: "" });
   });
 });
 
@@ -1480,22 +1490,26 @@ describe("createFinancialStatement()", () => {
 });
 
 describe("createFinancialStatementWithAmount()", () => {
-  it("requires projectId / amount / name", async () => {
-    const { stub } = makeFetchStub([]);
+  it("reports every missing required field as NOT dispatched rather than throwing", async () => {
+    // These guards used to throw. The throw was correct about the input and
+    // useless about the outcome: the adapter cannot tell it from an error
+    // raised mid-flight, so it had to assume the write might have landed.
+    const { stub, recorded } = makeFetchStub([]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    // @ts-expect-error
-    await expect(api.createFinancialStatementWithAmount({})).rejects.toBeInstanceOf(
-      BuildToolsServerError,
-    );
-    await expect(
-      // @ts-expect-error
-      api.createFinancialStatementWithAmount({ projectId: 1 }),
-    ).rejects.toBeInstanceOf(BuildToolsServerError);
-    await expect(
-      // @ts-expect-error
-      api.createFinancialStatementWithAmount({ projectId: 1, amount: 1 }),
-    ).rejects.toBeInstanceOf(BuildToolsServerError);
+
+    // @ts-expect-error — deliberately missing every field
+    expect((await api.createFinancialStatementWithAmountRaw({})).dispatched).toBe(false);
+    expect(
+      // @ts-expect-error — missing amount and name
+      (await api.createFinancialStatementWithAmountRaw({ projectId: 1 })).dispatched,
+    ).toBe(false);
+    expect(
+      // @ts-expect-error — missing name
+      (await api.createFinancialStatementWithAmountRaw({ projectId: 1, amount: 1 }))
+        .dispatched,
+    ).toBe(false);
+    expect(recorded).toHaveLength(0);
   });
 
   it("loads form, harvests CSRF + budgetOverviewTotals, patches amount, posts save", async () => {
@@ -1522,16 +1536,15 @@ describe("createFinancialStatementWithAmount()", () => {
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
 
-    const out = await api.createFinancialStatementWithAmount({
+    const out = await api.createFinancialStatementWithAmountRaw({
       projectId: 5,
       name: "Q1 Statement",
       amount: 1500,
       notes: "<b>note</b>",
     });
-    expect(out).toEqual({
-      success: true,
-      statementId: 22,
-      amount: "1500",
+    expect(out.dispatched && out.json).toEqual({
+      result: "success",
+      id: 22,
       message: "ok",
     });
 
@@ -1548,28 +1561,51 @@ describe("createFinancialStatementWithAmount()", () => {
     expect(body).toContain("apradio=amount");
   });
 
-  it("returns errors when form load fails", async () => {
-    const { stub } = makeFetchStub([{ status: 500, body: "" }]);
+  it("reports a failed form load as NOT dispatched", async () => {
+    // The save request was never built, let alone sent. Reporting this as a
+    // dispatched failure would be wrong in the safe direction; reporting it as
+    // ambiguous (what a throw here produces) sends the user to reconcile a
+    // statement that cannot exist.
+    const { stub, recorded } = makeFetchStub([{ status: 500, body: "" }]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createFinancialStatementWithAmount({
+    const out = await api.createFinancialStatementWithAmountRaw({
       projectId: 1,
       name: "n",
       amount: 1,
     });
-    expect(out.success).toBe(false);
+    expect(out.dispatched).toBe(false);
+    expect(recorded).toHaveLength(1); // the form GET only — no save POST
   });
 
-  it("returns errors when CSRF/budgetOverviewTotals missing", async () => {
-    const { stub } = makeFetchStub([{ status: 200, body: "<html/>" }]);
+  it("reports an unparseable form as NOT dispatched", async () => {
+    const { stub, recorded } = makeFetchStub([{ status: 200, body: "<html/>" }]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createFinancialStatementWithAmount({
+    const out = await api.createFinancialStatementWithAmountRaw({
       projectId: 1,
       name: "n",
       amount: 1,
     });
-    expect(out.success).toBe(false);
+    expect(out.dispatched).toBe(false);
+    expect(recorded).toHaveLength(1);
+  });
+
+  it.each([
+    ["projectId", { projectId: 0, name: "n", amount: 1 }],
+    ["name", { projectId: 1, name: "", amount: 1 }],
+  ])("reports a missing %s as NOT dispatched, sending nothing", async (_f, input) => {
+    // These used to throw BuildToolsServerError. A throw is indistinguishable
+    // to the adapter from one raised mid-flight, so it had to be read as
+    // ambiguous — for a write that never left the process.
+    const { stub, recorded } = makeFetchStub([]);
+    const api = new BuildToolsAPI({ fetch: stub });
+    api.authenticated = true;
+
+    const out = await api.createFinancialStatementWithAmountRaw(input);
+
+    expect(out.dispatched).toBe(false);
+    expect(recorded).toHaveLength(0);
   });
 });
 

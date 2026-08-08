@@ -307,6 +307,28 @@ export interface CreateChangeOrderInput {
   items?: ChangeOrderLineInput[];
 }
 
+/** A vendor invoice — money owed by the business, not billed to a client. */
+export interface CreateInvoiceInput {
+  companyId: string | number;
+  /** The vendor's own invoice number. A natural key: it is what a reconcile
+   * probe searches on, and what makes a duplicate obvious to a human. */
+  number: string | number;
+  date: string;
+  dueDate: string;
+  status?: string | number;
+  paymentDays?: string | number;
+  notes?: string;
+}
+
+export interface CreateFinancialStatementInput {
+  projectId: string | number;
+  name: string;
+  amount: string | number;
+  notes?: string;
+  status?: string | number;
+  assignedTo?: string | number;
+}
+
 // ---------------------------------------------------------------------------
 // The interface
 // ---------------------------------------------------------------------------
@@ -392,6 +414,12 @@ export interface OperationsManagementApi {
   ): Promise<WriteOutcome<CreatedRecord>>;
   createChangeOrder(
     input: CreateChangeOrderInput,
+  ): Promise<WriteOutcome<CreatedRecord>>;
+  createInvoice(
+    input: CreateInvoiceInput,
+  ): Promise<WriteOutcome<CreatedRecord>>;
+  createFinancialStatement(
+    input: CreateFinancialStatementInput,
   ): Promise<WriteOutcome<CreatedRecord>>;
 }
 

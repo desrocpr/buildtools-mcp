@@ -131,6 +131,42 @@ function formatWriteOutcome(
   outcome: WriteOutcome<CreatedRecord>,
   opts: { noun: string; toolName: string },
 ): ToolResult {
+  return remember(outcome, renderOutcome(outcome, opts));
+}
+
+/**
+ * Carry a write's outcome alongside its rendered result.
+ *
+ * The idempotency cache needs to know an outcome was AMBIGUOUS — that is the
+ * case it must cache, so a retry replays instead of re-firing. But the outcome
+ * is known deep inside the confirmation executor, while the cache decision is
+ * made by the outer handler, and the only thing that travels between them is
+ * the `ToolResult`.
+ *
+ * A WeakMap keyed on that result is how it travels. The alternatives were
+ * worse: a field on `ToolResult` would ride out over the MCP wire, and putting
+ * a callback in the args would land in the confirmation store, which persists
+ * and replays them. Entries die with the result they describe.
+ */
+const OUTCOME_BY_RESULT = new WeakMap<ToolResult, WriteOutcome<unknown>>();
+
+function remember(
+  outcome: WriteOutcome<unknown>,
+  result: ToolResult,
+): ToolResult {
+  OUTCOME_BY_RESULT.set(result, outcome);
+  return result;
+}
+
+/** The outcome behind a result, when it came from a neutral write. */
+function outcomeOf(result: ToolResult): WriteOutcome<unknown> | undefined {
+  return OUTCOME_BY_RESULT.get(result);
+}
+
+function renderOutcome(
+  outcome: WriteOutcome<CreatedRecord>,
+  opts: { noun: string; toolName: string },
+): ToolResult {
   if (isOk(outcome)) {
     const id = outcome.data.id;
     const suffix = outcome.data.message
@@ -2104,16 +2140,17 @@ export function createMutationTools(
     (a) => `Create vendor invoice **#${a.number}** for company #${a.company_id} (date ${a.date}, due ${a.due_date}).`,
     async (a) => {
       try {
-        const result = await getApi().createInvoice({
-          companyId: a.company_id,
-          number: a.number,
-          date: a.date,
-          dueDate: a.due_date,
-          paymentDays: a.payment_days,
-          notes: a.notes,
-        });
-        if (result.success) return markdown(`Invoice **#${result.invoiceId}** created. ${result.message ?? ""}`);
-        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+        return formatWriteOutcome(
+          await opsOf(getApi()).createInvoice({
+            companyId: a.company_id,
+            number: a.number,
+            date: a.date,
+            dueDate: a.due_date,
+            paymentDays: a.payment_days,
+            notes: a.notes,
+          }),
+          { noun: "Invoice", toolName: "create_invoice" },
+        );
       } catch (err) { return formatError(err, "create_invoice"); }
     },
   );
@@ -2124,15 +2161,19 @@ export function createMutationTools(
     (a) => `Create financial statement **"${a.name}"** on project #${a.project_id} for **$${a.amount.toFixed(2)}**.`,
     async (a) => {
       try {
-        const result = await getApi().createFinancialStatementWithAmount({
-          projectId: a.project_id,
-          name: a.name,
-          amount: a.amount,
-          notes: a.notes,
-          status: a.status,
-        });
-        if (result.success) return markdown(`Financial statement **#${result.statementId}** created for $${result.amount ?? a.amount}.`);
-        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+        return formatWriteOutcome(
+          await opsOf(getApi()).createFinancialStatement({
+            projectId: a.project_id,
+            name: a.name,
+            amount: a.amount,
+            notes: a.notes,
+            status: a.status,
+          }),
+          {
+            noun: `Financial statement for $${a.amount.toFixed(2)}`,
+            toolName: "create_financial_statement",
+          },
+        );
       } catch (err) { return formatError(err, "create_financial_statement"); }
     },
   );
@@ -2214,20 +2255,29 @@ export function createMutationTools(
             `**Computed draw amount is non-positive** ($${finalAmount.toFixed(2)}). This typically means prior draws already cover (or exceed) the cumulative work. Verify \`work_completed_to_date\` or pass \`amount\` directly.`,
           );
         }
-        const result = await getApi().createFinancialStatementWithAmount({
+        const outcome = await opsOf(getApi()).createFinancialStatement({
           projectId: a.project_id,
           name: finalName,
           amount: finalAmount,
           notes: a.notes,
           status: a.status ?? 1,
         });
-        if (!result.success) {
-          return errorMarkdown(
-            `**Failed to create draw request** on project #${a.project_id}: ${String(result.errors ?? "(no detail)")}`,
-          );
+        if (!isOk(outcome)) {
+          // Draw requests are the sharpest case for the ambiguity split: they
+          // are money, they carry an idempotency_key, and the caller is an LLM
+          // that will retry a plain failure. So the ambiguous wording — and
+          // the cache decision in the outer handler — matter more here than
+          // anywhere else.
+          return formatWriteOutcome(outcome, {
+            noun: `Draw request on project #${a.project_id}`,
+            toolName: "create_draw_request",
+          });
         }
-        return markdown(
-          `Draw request **#${result.statementId}** ("${escapeMarkdownInline(finalName)}") created on project #${a.project_id} for **$${result.amount ?? finalAmount.toFixed(2)}**. Status: ${a.status === undefined ? "Draft" : `code ${a.status}`}.`,
+        return remember(
+          outcome,
+          markdown(
+            `Draw request **#${outcome.data.id ?? "(id not returned)"}** ("${escapeMarkdownInline(finalName)}") created on project #${a.project_id} for **$${finalAmount.toFixed(2)}**. Status: ${a.status === undefined ? "Draft" : `code ${a.status}`}.`,
+          ),
         );
       } catch (err) {
         return formatError(err, "create_draw_request");
@@ -3133,10 +3183,15 @@ export function createMutationTools(
           sessionId,
         );
 
+        // The outcome, not just `isError`, decides whether this is cached. An
+        // ambiguous draw MUST be cached: it renders as an error, and without
+        // this a same-key retry would re-fire a write that may already have
+        // created the draw — the duplicate this cache exists to prevent.
         storeIdempotencyResult({
           context: idemContext,
           result,
           isExecuteCall: !!data.confirmation_id,
+          outcome: outcomeOf(result),
         });
         return result;
       },

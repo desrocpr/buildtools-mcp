@@ -33,6 +33,8 @@ function textOf(result: ToolResult): string {
 interface Upstream {
   createProjectRaw?: () => Promise<RawWriteAttempt>;
   createChangeOrderRaw?: () => Promise<RawWriteAttempt>;
+  createInvoiceRaw?: () => Promise<RawWriteAttempt>;
+  createFinancialStatementWithAmountRaw?: () => Promise<RawWriteAttempt>;
 }
 
 function toolFor(name: string, upstream: Upstream): ToolDefinition {
@@ -277,5 +279,158 @@ describe("upstream diagnostics never reach the user", () => {
     expect(text).not.toContain("SECRETVALUE");
     expect(text).not.toContain("ProjectController.php");
     expect(text).toContain("Outcome unknown");
+  });
+});
+
+describe("create_invoice — outcome rendering", () => {
+  const INVOICE_ARGS = {
+    company_id: 977,
+    number: "INV-2026-014",
+    date: "01/02/2026",
+    due_date: "02/01/2026",
+  };
+
+  it("reports the new id on success", async () => {
+    const tool = toolFor("create_invoice", {
+      createInvoiceRaw: async () =>
+        dispatched(200, "{}", { result: "success", id: 4120 }),
+    });
+
+    expect(textOf(await execute(tool, INVOICE_ARGS))).toContain("#4120");
+  });
+
+  it("names the vendor's invoice number in the reconcile probe", async () => {
+    // Not our name for the record — the number is the natural key a human
+    // searches on, and what a duplicate would collide on.
+    const tool = toolFor("create_invoice", {
+      createInvoiceRaw: async () => dispatched(500, ""),
+    });
+
+    const text = textOf(await execute(tool, INVOICE_ARGS));
+
+    expect(text).toContain("Outcome unknown");
+    expect(text).toContain("INV-2026-014");
+  });
+});
+
+describe("create_financial_statement — outcome rendering", () => {
+  const FS_ARGS = { project_id: 100002, name: "Q1 Draw", amount: 40000 };
+
+  it("reports success with the amount that was asked for", async () => {
+    const tool = toolFor("create_financial_statement", {
+      createFinancialStatementWithAmountRaw: async () =>
+        dispatched(200, "{}", { result: "success", id: 700500 }),
+    });
+
+    const text = textOf(await execute(tool, FS_ARGS));
+
+    expect(text).toContain("#700500");
+    expect(text).toContain("$40000.00");
+  });
+
+  it("calls a pre-dispatch form failure a definite failure, not an unknown", async () => {
+    // The form GET failed, so the save POST was never built. Nothing to
+    // reconcile — and this is the single most common failure on this endpoint,
+    // because it depends on scraping a token out of an HTML page.
+    const tool = toolFor("create_financial_statement", {
+      createFinancialStatementWithAmountRaw: async () => ({
+        dispatched: false,
+        reason: "Form load failed: HTTP 500",
+      }),
+    });
+
+    const text = textOf(await execute(tool, FS_ARGS));
+
+    expect(text).toContain("Form load failed");
+    expect(text).not.toContain("Outcome unknown");
+  });
+
+  it("calls a failed SAVE an unknown, even though the same endpoint produced it", async () => {
+    // The distinction the whole slice rests on. Same tool, same endpoint: a
+    // form that would not load cannot have created anything; a save that
+    // returned 500 may well have.
+    const tool = toolFor("create_financial_statement", {
+      createFinancialStatementWithAmountRaw: async () => dispatched(500, ""),
+    });
+
+    const text = textOf(await execute(tool, FS_ARGS));
+
+    expect(text).toContain("Outcome unknown");
+    expect(text).toContain("Q1 Draw");
+  });
+});
+
+describe("an ambiguous draw request is cached, so a retry does not re-fire it", () => {
+  // The property PR #114 built the outcome-aware cache gate for, finally with
+  // a caller. `create_draw_request` is money, carries an idempotency_key, and
+  // is driven by a model that retries errors — so this is the exact path where
+  // "failures stay uncached" produced the duplicate it was meant to prevent.
+  const PROJECT_ROW = { id: 100002, name: "Jones Addition" };
+  const PRIOR_FS = { statusCount: {}, statements: [] };
+
+  async function drawTool(raw: () => Promise<RawWriteAttempt>) {
+    const calls = { n: 0 };
+    const api = {
+      getProject: async () => PROJECT_ROW,
+      getFinancialStatements: async () => PRIOR_FS,
+      createFinancialStatementWithAmountRaw: async () => {
+        calls.n += 1;
+        return raw();
+      },
+    } as unknown as BuildToolsAPI;
+    const { IdempotencyStore } = await import("../../idempotency/index.js");
+    const tool = createMutationTools(
+      () => api,
+      new ConfirmationStore(),
+      undefined,
+      new IdempotencyStore(),
+    ).find((t) => t.name === "create_draw_request")!;
+    return { tool, api, calls };
+  }
+
+  async function runOnce(
+    tool: ToolDefinition,
+    api: BuildToolsAPI,
+    args: Record<string, unknown>,
+  ) {
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    return tool.handler({ ...args, confirmation_id: cid }, api);
+  }
+
+  const ARGS = {
+    project_id: 100002,
+    amount: 40000,
+    idempotency_key: "draw-ambiguous-retry",
+  };
+
+  it("replays the ambiguous result instead of creating a second draw", async () => {
+    const { tool, api, calls } = await drawTool(async () =>
+      dispatched(500, "<html>gateway timeout</html>"),
+    );
+
+    const first = await runOnce(tool, api, ARGS);
+    expect(textOf(first)).toContain("Outcome unknown");
+    expect(calls.n).toBe(1);
+
+    // The retry a model makes after being told the write failed.
+    const retry = await tool.handler(ARGS, api);
+
+    expect(textOf(retry)).toContain("Idempotency replay");
+    expect(calls.n).toBe(1); // NOT 2 — this is the duplicate that used to happen
+  });
+
+  it("still lets a definite failure through to a fresh attempt", async () => {
+    // The other half. A write that provably did not land must not be cached,
+    // or a fixed input could never be resubmitted under the same key.
+    const { tool, api, calls } = await drawTool(async () =>
+      dispatched(422, "{}", { e: "Amount exceeds contract" }),
+    );
+
+    await runOnce(tool, api, ARGS);
+    expect(calls.n).toBe(1);
+
+    await runOnce(tool, api, ARGS);
+    expect(calls.n).toBe(2);
   });
 });

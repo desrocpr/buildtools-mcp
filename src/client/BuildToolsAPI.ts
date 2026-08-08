@@ -4244,7 +4244,7 @@ export class BuildToolsAPI {
    * Source L602–652. Harvests a fresh `_token` from `/invoices/form` before
    * submitting, because the invoice save endpoint validates a per-form token.
    */
-  async createInvoice(invoiceData: {
+  async createInvoiceRaw(invoiceData: {
     companyId: string | number;
     number: string | number;
     date: string;
@@ -4252,13 +4252,9 @@ export class BuildToolsAPI {
     status?: string | number;
     paymentDays?: string | number;
     notes?: string;
-  }): Promise<{
-    success: boolean;
-    invoiceId?: string | number;
-    message?: unknown;
-    errors?: unknown;
-  }> {
-    await this.ensureAuthenticated();
+  }): Promise<RawWriteAttempt> {
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
 
     const formResp = await this.request(
       `${this.baseUrl}/invoices/form`,
@@ -4306,19 +4302,7 @@ export class BuildToolsAPI {
       false,
     );
 
-    try {
-      const result = JSON.parse(response.body) as {
-        result?: string;
-        id?: string | number;
-        message?: unknown;
-      };
-      if (result?.result === "success") {
-        return { success: true, invoiceId: result.id, message: result.message };
-      }
-      return { success: false, errors: result?.message };
-    } catch {
-      return { success: false, errors: "Server error" };
-    }
+    return { dispatched: true, ...parseRawBody(response) };
   }
 
   // ========================================================================
@@ -4397,7 +4381,7 @@ export class BuildToolsAPI {
    * `budgetOverviewTotals`, patches `financial_current_amount`, and POSTs
    * the save with the patched payload.
    */
-  async createFinancialStatementWithAmount(data: {
+  async createFinancialStatementWithAmountRaw(data: {
     projectId: string | number;
     name: string;
     amount: string | number;
@@ -4406,19 +4390,19 @@ export class BuildToolsAPI {
     reportPreviousBalance?: string | number;
     creditAmount?: string | number;
     assignedTo?: string | number;
-  }): Promise<{
-    success: boolean;
-    statementId?: string | number;
-    amount?: string;
-    message?: unknown;
-    errors?: unknown;
-  }> {
-    await this.ensureAuthenticated();
-    if (!data.projectId) throw new BuildToolsServerError("projectId is required");
+  }): Promise<RawWriteAttempt> {
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
+
+    // Guard failures are PRE-DISPATCH: nothing reached BuildTools, so the
+    // caller can fix the input and try again with no risk of a duplicate.
+    // These used to throw, which the adapter cannot distinguish from a failure
+    // mid-flight and so must conservatively call ambiguous.
+    if (!data.projectId) return { dispatched: false, reason: "projectId is required" };
     if (data.amount === undefined || data.amount === null) {
-      throw new BuildToolsServerError("amount is required");
+      return { dispatched: false, reason: "amount is required" };
     }
-    if (!data.name) throw new BuildToolsServerError("name is required");
+    if (!data.name) return { dispatched: false, reason: "name is required" };
 
     const formResp = await this.request(
       `${this.baseUrl}/financial/statements/form?PR[]=${data.projectId}`,
@@ -4428,7 +4412,12 @@ export class BuildToolsAPI {
       false,
     );
     if (formResp.status !== 200) {
-      return { success: false, errors: `Form load failed: HTTP ${formResp.status}` };
+      // The FORM did not load. The save request was never built, let alone
+      // sent — pre-dispatch, and provably not landed.
+      return {
+        dispatched: false,
+        reason: `Form load failed: HTTP ${formResp.status}`,
+      };
     }
 
     const decodeHtml = (s: string): string =>
@@ -4451,14 +4440,25 @@ export class BuildToolsAPI {
 
     if (!csrfToken || !botRaw) {
       return {
-        success: false,
-        errors: "Could not parse CSRF token or budgetOverviewTotals from form",
+        dispatched: false,
+        reason: "Could not parse CSRF token or budgetOverviewTotals from form",
       };
     }
 
-    const totals = JSON.parse(decodeHtml(botRaw)) as Record<string, unknown>;
-    totals.financial_current_amount = Number(data.amount);
-    const botPatched = JSON.stringify(totals);
+    let botPatched: string;
+    try {
+      const totals = JSON.parse(decodeHtml(botRaw)) as Record<string, unknown>;
+      totals.financial_current_amount = Number(data.amount);
+      botPatched = JSON.stringify(totals);
+    } catch {
+      // Still pre-dispatch: the form parsed enough to find the blob but not to
+      // read it. Throwing here would surface as ambiguous for a write that
+      // does not exist yet.
+      return {
+        dispatched: false,
+        reason: "Could not parse budgetOverviewTotals from the form",
+      };
+    }
 
     let assignedTo: string | number | undefined = data.assignedTo;
     if (assignedTo === undefined) {
@@ -4510,27 +4510,7 @@ export class BuildToolsAPI {
       false,
     );
 
-    try {
-      const result = JSON.parse(saveResp.body) as {
-        result?: string;
-        id?: string | number;
-        message?: unknown;
-      };
-      if (result?.result === "success") {
-        return {
-          success: true,
-          statementId: result.id,
-          amount: String(data.amount),
-          message: result.message,
-        };
-      }
-      return { success: false, errors: result?.message ?? result };
-    } catch {
-      return {
-        success: false,
-        errors: `Non-JSON response (HTTP ${saveResp.status}): ${saveResp.body.slice(0, 300)}`,
-      };
-    }
+    return { dispatched: true, ...parseRawBody(saveResp) };
   }
 
   /** Source L840–886. */

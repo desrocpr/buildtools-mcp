@@ -30,6 +30,8 @@ import type {
   BudgetView,
   CreateChangeOrderInput,
   CreatedRecord,
+  CreateFinancialStatementInput,
+  CreateInvoiceInput,
   CreateProjectInput,
   ListQuery,
   OperationsManagementApi,
@@ -405,6 +407,40 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
         probe: {
           kind: "search",
           resource: "changeOrders",
+          query: input.name,
+        },
+      },
+    );
+  }
+
+  async createInvoice(
+    input: CreateInvoiceInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    return this.runWrite(() => this.api.createInvoiceRaw(input), {
+      isSuccess: (p) => p.result === "success",
+      extract: (p) => ({ id: asId(p.id), message: asMessage(p.message) }),
+      // The vendor's invoice number, not our name for the record. It is the
+      // natural key a human would use to check, and the thing a duplicate
+      // would collide on.
+      probe: {
+        kind: "search",
+        resource: "invoices",
+        query: String(input.number),
+      },
+    });
+  }
+
+  async createFinancialStatement(
+    input: CreateFinancialStatementInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    return this.runWrite(
+      () => this.api.createFinancialStatementWithAmountRaw(input),
+      {
+        isSuccess: (p) => p.result === "success",
+        extract: (p) => ({ id: asId(p.id), message: asMessage(p.message) }),
+        probe: {
+          kind: "search",
+          resource: `projects/${input.projectId}/financial-statements`,
           query: input.name,
         },
       },
