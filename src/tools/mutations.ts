@@ -28,6 +28,12 @@ import {
   checkIdempotency,
   storeIdempotencyResult,
 } from "../idempotency/index.js";
+import { buildBuildToolsOperationsAdapter } from "../operations/adapters/buildtools/adapter.js";
+import { isOk, type WriteOutcome } from "../operations/outcomes.js";
+import type {
+  CreatedRecord,
+  OperationsManagementApi,
+} from "../operations/types.js";
 
 import type { ToolDefinition, ToolResult } from "./projects.js";
 
@@ -89,6 +95,70 @@ function formatError(err: unknown, toolName: string): ToolResult {
   }
   const message = err instanceof Error ? err.message : String(err);
   return errorMarkdown(`**Error calling \`${toolName}\`**: ${message}`);
+}
+
+/**
+ * The operations interface for a given client (MOS-747).
+ *
+ * Transports attach a fully-wired adapter as `api.ops`, and that is what
+ * production uses. When it is absent — a caller that built a client directly —
+ * an adapter is constructed over the same client rather than falling back to
+ * the legacy boolean methods. That distinction matters: a fallback would mean
+ * the ambiguity handling silently disappears exactly where nobody is looking
+ * for it, which is the failure mode this whole phase exists to remove.
+ */
+function opsOf(api: BuildToolsAPI): OperationsManagementApi {
+  return api.ops ?? buildBuildToolsOperationsAdapter(api);
+}
+
+/**
+ * Render a neutral `WriteOutcome` as the tool's Markdown result (MOS-747).
+ *
+ * The whole reason the outcome type exists is that these three cases must not
+ * read the same. Previously they did: a refused create and a create that timed
+ * out mid-flight both rendered "Failed to create X", and the natural next move
+ * — try again — silently produced a duplicate in the second case.
+ *
+ * `ambiguous` therefore renders as its own thing, says plainly that a retry is
+ * the wrong move, and quotes the reconcile probe so the reader can go and look.
+ * It is still `isError: true`, because the caller did not get what they asked
+ * for and the model should not narrate it as done.
+ */
+function formatWriteOutcome(
+  outcome: WriteOutcome<CreatedRecord>,
+  opts: { noun: string; toolName: string },
+): ToolResult {
+  if (isOk(outcome)) {
+    const id = outcome.data.id;
+    const suffix = outcome.data.message
+      ? ` ${escapeMarkdownInline(outcome.data.message)}`
+      : "";
+    return markdown(
+      id === undefined
+        ? `${opts.noun} created successfully.${suffix}`
+        : `${opts.noun} **#${escapeMarkdownInline(id)}** created successfully.${suffix}`,
+    );
+  }
+
+  if (outcome.status === "failed") {
+    return errorMarkdown(
+      `**Failed to create ${opts.noun.toLowerCase()}.** ${escapeMarkdownInline(outcome.reason)}`,
+    );
+  }
+
+  const probe = outcome.probe;
+  const howToCheck =
+    probe === undefined
+      ? "Check BuildTools before retrying."
+      : probe.kind === "search"
+        ? `Search ${probe.resource} for "${escapeMarkdownInline(probe.query)}" before retrying.`
+        : `Look for marker \`${escapeMarkdownInline(probe.marker)}\` before retrying.`;
+
+  return errorMarkdown(
+    `**Outcome unknown — do NOT retry blindly.** The ${opts.noun.toLowerCase()} may or may not have been created. ` +
+      `${escapeMarkdownInline(outcome.reason)}\n\n${howToCheck} ` +
+      `Retrying without checking is how a duplicate gets created.`,
+  );
 }
 
 function formatZodError(err: z.ZodError, toolName: string): ToolResult {
@@ -676,18 +746,19 @@ export function createMutationTools(
     (a) => `Create project **"${a.name}"** (status ${a.status ?? 6}, PM #${a.project_manager_id}).`,
     async (a) => {
       try {
-        const result = await getApi().createProject({
-          name: a.name,
-          status: String(a.status ?? 6),
-          projectManager: a.project_manager_id,
-          address: a.address,
-          city: a.city,
-          state: a.state,
-          zip: a.zip,
-          description: a.description,
-        });
-        if (result.success) return markdown(`Project **#${result.projectId}** created successfully.`);
-        return errorMarkdown(`Failed to create project: ${JSON.stringify(result.errors)}`);
+        return formatWriteOutcome(
+          await opsOf(getApi()).createProject({
+            name: a.name,
+            status: String(a.status ?? 6),
+            projectManager: a.project_manager_id,
+            address: a.address,
+            city: a.city,
+            state: a.state,
+            zip: a.zip,
+            description: a.description,
+          }),
+          { noun: "Project", toolName: "create_project" },
+        );
       } catch (err) { return formatError(err, "create_project"); }
     },
   );
@@ -698,19 +769,20 @@ export function createMutationTools(
     (a) => `Create change order **"${a.name}"** on project #${a.project_id}${a.total ? ` for $${a.total.toFixed(2)}` : ""}.`,
     async (a) => {
       try {
-        const result = await getApi().createChangeOrder({
-          name: a.name,
-          projectId: a.project_id,
-          total: a.total,
-          description: a.description,
-          items: a.items?.map((i) => ({
-            name: i.name,
-            total: i.total,
-            budget_category_id: i.budget_category_id ?? 0,
-          })),
-        });
-        if (result.success) return markdown(`Change order **#${result.changeOrderId}** created. ${result.message ?? ""}`);
-        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+        return formatWriteOutcome(
+          await opsOf(getApi()).createChangeOrder({
+            name: a.name,
+            projectId: a.project_id,
+            total: a.total,
+            description: a.description,
+            items: a.items?.map((i) => ({
+              name: i.name,
+              total: i.total,
+              budgetCategoryId: i.budget_category_id ?? 0,
+            })),
+          }),
+          { noun: "Change order", toolName: "create_change_order" },
+        );
       } catch (err) { return formatError(err, "create_change_order"); }
     },
   );

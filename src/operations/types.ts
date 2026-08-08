@@ -34,6 +34,8 @@
  * and one that merely looks neutral.
  */
 
+import type { WriteOutcome } from "./outcomes.js";
+
 // ---------------------------------------------------------------------------
 // Neutral parameter + row types
 // ---------------------------------------------------------------------------
@@ -259,6 +261,53 @@ export interface PurchaseOrderView {
 }
 
 // ---------------------------------------------------------------------------
+// Write inputs + results
+// ---------------------------------------------------------------------------
+
+/**
+ * What a create returns.
+ *
+ * `id` is OPTIONAL on purpose. A create can land without the response naming
+ * the new record — BuildTools' project save is one such case — and a required
+ * id would force the adapter to either invent one or downgrade a landed write
+ * to a failure. "Created, id unknown" is a real outcome and the type says so.
+ */
+export interface CreatedRecord {
+  id?: string | number;
+  /** Upstream's own confirmation text, when it sent one. */
+  message?: string;
+}
+
+export interface CreateProjectInput {
+  name: string;
+  /** Provider status code. Defaults to the provider's "active" equivalent. */
+  status?: string | number;
+  projectManager?: string | number | Array<string | number>;
+  address?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  description?: string;
+  clientIds?: string | number | Array<string | number>;
+}
+
+export interface ChangeOrderLineInput {
+  name: string;
+  total: number;
+  budgetCategoryId?: number;
+}
+
+export interface CreateChangeOrderInput {
+  name: string;
+  projectId: string | number;
+  status?: string | number;
+  description?: string;
+  /** Convenience for a single-line change order. Ignored when `items` is set. */
+  total?: number;
+  items?: ChangeOrderLineInput[];
+}
+
+// ---------------------------------------------------------------------------
 // The interface
 // ---------------------------------------------------------------------------
 
@@ -326,6 +375,24 @@ export interface OperationsManagementApi {
   findUnbilledChangeOrders(
     filters?: UnbilledChangeOrderFilters,
   ): Promise<UnbilledChangeOrderRow[]>;
+
+  // --- writes -------------------------------------------------------------
+  //
+  // Every write returns `WriteOutcome<T>` and NEVER throws for an upstream
+  // condition. A thrown error would put the caller back where the boolean
+  // contract left them: unable to tell "refused" from "unknown", which is the
+  // state that turns a retry into a duplicate record. Adapters catch at the
+  // boundary and classify (`adapters/buildtools/classify.ts`).
+  //
+  // Ambiguous outcomes carry a `probe` — the search a caller runs to find out
+  // whether the write landed. Without one, "ambiguous" is just alarming; with
+  // one it is actionable.
+  createProject(
+    input: CreateProjectInput,
+  ): Promise<WriteOutcome<CreatedRecord>>;
+  createChangeOrder(
+    input: CreateChangeOrderInput,
+  ): Promise<WriteOutcome<CreatedRecord>>;
 }
 
 /** Per-tenant selection config. Values are config names, never secrets. */

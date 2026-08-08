@@ -53,7 +53,32 @@ import {
 import type {
   BuildToolsClientOptions,
   DatatableParams,
+  RawWriteAttempt,
 } from "./types.js";
+
+/**
+ * Split a response into status / body / parsed-json.
+ *
+ * `json` stays `undefined` when the body is not JSON. That is deliberately NOT
+ * an error: an unparseable body means BuildTools drifted, which the write
+ * classifier reads as AMBIGUOUS — the write may still have been applied.
+ * Throwing here, or substituting `{}`, would erase that distinction.
+ */
+function parseRawBody(response: { status: number; body: string }): {
+  status: number;
+  body: string;
+  json?: unknown;
+} {
+  try {
+    return {
+      status: response.status,
+      body: response.body,
+      json: JSON.parse(response.body),
+    };
+  } catch {
+    return { status: response.status, body: response.body };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -903,25 +928,19 @@ export class BuildToolsAPI {
       false,
     );
 
-    try {
-      return {
-        status: response.status,
-        body: response.body,
-        json: JSON.parse(response.body),
-      };
-    } catch {
-      // Unparseable body — BuildTools drifted. `json` stays undefined, which
-      // the classifier reads as ambiguous rather than as failure.
-      return { status: response.status, body: response.body };
-    }
+    return parseRawBody(response);
   }
 
   // ========================================================================
   // PROJECT METHODS
   // ========================================================================
 
-  /** Source L270–296. */
-  async createProject(projectData: {
+  /**
+   * Source L270–296. The form shape lives here and only here — the boolean
+   * `createProject` below reads this method's result rather than issuing its
+   * own request, so the two can never drift.
+   */
+  async createProjectRaw(projectData: {
     name: string;
     status?: string | number;
     projectManager?: string | number | Array<string | number>;
@@ -933,7 +952,7 @@ export class BuildToolsAPI {
     country?: string;
     description?: string;
     clientIds?: string | number | Array<string | number>;
-  }): Promise<{ success: boolean; projectId?: string | number; errors?: unknown }> {
+  }): Promise<RawWriteAttempt> {
     await this.ensureAuthenticated();
 
     const data: PostData = {
@@ -954,7 +973,33 @@ export class BuildToolsAPI {
       data["Client[ids]"] = this.toFormFieldValue(projectData.clientIds);
     }
 
-    const result = (await this.post("/projects/save", data)) as {
+    const raw = await this.postRaw("/projects/save", data);
+    return { dispatched: true, ...raw };
+  }
+
+  /**
+   * Legacy boolean-shaped create. Retained for callers not yet on the neutral
+   * write surface; new code should go through `OperationsManagementApi`, which
+   * can tell a refusal from an unknown.
+   */
+  async createProject(projectData: {
+    name: string;
+    status?: string | number;
+    projectManager?: string | number | Array<string | number>;
+    employees?: string | number | Array<string | number>;
+    address?: string;
+    city?: string;
+    state?: string;
+    zip?: string;
+    country?: string;
+    description?: string;
+    clientIds?: string | number | Array<string | number>;
+  }): Promise<{ success: boolean; projectId?: string | number; errors?: unknown }> {
+    const attempt = await this.createProjectRaw(projectData);
+    if (!attempt.dispatched) {
+      return { success: false, errors: attempt.reason };
+    }
+    const result = (attempt.json ?? {}) as {
       r?: number;
       projectId?: string | number;
       e?: unknown;
@@ -2654,7 +2699,7 @@ export class BuildToolsAPI {
   }
 
   /** Source L383–418. */
-  async createChangeOrder(coData: {
+  async createChangeOrderRaw(coData: {
     name: string;
     projectId: string | number;
     status?: string | number;
@@ -2665,12 +2710,7 @@ export class BuildToolsAPI {
       total: number;
       budget_category_id: number;
     }>;
-  }): Promise<{
-    success: boolean;
-    changeOrderId?: string | number;
-    message?: unknown;
-    errors?: unknown;
-  }> {
+  }): Promise<RawWriteAttempt> {
     await this.ensureAuthenticated();
 
     const items = coData.items ?? [
@@ -2701,19 +2741,43 @@ export class BuildToolsAPI {
       false,
     );
 
-    try {
-      const result = JSON.parse(response.body) as {
-        result?: string;
-        id?: string | number;
-        message?: unknown;
-      };
-      if (result?.result === "success") {
-        return { success: true, changeOrderId: result.id, message: result.message };
-      }
-      return { success: false, errors: result?.message };
-    } catch {
-      return { success: false, errors: "Server error" };
+    return { dispatched: true, ...parseRawBody(response) };
+  }
+
+  /**
+   * Legacy boolean-shaped create. See `createProject` — same reasoning: it
+   * reads `createChangeOrderRaw` rather than issuing a second request.
+   */
+  async createChangeOrder(coData: {
+    name: string;
+    projectId: string | number;
+    status?: string | number;
+    description?: string;
+    total?: number;
+    items?: Array<{
+      name: string;
+      total: number;
+      budget_category_id: number;
+    }>;
+  }): Promise<{
+    success: boolean;
+    changeOrderId?: string | number;
+    message?: unknown;
+    errors?: unknown;
+  }> {
+    const attempt = await this.createChangeOrderRaw(coData);
+    if (!attempt.dispatched) return { success: false, errors: attempt.reason };
+    if (attempt.json === undefined) return { success: false, errors: "Server error" };
+
+    const result = attempt.json as {
+      result?: string;
+      id?: string | number;
+      message?: unknown;
+    };
+    if (result?.result === "success") {
+      return { success: true, changeOrderId: result.id, message: result.message };
     }
+    return { success: false, errors: result?.message };
   }
 
   /**
