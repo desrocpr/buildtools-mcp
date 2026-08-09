@@ -1236,13 +1236,17 @@ export function createMutationTools(
                 `**${headlineVerb}** for PO #${a.purchase_order_id} but **status transition to ${poStatusLabel(finalTarget)} failed**: ${String(transition.errors ?? "(no detail)")}.${rollbackNote}`,
               );
             }
-            // Non-auto-transition path: nothing to rollback (caller is
-            // making a deliberate status change against a non-locked PO
-            // and BT refused). The PO's status is unchanged from
-            // currentStatus — be concrete about that.
-            const stateNote = currentStatus !== null
-              ? `\n\n_PO status is unchanged at **${poStatusLabel(currentStatus)}**._`
-              : "";
+            // Non-auto-transition path: nothing to roll back (caller is
+            // making a deliberate status change against a non-locked PO).
+            // Being concrete about the resulting status is only honest when
+            // upstream actually refused — under ambiguity the transition may
+            // have applied, and "unchanged" would be a confident lie in the
+            // one place a reader is most likely to trust it.
+            const stateNote = transition.ambiguous
+              ? "\n\n_The transition may or may not have been applied — re-read the PO with `get_purchase_order` before assuming its status._"
+              : currentStatus !== null
+                ? `\n\n_PO status is unchanged at **${poStatusLabel(currentStatus)}**._`
+                : "";
             return errorMarkdown(
               `**${headlineVerb}** for PO #${a.purchase_order_id} but **status transition to ${poStatusLabel(finalTarget)} failed**: ${String(transition.errors ?? "(no detail)")}.${stateNote}`,
             );
@@ -2012,7 +2016,11 @@ export function createMutationTools(
               );
             }
             return errorMarkdown(
-              `**Content updated** for PO #${po.id} but **status transition to ${poStatusLabel(finalStatusCode)} failed**: ${String(transitionResult.errors ?? "(no detail)")}. PO status is unchanged from ${poStatusLabel(currentAfterEdit ?? -1)}.`,
+              `**Content updated** for PO #${po.id} but **status transition to ${poStatusLabel(finalStatusCode)} failed**: ${String(transitionResult.errors ?? "(no detail)")}.` +
+                stateClaim(
+                  transitionResult,
+                  `PO status is unchanged from ${poStatusLabel(currentAfterEdit ?? -1)}.`,
+                ),
             );
           }
           workflowSteps.push(`status → ${poStatusLabel(finalStatusCode)}`);

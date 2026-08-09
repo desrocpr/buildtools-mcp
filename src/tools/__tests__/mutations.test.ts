@@ -1437,6 +1437,41 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
     expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
   });
 
+  it("does NOT claim the status is unchanged when the transition outcome is unknown", async () => {
+    // The non-auto-transition path: an unlocked PO, a deliberate status change,
+    // and an unreadable response from the status endpoint. Every OTHER branch
+    // in this tool gates its state claim on the failure being known; this one
+    // asserted "PO status is unchanged" unconditionally, which is a confident
+    // lie in exactly the place a reader trusts it most — and would send someone
+    // to re-issue a transition that may already have applied.
+    const unlocked = { ...confirmedSnapshot, status: 2 }; // Sent, not locked
+    const getPurchaseOrder = vi.fn().mockResolvedValue(unlocked);
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      dispatched: true,
+      status: 500,
+      body: "<html>gateway</html>",
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      updatePurchaseOrder: vi.fn().mockResolvedValue({ success: true }) as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
+    });
+    const tool = findUpdatePoTool(api, mkStore());
+    const args = {
+      purchase_order_id: 39201,
+      status: "Confirmed" as const,
+      verify: false,
+    };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+
+    const text = textOf(await tool.handler({ ...args, confirmation_id: cid }, api));
+
+    expect(text).toContain("may or may not have been applied");
+    expect(text).toContain("get_purchase_order");
+    expect(text).not.toContain("status is unchanged");
+  });
+
   it("auto-transition: rolls back to ORIGINAL status when the final restore fails (PR #61 review HIGH-2)", async () => {
     // Demote(3→1) OK → /save OK → restore-to-Confirmed FAILS (signature
     // required at BT). Executor must roll back to original Confirmed
@@ -2269,6 +2304,39 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
       api,
     );
     expect(result.isError).toBe(true);
+  });
+
+  it("does NOT claim the status is unchanged when the final transition outcome is unknown", async () => {
+    // Same defect as update_purchase_order's non-rollback path, in the second
+    // of the two places it appeared. Content IS applied here, so the caller is
+    // already mid-workflow — telling them the status definitely did not move
+    // is the worst possible time to be confidently wrong.
+    const getPurchaseOrder = vi.fn().mockResolvedValue({ ...poSnapshot, status: 1 });
+    const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
+    const updatePurchaseOrder = vi.fn().mockResolvedValue({ success: true });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
+      dispatched: true,
+      status: 500,
+      body: "<html>gateway</html>",
+    });
+    const uploadAttachment = vi.fn().mockResolvedValue({
+      fileId: 1, name: "x.pdf", downloadUrl: "", size: 1, module: 1500, moduleId: 39201,
+    });
+    const api = fakeApi({
+      getPurchaseOrder: getPurchaseOrder as any,
+      getCompany: getCompany as any,
+      updatePurchaseOrder: updatePurchaseOrder as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
+      uploadAttachment: uploadAttachment as any,
+    });
+    const tool = findTool(api, mkStore());
+    const prompt = await tool.handler(baseArgs, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+
+    const text = textOf(await tool.handler({ ...baseArgs, confirmation_id: cid }, api));
+
+    expect(text).toContain("may or may not have been applied");
+    expect(text).not.toContain("PO status is unchanged");
   });
 
   it("review MEDIUM (downloadUrl validation): malicious URL from BT response is dropped from markdown link", async () => {
