@@ -269,7 +269,7 @@ export function requiresConfirmation<T extends object>(
 
     const entry = store.consume<T>(confirmation_id, sessionId);
     if (!entry || entry.toolName !== toolName) {
-      return {
+      return markNotExecuted({
         content: [
           {
             type: "text",
@@ -278,8 +278,40 @@ export function requiresConfirmation<T extends object>(
               `Please re-invoke \`${toolName}\` without a confirmation_id to get a fresh prompt.`,
           },
         ],
-      };
+      });
     }
     return executor(entry.args);
   };
+}
+
+/**
+ * Results the confirmation framework produced INSTEAD of running the executor.
+ *
+ * A caller cannot tell these apart from a real result by inspection: the
+ * expired/unknown-confirmation message deliberately leaves `isError` unset (see
+ * the note at the top of this file), and outer handlers infer "this was the
+ * execute call" from `confirmation_id` merely being PRESENT — which it is on a
+ * request carrying an expired one.
+ *
+ * That combination poisons the idempotency cache. Sequence: call with
+ * `idempotency_key: "X"` and a stale `confirmation_id` -> the framework returns
+ * "expired" without executing -> the outer handler sees a confirmation_id and
+ * a non-error result -> it caches "expired" under "X". Every later call with
+ * that key, including a correct two-step confirm, replays the stale message
+ * until the cache TTL elapses. No write was ever attempted, and the key is
+ * unusable for an hour.
+ *
+ * Marking the result is what lets `storeIdempotencyResult` refuse to cache it,
+ * and it fixes every tool at once rather than one call site.
+ */
+const NOT_EXECUTED = new WeakSet<ToolResult>();
+
+function markNotExecuted(result: ToolResult): ToolResult {
+  NOT_EXECUTED.add(result);
+  return result;
+}
+
+/** False only when the confirmation framework short-circuited the executor. */
+export function didExecute(result: ToolResult): boolean {
+  return !NOT_EXECUTED.has(result);
 }

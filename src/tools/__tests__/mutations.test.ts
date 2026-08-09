@@ -40,7 +40,7 @@ interface FakeApiOverrides {
   uploadAttachment?: BuildToolsAPI["uploadAttachment"];
   getProject?: BuildToolsAPI["getProject"];
   getFinancialStatements?: BuildToolsAPI["getFinancialStatements"];
-  createFinancialStatementWithAmount?: BuildToolsAPI["createFinancialStatementWithAmount"];
+  createFinancialStatementWithAmountRaw?: BuildToolsAPI["createFinancialStatementWithAmountRaw"];
 }
 
 function fakeApi(overrides: FakeApiOverrides = {}): BuildToolsAPI {
@@ -2330,13 +2330,19 @@ describe("create_draw_request — workflow consolidator (PR #65)", () => {
   it("happy path with direct `amount`: prompt shows project + prior draws + new amount; executor creates the FS", async () => {
     const getProject = vi.fn().mockResolvedValue(projectRow);
     const getFinancialStatements = vi.fn().mockResolvedValue(priorFs);
+    // Seeded at the raw seam rather than the old boolean method: the tool now
+    // reads through the operations interface, so the classifier is in the loop
+    // and this is where upstream actually is.
     const createFinancialStatementWithAmount = vi.fn().mockResolvedValue({
-      success: true, statementId: 700001, amount: "$ 40,000.00",
+      dispatched: true,
+      status: 200,
+      body: "{}",
+      json: { result: "success", id: 700001 },
     });
     const api = fakeApi({
       getProject: getProject as any,
       getFinancialStatements: getFinancialStatements as any,
-      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+      createFinancialStatementWithAmountRaw: createFinancialStatementWithAmount as any,
     });
     const tool = findTool(api, mkStore());
     const args = { project_id: 100002, amount: 40000 };
@@ -2364,12 +2370,15 @@ describe("create_draw_request — workflow consolidator (PR #65)", () => {
     const getProject = vi.fn().mockResolvedValue(projectRow);
     const getFinancialStatements = vi.fn().mockResolvedValue(priorFs);
     const createFinancialStatementWithAmount = vi.fn().mockResolvedValue({
-      success: true, statementId: 700002,
+      dispatched: true,
+      status: 200,
+      body: "{}",
+      json: { result: "success", id: 700002 },
     });
     const api = fakeApi({
       getProject: getProject as any,
       getFinancialStatements: getFinancialStatements as any,
-      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+      createFinancialStatementWithAmountRaw: createFinancialStatementWithAmount as any,
     });
     const tool = findTool(api, mkStore());
     // work_completed = 100k, retainage = 10%, prior = 55k
@@ -2416,7 +2425,7 @@ describe("create_draw_request — workflow consolidator (PR #65)", () => {
     const api = fakeApi({
       getProject: getProject as any,
       getFinancialStatements: getFinancialStatements as any,
-      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+      createFinancialStatementWithAmountRaw: createFinancialStatementWithAmount as any,
     });
     const tool = findTool(api, mkStore());
     // work_completed = 50k, retainage = 0, prior = 55k → -5k
@@ -2447,7 +2456,7 @@ describe("create_draw_request — workflow consolidator (PR #65)", () => {
     const api = fakeApi({
       getProject: getProject as any,
       getFinancialStatements: getFinancialStatements as any,
-      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+      createFinancialStatementWithAmountRaw: createFinancialStatementWithAmount as any,
     });
     const tool = findTool(api, mkStore());
     const args = { project_id: 100002, amount: 5000 };
@@ -2462,7 +2471,7 @@ describe("create_draw_request — workflow consolidator (PR #65)", () => {
     const api = fakeApi({
       getProject: getProject as any,
       getFinancialStatements: getFinancialStatements as any,
-      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+      createFinancialStatementWithAmountRaw: createFinancialStatementWithAmount as any,
     });
     const tool = findTool(api, mkStore());
     const args = {
@@ -2496,7 +2505,7 @@ describe("create_draw_request — workflow consolidator (PR #65)", () => {
     const api = fakeApi({
       getProject: getProject as any,
       getFinancialStatements: getFinancialStatements as any,
-      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+      createFinancialStatementWithAmountRaw: createFinancialStatementWithAmount as any,
     });
     const tool = findTool(api, mkStore());
     const result = await tool.handler(
@@ -2513,12 +2522,15 @@ describe("create_draw_request — workflow consolidator (PR #65)", () => {
     const getProject = vi.fn().mockResolvedValue(projectRow);
     const getFinancialStatements = vi.fn().mockResolvedValue(priorFs);
     const createFinancialStatementWithAmount = vi.fn().mockResolvedValue({
-      success: true, statementId: 700100,
+      dispatched: true,
+      status: 200,
+      body: "{}",
+      json: { result: "success", id: 700100 },
     });
     const api = fakeApi({
       getProject: getProject as any,
       getFinancialStatements: getFinancialStatements as any,
-      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+      createFinancialStatementWithAmountRaw: createFinancialStatementWithAmount as any,
     });
     const { IdempotencyStore } = await import("../../idempotency/index.js");
     const idem = new IdempotencyStore();
@@ -2639,14 +2651,20 @@ describe("create_draw_request — workflow consolidator (PR #65)", () => {
   it("BT create failure: surfaces the API error verbatim", async () => {
     const getProject = vi.fn().mockResolvedValue(projectRow);
     const getFinancialStatements = vi.fn().mockResolvedValue(priorFs);
+    // A STRUCTURED refusal: upstream said no, in a shape the classifier can
+    // read. That is what makes this a clean failure the caller can retry after
+    // fixing the amount — as opposed to a 500 or a drifted body, which are
+    // covered in create-outcomes.test.ts and must NOT render this way.
     const createFinancialStatementWithAmount = vi.fn().mockResolvedValue({
-      success: false,
-      errors: "Amount validation failed at BT",
+      dispatched: true,
+      status: 422,
+      body: "{}",
+      json: { e: "Amount validation failed at BT" },
     });
     const api = fakeApi({
       getProject: getProject as any,
       getFinancialStatements: getFinancialStatements as any,
-      createFinancialStatementWithAmount: createFinancialStatementWithAmount as any,
+      createFinancialStatementWithAmountRaw: createFinancialStatementWithAmount as any,
     });
     const tool = findTool(api, mkStore());
     const args = { project_id: 100002, amount: 5000 };

@@ -131,6 +131,42 @@ function formatWriteOutcome(
   outcome: WriteOutcome<CreatedRecord>,
   opts: { noun: string; toolName: string },
 ): ToolResult {
+  return remember(outcome, renderOutcome(outcome, opts));
+}
+
+/**
+ * Carry a write's outcome alongside its rendered result.
+ *
+ * The idempotency cache needs to know an outcome was AMBIGUOUS — that is the
+ * case it must cache, so a retry replays instead of re-firing. But the outcome
+ * is known deep inside the confirmation executor, while the cache decision is
+ * made by the outer handler, and the only thing that travels between them is
+ * the `ToolResult`.
+ *
+ * A WeakMap keyed on that result is how it travels. The alternatives were
+ * worse: a field on `ToolResult` would ride out over the MCP wire, and putting
+ * a callback in the args would land in the confirmation store, which persists
+ * and replays them. Entries die with the result they describe.
+ */
+const OUTCOME_BY_RESULT = new WeakMap<ToolResult, WriteOutcome<unknown>>();
+
+function remember(
+  outcome: WriteOutcome<unknown>,
+  result: ToolResult,
+): ToolResult {
+  OUTCOME_BY_RESULT.set(result, outcome);
+  return result;
+}
+
+/** The outcome behind a result, when it came from a neutral write. */
+function outcomeOf(result: ToolResult): WriteOutcome<unknown> | undefined {
+  return OUTCOME_BY_RESULT.get(result);
+}
+
+function renderOutcome(
+  outcome: WriteOutcome<CreatedRecord>,
+  opts: { noun: string; toolName: string },
+): ToolResult {
   if (isOk(outcome)) {
     const id = outcome.data.id;
     const suffix = outcome.data.message
@@ -223,6 +259,12 @@ const CreateProjectSchema = z.object({
   state: z.string().optional(),
   zip: z.string().optional(),
   description: z.string().optional(),
+  idempotency_key: z
+    .string()
+    .optional()
+    .describe(
+      "Optional retry-safety key. Reuse it when retrying THIS create; a repeat returns the cached result instead of creating a second record.",
+    ),
   confirmation_id: z.string().optional(),
 });
 type CreateProjectArgs = z.infer<typeof CreateProjectSchema>;
@@ -240,6 +282,12 @@ const CreateChangeOrderSchema = z.object({
     }))
     .optional()
     .describe("Line items. If omitted, a single item is created from the total."),
+  idempotency_key: z
+    .string()
+    .optional()
+    .describe(
+      "Optional retry-safety key. Reuse it when retrying THIS create; a repeat returns the cached result instead of creating a second record.",
+    ),
   confirmation_id: z.string().optional(),
 });
 type CreateChangeOrderArgs = z.infer<typeof CreateChangeOrderSchema>;
@@ -412,6 +460,12 @@ const CreateInvoiceSchema = z.object({
   due_date: z.string().describe("Due date (MM/DD/YYYY)."),
   payment_days: z.string().optional().describe("Payment terms in days. Default: '30'."),
   notes: z.string().optional(),
+  idempotency_key: z
+    .string()
+    .optional()
+    .describe(
+      "Optional retry-safety key. Reuse it when retrying THIS create; a repeat returns the cached result instead of creating a second record.",
+    ),
   confirmation_id: z.string().optional(),
 });
 type CreateInvoiceArgs = z.infer<typeof CreateInvoiceSchema>;
@@ -422,6 +476,12 @@ const CreateFinancialStatementSchema = z.object({
   amount: z.number().describe("Dollar amount for the statement."),
   notes: z.string().optional(),
   status: z.number().optional().describe("1=Draft (default), 2=Pending, 4=Partial, 5=Sent, 6=Paid."),
+  idempotency_key: z
+    .string()
+    .optional()
+    .describe(
+      "Optional retry-safety key. Reuse it when retrying THIS create; a repeat returns the cached result instead of creating a second record.",
+    ),
   confirmation_id: z.string().optional(),
 });
 type CreateFinancialStatementArgs = z.infer<typeof CreateFinancialStatementSchema>;
@@ -2104,16 +2164,17 @@ export function createMutationTools(
     (a) => `Create vendor invoice **#${a.number}** for company #${a.company_id} (date ${a.date}, due ${a.due_date}).`,
     async (a) => {
       try {
-        const result = await getApi().createInvoice({
-          companyId: a.company_id,
-          number: a.number,
-          date: a.date,
-          dueDate: a.due_date,
-          paymentDays: a.payment_days,
-          notes: a.notes,
-        });
-        if (result.success) return markdown(`Invoice **#${result.invoiceId}** created. ${result.message ?? ""}`);
-        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+        return formatWriteOutcome(
+          await opsOf(getApi()).createInvoice({
+            companyId: a.company_id,
+            number: a.number,
+            date: a.date,
+            dueDate: a.due_date,
+            paymentDays: a.payment_days,
+            notes: a.notes,
+          }),
+          { noun: "Invoice", toolName: "create_invoice" },
+        );
       } catch (err) { return formatError(err, "create_invoice"); }
     },
   );
@@ -2124,15 +2185,19 @@ export function createMutationTools(
     (a) => `Create financial statement **"${a.name}"** on project #${a.project_id} for **$${a.amount.toFixed(2)}**.`,
     async (a) => {
       try {
-        const result = await getApi().createFinancialStatementWithAmount({
-          projectId: a.project_id,
-          name: a.name,
-          amount: a.amount,
-          notes: a.notes,
-          status: a.status,
-        });
-        if (result.success) return markdown(`Financial statement **#${result.statementId}** created for $${result.amount ?? a.amount}.`);
-        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+        return formatWriteOutcome(
+          await opsOf(getApi()).createFinancialStatement({
+            projectId: a.project_id,
+            name: a.name,
+            amount: a.amount,
+            notes: a.notes,
+            status: a.status,
+          }),
+          {
+            noun: `Financial statement for $${a.amount.toFixed(2)}`,
+            toolName: "create_financial_statement",
+          },
+        );
       } catch (err) { return formatError(err, "create_financial_statement"); }
     },
   );
@@ -2214,20 +2279,29 @@ export function createMutationTools(
             `**Computed draw amount is non-positive** ($${finalAmount.toFixed(2)}). This typically means prior draws already cover (or exceed) the cumulative work. Verify \`work_completed_to_date\` or pass \`amount\` directly.`,
           );
         }
-        const result = await getApi().createFinancialStatementWithAmount({
+        const outcome = await opsOf(getApi()).createFinancialStatement({
           projectId: a.project_id,
           name: finalName,
           amount: finalAmount,
           notes: a.notes,
           status: a.status ?? 1,
         });
-        if (!result.success) {
-          return errorMarkdown(
-            `**Failed to create draw request** on project #${a.project_id}: ${String(result.errors ?? "(no detail)")}`,
-          );
+        if (!isOk(outcome)) {
+          // Draw requests are the sharpest case for the ambiguity split: they
+          // are money, they carry an idempotency_key, and the caller is an LLM
+          // that will retry a plain failure. So the ambiguous wording — and
+          // the cache decision in the outer handler — matter more here than
+          // anywhere else.
+          return formatWriteOutcome(outcome, {
+            noun: `Draw request on project #${a.project_id}`,
+            toolName: "create_draw_request",
+          });
         }
-        return markdown(
-          `Draw request **#${result.statementId}** ("${escapeMarkdownInline(finalName)}") created on project #${a.project_id} for **$${result.amount ?? finalAmount.toFixed(2)}**. Status: ${a.status === undefined ? "Draft" : `code ${a.status}`}.`,
+        return remember(
+          outcome,
+          markdown(
+            `Draw request **#${outcome.data.id ?? "(id not returned)"}** ("${escapeMarkdownInline(finalName)}") created on project #${a.project_id} for **$${finalAmount.toFixed(2)}**. Status: ${a.status === undefined ? "Draft" : `code ${a.status}`}.`,
+          ),
         );
       } catch (err) {
         return formatError(err, "create_draw_request");
@@ -2479,15 +2553,80 @@ export function createMutationTools(
     };
   }
 
+  /**
+   * `makeTool`, plus retry safety.
+   *
+   * Every create wrapped here can now return AMBIGUOUS, and the rendered
+   * message tells the caller not to retry blindly. Advice is not a mechanism:
+   * the caller is usually a model, and a model that retries anyway would create
+   * a second project, change order, invoice, or client bill. This is what makes
+   * the advice enforceable — a repeat under the same key replays instead.
+   *
+   * The outcome (not just `isError`) drives the cache decision, so an ambiguous
+   * write IS cached. See `storeIdempotencyResult`.
+   */
+  function makeIdempotentTool(
+    name: string,
+    description: string,
+    schema: z.ZodTypeAny,
+    confirmed: (
+      args: any,
+      store: ConfirmationStore,
+      sessionId?: string,
+    ) => Promise<ToolResult>,
+    permission: string,
+  ): ToolDefinition {
+    const base = makeTool(name, description, schema, confirmed, permission);
+    return {
+      ...base,
+      handler: async (rawArgs: unknown, _api: BuildToolsAPI) => {
+        const parsed = schema.safeParse(rawArgs ?? {});
+        if (!parsed.success) return formatZodError(parsed.error, name);
+        const data = parsed.data as {
+          confirmation_id?: string;
+          idempotency_key?: string;
+        };
+
+        // Meta fields are stripped before fingerprinting: the key is the
+        // namespace, not part of what is being written, and confirmation_id
+        // changes between the prompt and the execute call.
+        const {
+          confirmation_id: _c,
+          idempotency_key: _k,
+          ...fingerprintInput
+        } = data;
+
+        const idemContext = checkIdempotency({
+          toolName: name,
+          idempotencyStore,
+          sessionId,
+          idempotencyKey: data.idempotency_key,
+          fingerprintInput,
+        });
+        if (idemContext.replayResult) return idemContext.replayResult;
+        if (idemContext.mismatchError) return idemContext.mismatchError;
+
+        const result = await confirmed(data, store, sessionId);
+        storeIdempotencyResult({
+          context: idemContext,
+          result,
+          isExecuteCall: !!data.confirmation_id,
+          outcome: outcomeOf(result),
+        });
+        return result;
+      },
+    };
+  }
+
   return [
-    makeTool(
+    makeIdempotentTool(
       "create_project",
       "Create a new BuildTools project. Requires confirmation. Default status: Omega (6).",
       CreateProjectSchema,
       createProjectConfirmed,
       "write:project",
     ),
-    makeTool(
+    makeIdempotentTool(
       "create_change_order",
       "Create a change order on a project. Requires confirmation. Default status: Draft (1).",
       CreateChangeOrderSchema,
@@ -2981,14 +3120,14 @@ export function createMutationTools(
       createRFIConfirmed,
       "write:tasks",
     ),
-    makeTool(
+    makeIdempotentTool(
       "create_invoice",
       "Create a vendor invoice. Requires confirmation. Note: 'invoices' in BuildTools are vendor bills, not client billing (that's financial statements).",
       CreateInvoiceSchema,
       createInvoiceConfirmed,
       "write:financial",
     ),
-    makeTool(
+    makeIdempotentTool(
       "create_financial_statement",
       "Create a financial statement (client bill / draw request) on a project with a specific dollar amount. Requires confirmation. Use ASCII-only titles.",
       CreateFinancialStatementSchema,
@@ -3133,10 +3272,15 @@ export function createMutationTools(
           sessionId,
         );
 
+        // The outcome, not just `isError`, decides whether this is cached. An
+        // ambiguous draw MUST be cached: it renders as an error, and without
+        // this a same-key retry would re-fire a write that may already have
+        // created the draw — the duplicate this cache exists to prevent.
         storeIdempotencyResult({
           context: idemContext,
           result,
           isExecuteCall: !!data.confirmation_id,
+          outcome: outcomeOf(result),
         });
         return result;
       },

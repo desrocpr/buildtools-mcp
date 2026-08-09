@@ -34,6 +34,7 @@
 
 import type { ToolResult } from "../tools/projects.js";
 
+import { didExecute } from "../confirm/Confirmation.js";
 import { isCacheable, type WriteOutcome } from "../operations/outcomes.js";
 import { IdempotencyStore } from "./IdempotencyStore.js";
 
@@ -166,8 +167,13 @@ export function checkIdempotency(
 
   if (lookup.kind === "hit") {
     const original = lookup.result;
+    // The escape hatch is named because the cache now holds AMBIGUOUS results
+    // too. Someone who checked BuildTools and confirmed the write did not land
+    // would otherwise find the same key replaying "outcome unknown" for an hour
+    // with no way to say "I checked, go ahead" — the cache would have turned a
+    // safety mechanism into a block.
     const banner =
-      `_Idempotency replay: returning cached result for key \`${escapeMarkdownInline(opts.idempotencyKey)}\` — no BT call was made. Cache TTL ${opts.idempotencyStore.ttlMinutes} min._\n\n`;
+      `_Idempotency replay: returning cached result for key \`${escapeMarkdownInline(opts.idempotencyKey)}\` — no BT call was made. Cache TTL ${opts.idempotencyStore.ttlMinutes} min. If you have since VERIFIED in BuildTools that this did not land, retry with a fresh idempotency_key._\n\n`;
     return {
       cacheKey,
       argsFingerprint,
@@ -227,6 +233,13 @@ export function storeIdempotencyResult(opts: StoreIdempotencyResultOptions): voi
   ) {
     return;
   }
+
+  // `isExecuteCall` is inferred from `confirmation_id` being PRESENT, which is
+  // also true when the id is expired or unknown — in which case the executor
+  // never ran and the framework returned a plain message with `isError` unset.
+  // Caching that would replay "your confirmation expired" for every later call
+  // under the same key, for a write that was never attempted. See `didExecute`.
+  if (!didExecute(opts.result)) return;
 
   // An outcome, when the caller has one, is strictly better evidence than
   // `isError` — it distinguishes "did not land" from "might have".

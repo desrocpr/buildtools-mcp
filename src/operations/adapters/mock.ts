@@ -35,6 +35,8 @@ import type {
   BudgetView,
   CreateChangeOrderInput,
   CreatedRecord,
+  CreateFinancialStatementInput,
+  CreateInvoiceInput,
   CreateProjectInput,
   ListQuery,
   OperationsManagementApi,
@@ -46,6 +48,13 @@ import type {
   UnbilledChangeOrderFilters,
   UnbilledChangeOrderRow,
 } from "../types.js";
+
+/** Grids the mock can write to. */
+export type WritableGrid =
+  | "projects"
+  | "changeOrders"
+  | "invoices"
+  | "financialStatementRows";
 
 /** A row in a mock grid. `id` is required — the interface guarantees it. */
 export interface MockRow extends Record<string, unknown> {
@@ -72,6 +81,8 @@ export interface MockSeed {
   weeklyReports?: MockRow[];
   workDays?: MockRow[];
   financialStatementRows?: MockRow[];
+  /** Write-only in the mock today: no read method lists vendor invoices. */
+  invoices?: MockRow[];
   purchaseOrderDetail?: Record<string, PurchaseOrderView>;
   budget?: Record<string, BudgetView>;
   selections?: Record<string, SelectionsView>;
@@ -371,6 +382,36 @@ export class MockOperationsApi implements OperationsManagementApi {
     );
   }
 
+  async createInvoice(
+    input: CreateInvoiceInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    this.record("createInvoice", input);
+    return this.write(
+      "invoices",
+      { number: input.number, company_id: input.companyId, date: input.date },
+      { kind: "search", resource: "invoices", query: String(input.number) },
+    );
+  }
+
+  async createFinancialStatement(
+    input: CreateFinancialStatementInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    this.record("createFinancialStatement", input);
+    return this.write(
+      "financialStatementRows",
+      {
+        name: input.name,
+        project_id: input.projectId,
+        amount: input.amount,
+      },
+      {
+        kind: "search",
+        resource: `projects/${input.projectId}/financial-statements`,
+        query: input.name,
+      },
+    );
+  }
+
   /**
    * Perform a seeded write.
    *
@@ -385,7 +426,7 @@ export class MockOperationsApi implements OperationsManagementApi {
    * on, and one a call-spy cannot express.
    */
   private write(
-    grid: "projects" | "changeOrders",
+    grid: WritableGrid,
     row: Record<string, unknown>,
     probe: ReconcileProbe,
   ): WriteOutcome<CreatedRecord> {
@@ -416,7 +457,7 @@ export class MockOperationsApi implements OperationsManagementApi {
    * Anything past the end of the list succeeds.
    */
   scriptWrites(
-    grid: "projects" | "changeOrders",
+    grid: WritableGrid,
     outcomes: Array<"ok" | "failed" | "ambiguous">,
   ): void {
     this.scriptedOutcomes[grid] = [...outcomes];
