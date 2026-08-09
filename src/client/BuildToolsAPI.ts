@@ -3339,7 +3339,7 @@ export class BuildToolsAPI {
   }
 
   /** Source L484–521. */
-  async createPurchaseOrder(poData: {
+  async createPurchaseOrderRaw(poData: {
     name: string;
     projectId: string | number;
     companyId: string | number;
@@ -3348,59 +3348,24 @@ export class BuildToolsAPI {
     notes?: string;
     total?: number;
     items?: Array<{ name: string; total: number }>;
-  }): Promise<{
-    success: boolean;
-    purchaseOrderId?: string | number;
-    message?: unknown;
-    errors?: unknown;
-  }> {
-    await this.ensureAuthenticated();
+  }): Promise<RawWriteAttempt> {
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
 
-    const items = poData.items ?? [
-      { name: "Item", total: poData.total ?? 0 },
-    ];
+    const items = poData.items ?? [{ name: "Item", total: poData.total ?? 0 }];
 
-    const formData = new URLSearchParams();
-    formData.append("PurchaseOrder[name]", poData.name);
-    formData.append("PurchaseOrder[project_id]", String(poData.projectId));
-    formData.append("PurchaseOrder[company_id]", String(poData.companyId));
-    formData.append("PurchaseOrder[prefix]", String(poData.prefix ?? "PO"));
-    formData.append("PurchaseOrder[status]", String(poData.status ?? "1"));
-    formData.append("PurchaseOrderItems[items]", JSON.stringify({ items }));
-    if (poData.notes) formData.append("PurchaseOrder[notes]", poData.notes);
+    const data: PostData = {
+      "PurchaseOrder[name]": poData.name,
+      "PurchaseOrder[project_id]": String(poData.projectId),
+      "PurchaseOrder[company_id]": String(poData.companyId),
+      "PurchaseOrder[prefix]": String(poData.prefix ?? "PO"),
+      "PurchaseOrder[status]": String(poData.status ?? "1"),
+      "PurchaseOrderItems[items]": JSON.stringify({ items }),
+    };
+    if (poData.notes) data["PurchaseOrder[notes]"] = poData.notes;
 
-    const response = await this.request(
-      `${this.baseUrl}/purchase-orders/save`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "X-Requested-With": "XMLHttpRequest",
-          Accept: "application/json",
-          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
-        },
-        body: formData.toString(),
-      },
-      false,
-    );
-
-    try {
-      const result = JSON.parse(response.body) as {
-        result?: string;
-        id?: string | number;
-        message?: unknown;
-      };
-      if (result?.result === "success") {
-        return {
-          success: true,
-          purchaseOrderId: result.id,
-          message: result.message,
-        };
-      }
-      return { success: false, errors: result?.message };
-    } catch {
-      return { success: false, errors: "Server error" };
-    }
+    const raw = await this.postRaw("/purchase-orders/save", data);
+    return { dispatched: true, ...raw };
   }
 
   /**
@@ -3880,28 +3845,21 @@ export class BuildToolsAPI {
    * (3) requires a non-empty signature field, which we don't surface
    * yet. That'll come as a follow-up if a real use case appears.
    */
-  async transitionPurchaseOrderStatus(opts: {
+  async transitionPurchaseOrderStatusRaw(opts: {
     purchaseOrderId: string | number;
     status: number;
-  }): Promise<{
-    success: boolean;
-    message?: unknown;
-    errors?: unknown;
-  }> {
+  }): Promise<RawWriteAttempt> {
     const poId = Number(opts.purchaseOrderId);
     if (!Number.isFinite(poId)) {
-      return { success: false, errors: "purchase_order_id is not a number" };
+      return { dispatched: false, reason: "purchase_order_id is not a number" };
     }
-    // Delegate to the bulk method with a single-id batch.
-    const result = await this.bulkTransitionPurchaseOrderStatuses({
+    // One id is a batch of one. The single/bulk distinction is the caller's,
+    // not the endpoint's — `/purchase-orders/status/update` takes `ids[]`
+    // either way, and the counts come back the same.
+    return this.bulkTransitionPurchaseOrderStatusesRaw({
       purchaseOrderIds: [poId],
       status: opts.status,
     });
-    return {
-      success: result.success && (result.failureCount ?? 0) === 0,
-      message: result.message,
-      errors: result.errors,
-    };
   }
 
   /**
@@ -3923,21 +3881,19 @@ export class BuildToolsAPI {
    * misses partial-failure scenarios — they should check
    * `failureCount === 0` for "all succeeded."
    */
-  async bulkTransitionPurchaseOrderStatuses(opts: {
+  async bulkTransitionPurchaseOrderStatusesRaw(opts: {
     purchaseOrderIds: Array<string | number>;
     status: number;
-  }): Promise<{
-    success: boolean;
-    message?: unknown;
-    errors?: unknown;
-    successCount?: number;
-    failureCount?: number;
-  }> {
-    await this.ensureAuthenticated();
+  }): Promise<RawWriteAttempt> {
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
 
     const ids = opts.purchaseOrderIds.map((id) => Number(id)).filter((n) => Number.isFinite(n));
     if (ids.length === 0) {
-      return { success: false, errors: "purchase_order_ids contained no valid numeric ids" };
+      return {
+        dispatched: false,
+        reason: "purchase_order_ids contained no valid numeric ids",
+      };
     }
     // Pick the first id for CSRF form fetch — any PO id works for
     // CSRF since the token is session-wide.
@@ -3955,16 +3911,17 @@ export class BuildToolsAPI {
         false,
       );
       if (formResp.status !== 200) {
+        // Pre-dispatch: the status POST is not built until we hold a token.
         return {
-          success: false,
-          errors: `Could not fetch PO form to harvest CSRF (HTTP ${formResp.status})`,
+          dispatched: false,
+          reason: `Could not fetch PO form to harvest CSRF (HTTP ${formResp.status})`,
         };
       }
       csrf = this.absorbFormToken(formResp.body);
       if (!csrf) {
         return {
-          success: false,
-          errors: "Could not harvest CSRF _token from PO form",
+          dispatched: false,
+          reason: "Could not harvest CSRF _token from PO form",
         };
       }
     }
@@ -4013,17 +3970,20 @@ export class BuildToolsAPI {
       // producing a confusing "non-JSON response from /status/update"
       // error that hides the actual root cause (the form fetch failed).
       if (refreshResp.status !== 200) {
-        return {
-          success: false,
-          errors: `CSRF refresh failed (HTTP ${refreshResp.status}) after 419 — original BT response: ${resp.body.slice(0, 200)}`,
-        };
+        // NOT pre-dispatch: the first status POST already went out and came
+        // back 419. Hand the original response over and let the classifier
+        // judge it — Laravel's CSRF middleware runs before the controller, but
+        // we have not verified that against this endpoint, and the expensive
+        // direction to be wrong in is "definitely did not happen".
+        //
+        // The old code spliced 200 characters of that body into a user-facing
+        // error. It is a "Page Expired" HTML page; nothing in it helps the
+        // caller, and it can carry internal paths.
+        return { dispatched: true, ...parseRawBody(resp) };
       }
       const fresh = this.absorbFormToken(refreshResp.body);
       if (!fresh) {
-        return {
-          success: false,
-          errors: `CSRF refresh: form returned 200 but no _token field present`,
-        };
+        return { dispatched: true, ...parseRawBody(resp) };
       }
       resp = await this.request(
         `${this.baseUrl}/purchase-orders/status/update`,
@@ -4041,72 +4001,10 @@ export class BuildToolsAPI {
       );
     }
 
-    // Response shape: `{r: 0|1, msg: string[], s: <success count>, f:
-    // <failure count>, l: [singular, plural]}`. Non-numeric `r:1`
-    // means the call's wire succeeded; we also need `f === 0` to know
-    // no per-id failure occurred.
-    let parsed: { r?: number; msg?: unknown; s?: number; f?: number };
-    try {
-      parsed = JSON.parse(resp.body) as typeof parsed;
-    } catch {
-      return {
-        success: false,
-        errors: `Non-JSON response from /status/update (HTTP ${resp.status}): ${resp.body.slice(0, 200)}`,
-      };
-    }
-    // PR #69 (bulk-aware response handling): a wire-level failure
-    // (r:0) is a hard error. A wire-level success (r:1) with partial
-    // per-id failures (f > 0) is NOT a top-level error — bulk
-    // callers expect to see the per-id breakdown so they can act
-    // on it. Surface successCount + failureCount for both single
-    // and bulk callers (single callers just check success boolean).
-    const successCount = parsed.s ?? 0;
-    const failureCount = parsed.f ?? 0;
-    if (parsed.r !== 1) {
-      const msg = Array.isArray(parsed.msg)
-        ? (parsed.msg as unknown[]).join("; ")
-        : String(parsed.msg ?? "");
-      // PR #69 review MEDIUM 6: log count + sample, not the full list.
-      process.stderr.write(
-        `[bulkTransitionPurchaseOrderStatuses] ids_count=${ids.length} ids_sample=${ids.slice(0, 3).join(",")} status=${opts.status} WIRE_FAILED body=${JSON.stringify(resp.body.slice(0, 300))}\n`,
-      );
-      return {
-        success: false,
-        errors: msg || `HTTP ${resp.status} — ${resp.body.slice(0, 200)}`,
-        successCount,
-        failureCount,
-      };
-    }
-    // r:1 — wire succeeded. Report per-id breakdown.
-    if (failureCount > 0) {
-      const msg = Array.isArray(parsed.msg)
-        ? (parsed.msg as unknown[]).join("; ")
-        : String(parsed.msg ?? "");
-      // PR #69 review MEDIUM 6: don't dump the full ids list to
-      // stderr — under log aggregation that creates a durable
-      // (ids → failure) record. Log count + a 3-id sample only.
-      const sampleIds = ids.slice(0, 3).join(",");
-      process.stderr.write(
-        `[bulkTransitionPurchaseOrderStatuses] ids_count=${ids.length} ids_sample=${sampleIds} status=${opts.status} PARTIAL success=${successCount} failed=${failureCount} msg=${JSON.stringify(msg)}\n`,
-      );
-      // PR #69 review HIGH 1: preserve BT's actual message in the
-      // `errors` field so downstream callers (the 8 sites that fall
-      // back to `result.errors ?? "(no detail)"`) keep getting the
-      // human-readable reason instead of degrading silently.
-      return {
-        success: true,
-        message: `Partial: ${successCount} succeeded, ${failureCount} failed.`,
-        errors: msg || undefined,
-        successCount,
-        failureCount,
-      };
-    }
-    return {
-      success: true,
-      message: "Status updated.",
-      successCount,
-      failureCount,
-    };
+    // The envelope (`{r, msg, s, f, l}`) is interpreted by the operations
+    // adapter, not here — including the partial-success case, which is exactly
+    // the kind of thing a boolean cannot carry.
+    return { dispatched: true, ...parseRawBody(resp) };
   }
 
   // ========================================================================

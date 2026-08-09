@@ -30,10 +30,9 @@ function textOf(result: ToolResult): string {
 
 interface FakeApiOverrides {
   searchCompanies?: BuildToolsAPI["searchCompanies"];
-  createPurchaseOrder?: BuildToolsAPI["createPurchaseOrder"];
+  createPurchaseOrderRaw?: BuildToolsAPI["createPurchaseOrderRaw"];
   updatePurchaseOrder?: BuildToolsAPI["updatePurchaseOrder"];
-  transitionPurchaseOrderStatus?: BuildToolsAPI["transitionPurchaseOrderStatus"];
-  bulkTransitionPurchaseOrderStatuses?: BuildToolsAPI["bulkTransitionPurchaseOrderStatuses"];
+  bulkTransitionPurchaseOrderStatusesRaw?: BuildToolsAPI["bulkTransitionPurchaseOrderStatusesRaw"];
   getCompany?: BuildToolsAPI["getCompany"];
   getPurchaseOrder?: BuildToolsAPI["getPurchaseOrder"];
   getPurchaseOrders?: BuildToolsAPI["getPurchaseOrders"];
@@ -45,6 +44,29 @@ interface FakeApiOverrides {
 
 function fakeApi(overrides: FakeApiOverrides = {}): BuildToolsAPI {
   return overrides as unknown as BuildToolsAPI;
+}
+
+/**
+ * Raw envelopes for the PO status endpoint.
+ *
+ * These tests used to hand the tool `{success:true}` / `{success:false}`
+ * directly. That shape no longer exists: the tool reads through the operations
+ * interface, so the fixture has to be what BuildTools actually returns and the
+ * classifier has to be in the loop — which is the point, since the classifier
+ * is where "refused" and "unknown" stop being the same thing.
+ */
+function okTransition(succeeded = 1, failed = 0) {
+  return {
+    dispatched: true,
+    status: 200,
+    body: "{}",
+    json: { r: 1, s: succeeded, f: failed, msg: [] },
+  };
+}
+
+/** A STRUCTURED refusal — upstream said no, in a shape we can read. */
+function refusedTransition(reason: string) {
+  return { dispatched: true, status: 200, body: "{}", json: { r: 0, e: reason } };
 }
 
 function mkStore() {
@@ -550,12 +572,10 @@ describe("update_purchase_order — status by label, real errors, verify-after-w
     const updatePurchaseOrder = vi.fn().mockResolvedValue({
       success: true, purchaseOrderId: 39752, message: "saved",
     });
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
-      success: true, message: "Status updated.",
-    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const api = fakeApi({
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const store = mkStore();
     const tool = findUpdatePoTool(api, store);
@@ -569,10 +589,7 @@ describe("update_purchase_order — status by label, real errors, verify-after-w
     expect(updatePurchaseOrder).not.toHaveBeenCalled();
     // The dedicated transition endpoint gets the resolved code.
     expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(1);
-    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({
-      purchaseOrderId: 39752,
-      status: 3,
-    });
+    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({ purchaseOrderIds: [39752], status: 3 });
   });
 
   it("surfaces the API's error string verbatim (no JSON.stringify wrapping) — fixes the 'Failed: \"\"' bug", async () => {
@@ -1207,7 +1224,7 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
     const transitionPurchaseOrderStatus = vi.fn();
     const api = fakeApi({
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const tool = findUpdatePoTool(api, mkStore());
     const args = {
@@ -1244,13 +1261,11 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
     const updatePurchaseOrder = vi.fn().mockResolvedValue({
       success: true, purchaseOrderId: 39201, message: "saved",
     });
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
-      success: true, message: "Status updated.",
-    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const api = fakeApi({
       getPurchaseOrder: getPurchaseOrder as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const tool = findUpdatePoTool(api, mkStore());
     const args = {
@@ -1272,8 +1287,8 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
 
     // Sequence: demote(1) → /save → restore(2).
     expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(2);
-    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({ purchaseOrderId: 39201, status: 1 });
-    expect(transitionPurchaseOrderStatus.mock.calls[1][0]).toEqual({ purchaseOrderId: 39201, status: 2 });
+    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({ purchaseOrderIds: [39201], status: 1 });
+    expect(transitionPurchaseOrderStatus.mock.calls[1][0]).toEqual({ purchaseOrderIds: [39201], status: 2 });
     expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
     // /save MUST NOT carry a status field — that's the whole decoupling point.
     expect(updatePurchaseOrder.mock.calls[0][0].status).toBeUndefined();
@@ -1293,13 +1308,11 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
     const updatePurchaseOrder = vi.fn().mockResolvedValue({
       success: true, purchaseOrderId: 39201, message: "saved",
     });
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
-      success: true, message: "ok",
-    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const api = fakeApi({
       getPurchaseOrder: getPurchaseOrder as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const tool = findUpdatePoTool(api, mkStore());
     const args = {
@@ -1315,21 +1328,20 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
     await tool.handler({ ...args, confirmation_id: confirmationId }, api);
 
     // Restore target = 4 (Rejected), not the default Sent.
-    expect(transitionPurchaseOrderStatus.mock.calls[1][0]).toEqual({ purchaseOrderId: 39201, status: 4 });
+    expect(transitionPurchaseOrderStatus.mock.calls[1][0]).toEqual({ purchaseOrderIds: [39201], status: 4 });
   });
 
   it("auto-transition: rolls back to original status when the /save step fails between demote and restore", async () => {
     const getPurchaseOrder = vi.fn().mockResolvedValue(confirmedSnapshot);
     const updatePurchaseOrder = vi.fn().mockResolvedValue({
-      success: false, errors: "HTTP 500 — fake server failure",
+      success: false,
+      errors: "HTTP 500 — fake server failure",
     });
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
-      success: true, message: "ok",
-    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const api = fakeApi({
       getPurchaseOrder: getPurchaseOrder as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const tool = findUpdatePoTool(api, mkStore());
     const args = {
@@ -1357,16 +1369,17 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
   it("auto-transition: when the rollback ALSO fails, surfaces a loud 'PO stranded in Draft' message", async () => {
     const getPurchaseOrder = vi.fn().mockResolvedValue(confirmedSnapshot);
     const updatePurchaseOrder = vi.fn().mockResolvedValue({
-      success: false, errors: "save failed",
+      success: false,
+      errors: "save failed",
     });
     const transitionPurchaseOrderStatus = vi
       .fn()
-      .mockResolvedValueOnce({ success: true, message: "demoted" })
-      .mockResolvedValueOnce({ success: false, errors: "restore failed too" });
+      .mockResolvedValueOnce(okTransition())
+      .mockResolvedValueOnce(refusedTransition("restore failed too"));
     const api = fakeApi({
       getPurchaseOrder: getPurchaseOrder as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const tool = findUpdatePoTool(api, mkStore());
     const args = {
@@ -1404,7 +1417,7 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
     const api = fakeApi({
       getPurchaseOrder: getPurchaseOrder as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const tool = findUpdatePoTool(api, mkStore());
     const args = {
@@ -1438,13 +1451,13 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
     });
     const transitionPurchaseOrderStatus = vi
       .fn()
-      .mockResolvedValueOnce({ success: true, message: "demoted" })
-      .mockResolvedValueOnce({ success: false, errors: "The Signature field is required." })
-      .mockResolvedValueOnce({ success: true, message: "rolled back" });
+      .mockResolvedValueOnce(okTransition())
+      .mockResolvedValueOnce(refusedTransition("The Signature field is required."))
+      .mockResolvedValueOnce(okTransition());
     const api = fakeApi({
       getPurchaseOrder: getPurchaseOrder as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const tool = findUpdatePoTool(api, mkStore());
     const args = {
@@ -1484,13 +1497,13 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
     });
     const transitionPurchaseOrderStatus = vi
       .fn()
-      .mockResolvedValueOnce({ success: true, message: "demoted" })
-      .mockResolvedValueOnce({ success: false, errors: "Signature required" })
-      .mockResolvedValueOnce({ success: false, errors: "Rollback also failed (signature)" });
+      .mockResolvedValueOnce(okTransition())
+      .mockResolvedValueOnce(refusedTransition("Signature required"))
+      .mockResolvedValueOnce(refusedTransition("Rollback also failed (signature)"));
     const api = fakeApi({
       getPurchaseOrder: getPurchaseOrder as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const tool = findUpdatePoTool(api, mkStore());
     const args = {
@@ -1514,13 +1527,11 @@ describe("update_purchase_order — auto-transition unlock_if_locked (PR #61)", 
   it("auto-transition: aborts cleanly when the demote step itself fails (PO unchanged)", async () => {
     const getPurchaseOrder = vi.fn().mockResolvedValue(confirmedSnapshot);
     const updatePurchaseOrder = vi.fn();
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
-      success: false, errors: "BT refused demote",
-    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(refusedTransition("BT refused demote"));
     const api = fakeApi({
       getPurchaseOrder: getPurchaseOrder as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const tool = findUpdatePoTool(api, mkStore());
     const args = {
@@ -1561,11 +1572,9 @@ describe("transition_purchase_order_status — standalone tool (PR #62)", () => 
   });
 
   it("resolves label → code and calls api.transitionPurchaseOrderStatus", async () => {
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
-      success: true, message: "Status updated.",
-    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const api = fakeApi({
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const tool = findTransitionTool(api, mkStore());
 
@@ -1583,18 +1592,13 @@ describe("transition_purchase_order_status — standalone tool (PR #62)", () => 
     expect(textOf(result)).toContain("Sent");
 
     expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(1);
-    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({
-      purchaseOrderId: 39752,
-      status: 2,
-    });
+    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({ purchaseOrderIds: [39752], status: 2 });
   });
 
   it("accepts numeric status codes", async () => {
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
-      success: true, message: "ok",
-    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const api = fakeApi({
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const tool = findTransitionTool(api, mkStore());
 
@@ -1606,11 +1610,9 @@ describe("transition_purchase_order_status — standalone tool (PR #62)", () => 
   });
 
   it("surfaces transition errors from the API verbatim (e.g. signature requirement)", async () => {
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
-      success: false, errors: "The Signature field is required.",
-    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(refusedTransition("The Signature field is required."));
     const api = fakeApi({
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const tool = findTransitionTool(api, mkStore());
 
@@ -1638,7 +1640,7 @@ describe("transition_purchase_order_status — standalone tool (PR #62)", () => 
   it("review MEDIUM (M3): rejects arbitrary numeric status codes (status: 999)", async () => {
     const transitionPurchaseOrderStatus = vi.fn();
     const api = fakeApi({
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
     });
     const tool = findTransitionTool(api, mkStore());
     // status: 999 passes Zod (z.number() accepts any number) but
@@ -1698,9 +1700,7 @@ describe("transition_purchase_order_status — standalone tool (PR #62)", () => 
   });
 
   it("review MEDIUM (M5): idempotency_key replays cached result on retry — cross-tool consistency restored", async () => {
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
-      success: true, message: "ok",
-    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const getPurchaseOrder = vi.fn().mockResolvedValue({
       id: 39752, projectId: 185966, name: "x", number: "", prefix: "PO",
       status: 1, description: "",
@@ -1708,7 +1708,7 @@ describe("transition_purchase_order_status — standalone tool (PR #62)", () => 
       items: [], totalNumeric: 0,
     });
     const api = fakeApi({
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
       getPurchaseOrder: getPurchaseOrder as any,
     });
     const { IdempotencyStore } = await import("../../idempotency/index.js");
@@ -1767,9 +1767,7 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
     const updatePurchaseOrder = vi.fn().mockResolvedValue({
       success: true, purchaseOrderId: 39201, message: "saved",
     });
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
-      success: true, message: "Status updated.",
-    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const uploadAttachment = vi.fn().mockResolvedValue({
       fileId: 146061,
       name: "ADMO55739-F.pdf",
@@ -1782,7 +1780,7 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
       getPurchaseOrder: getPurchaseOrder as any,
       getCompany: getCompany as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
       uploadAttachment: uploadAttachment as any,
     });
     const tool = findTool(api, mkStore());
@@ -1804,13 +1802,13 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
     expect(execText).toContain("status → Sent");
     expect(execText).toContain("file_id 146061");
 
-    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({ purchaseOrderId: 39201, status: 1 });
+    expect(transitionPurchaseOrderStatus.mock.calls[0][0]).toEqual({ purchaseOrderIds: [39201], status: 1 });
     expect(updatePurchaseOrder).toHaveBeenCalledTimes(1);
     const updateCall = updatePurchaseOrder.mock.calls[0][0];
     expect(updateCall.items[0].total).toBe(19533.81);
     expect(updateCall.items[0].description).toBe("Confirmed order ADMO55739-F");
     expect(updateCall.items[0].budgetCode).toBe("7051");
-    expect(transitionPurchaseOrderStatus.mock.calls[1][0]).toEqual({ purchaseOrderId: 39201, status: 2 });
+    expect(transitionPurchaseOrderStatus.mock.calls[1][0]).toEqual({ purchaseOrderIds: [39201], status: 2 });
     expect(uploadAttachment).toHaveBeenCalledTimes(1);
     expect(uploadAttachment.mock.calls[0][0].module).toBe(1500);
     expect(uploadAttachment.mock.calls[0][0].moduleId).toBe(39201);
@@ -1939,15 +1937,13 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
     const updatePurchaseOrder = vi.fn().mockResolvedValue({
       success: true, purchaseOrderId: 39201, message: "saved",
     });
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
-      success: true, message: "ok",
-    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const uploadAttachment = vi.fn().mockRejectedValue(new Error("Upload failed (HTTP 500): server error"));
     const api = fakeApi({
       getPurchaseOrder: getPurchaseOrder as any,
       getCompany: getCompany as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
       uploadAttachment: uploadAttachment as any,
     });
     const tool = findTool(api, mkStore());
@@ -1996,7 +1992,7 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
     const updatePurchaseOrder = vi.fn().mockResolvedValue({
       success: true, purchaseOrderId: 39201,
     });
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({ success: true });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const uploadAttachment = vi.fn().mockResolvedValue({
       fileId: 1, name: "x.pdf", downloadUrl: "x", size: 1, module: 1500, moduleId: 39201,
     });
@@ -2004,7 +2000,7 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
       getPurchaseOrder: getPurchaseOrder as any,
       getCompany: getCompany as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
       uploadAttachment: uploadAttachment as any,
     });
     const tool = findTool(api, mkStore());
@@ -2034,9 +2030,7 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
     const updatePurchaseOrder = vi.fn().mockResolvedValue({
       success: true, purchaseOrderId: 39201, message: "saved",
     });
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({
-      success: true, message: "ok",
-    });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const uploadAttachment = vi.fn().mockResolvedValue({
       fileId: 1, name: "x.pdf", downloadUrl: "https://file.buildtools.app/o/0ye79w/file/hash/x?download=1", size: 1, module: 1500, moduleId: 39201,
     });
@@ -2044,7 +2038,7 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
       getPurchaseOrder: getPurchaseOrder as any,
       getCompany: getCompany as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
       uploadAttachment: uploadAttachment as any,
     });
     const tool = findTool(api, mkStore());
@@ -2072,17 +2066,17 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
     const transitionPurchaseOrderStatus = vi
       .fn()
       // Demote 3→1: OK
-      .mockResolvedValueOnce({ success: true, message: "demoted" })
+      .mockResolvedValueOnce(okTransition())
       // Restore-target 1→2 (Sent): FAILS
-      .mockResolvedValueOnce({ success: false, errors: "BT refused the transition" })
+      .mockResolvedValueOnce(refusedTransition("BT refused the transition"))
       // Rollback 1→3 (original Confirmed): OK
-      .mockResolvedValueOnce({ success: true, message: "rolled back" });
+      .mockResolvedValueOnce(okTransition());
     const uploadAttachment = vi.fn();
     const api = fakeApi({
       getPurchaseOrder: getPurchaseOrder as any,
       getCompany: getCompany as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
       uploadAttachment: uploadAttachment as any,
     });
     const tool = findTool(api, mkStore());
@@ -2092,14 +2086,14 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
     expect(exec.isError).toBe(true);
     expect(textOf(exec)).toContain("Rolled back to original");
     expect(transitionPurchaseOrderStatus).toHaveBeenCalledTimes(3);
-    expect(transitionPurchaseOrderStatus.mock.calls[2][0]).toEqual({ purchaseOrderId: 39201, status: 3 });
+    expect(transitionPurchaseOrderStatus.mock.calls[2][0]).toEqual({ purchaseOrderIds: [39201], status: 3 });
   });
 
   it("review HIGH (idempotency): retry with same idempotency_key + same args returns cached result, no second BT call", async () => {
     const getPurchaseOrder = vi.fn().mockResolvedValue({ ...poSnapshot, status: 1 });
     const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
     const updatePurchaseOrder = vi.fn().mockResolvedValue({ success: true });
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({ success: true });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const uploadAttachment = vi.fn().mockResolvedValue({
       fileId: 1, name: "x.pdf", downloadUrl: "https://file.buildtools.app/o/0ye79w/file/hash/x?download=1", size: 1, module: 1500, moduleId: 39201,
     });
@@ -2107,7 +2101,7 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
       getPurchaseOrder: getPurchaseOrder as any,
       getCompany: getCompany as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
       uploadAttachment: uploadAttachment as any,
     });
     const { IdempotencyStore } = await import("../../idempotency/index.js");
@@ -2156,7 +2150,7 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
       ...poSnapshot, companyId: 42, companyName: "M&D Construction LLC",
     });
     const updatePurchaseOrder = vi.fn().mockResolvedValue({ success: true });
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({ success: true });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const uploadAttachment = vi.fn().mockResolvedValue({
       fileId: 1, name: "x.pdf", downloadUrl: "https://file.buildtools.app/o/x/file/hash/x?download=1", size: 1, module: 1500, moduleId: 39201,
     });
@@ -2164,7 +2158,7 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
       searchCompanies: searchCompanies as any,
       getPurchaseOrder: getPurchaseOrder as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
       uploadAttachment: uploadAttachment as any,
     });
     const tool = findTool(api, mkStore());
@@ -2185,7 +2179,7 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
     const getPurchaseOrder = vi.fn().mockResolvedValue({ ...poSnapshot, status: 1 });
     const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
     const updatePurchaseOrder = vi.fn().mockResolvedValue({ success: true });
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({ success: true });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const uploadAttachment = vi.fn().mockResolvedValue({
       fileId: 1, name: "x.pdf", downloadUrl: "https://file.buildtools.app/o/x/file/hash/x?download=1", size: 1, module: 1500, moduleId: 39201,
     });
@@ -2193,7 +2187,7 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
       getPurchaseOrder: getPurchaseOrder as any,
       getCompany: getCompany as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
       uploadAttachment: uploadAttachment as any,
     });
     const tool = findTool(api, mkStore());
@@ -2281,7 +2275,7 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
     const getPurchaseOrder = vi.fn().mockResolvedValue({ ...poSnapshot, status: 1 });
     const getCompany = vi.fn().mockResolvedValue({ name: "Euro Stone Craft" });
     const updatePurchaseOrder = vi.fn().mockResolvedValue({ success: true });
-    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue({ success: true });
+    const transitionPurchaseOrderStatus = vi.fn().mockResolvedValue(okTransition());
     const uploadAttachment = vi.fn().mockResolvedValue({
       fileId: 1,
       name: "x.pdf",
@@ -2295,7 +2289,7 @@ describe("apply_vendor_quote — workflow consolidator (PR #63)", () => {
       getPurchaseOrder: getPurchaseOrder as any,
       getCompany: getCompany as any,
       updatePurchaseOrder: updatePurchaseOrder as any,
-      transitionPurchaseOrderStatus: transitionPurchaseOrderStatus as any,
+      bulkTransitionPurchaseOrderStatusesRaw: transitionPurchaseOrderStatus as any,
       uploadAttachment: uploadAttachment as any,
     });
     const tool = findTool(api, mkStore());
@@ -2686,14 +2680,9 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
   }
 
   it("happy path: all 3 POs transition successfully", async () => {
-    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
-      success: true,
-      message: "Status updated.",
-      successCount: 3,
-      failureCount: 0,
-    });
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue(okTransition(3, 0));
     const api = fakeApi({
-      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+      bulkTransitionPurchaseOrderStatusesRaw: bulkTransitionPurchaseOrderStatuses as any,
     });
     const tool = findTool(api, mkStore());
     const args = { purchase_order_ids: [39201, 39202, 39203], status: "Sent" as const };
@@ -2713,14 +2702,9 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
   });
 
   it("partial failure: 7 succeed, 3 fail — NOT an error, surfaces breakdown", async () => {
-    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
-      success: true, // wire-level OK
-      message: "Partial: 7 succeeded, 3 failed.",
-      successCount: 7,
-      failureCount: 3,
-    });
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue(okTransition(7, 3));
     const api = fakeApi({
-      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+      bulkTransitionPurchaseOrderStatusesRaw: bulkTransitionPurchaseOrderStatuses as any,
     });
     const tool = findTool(api, mkStore());
     const args = {
@@ -2737,13 +2721,10 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
     expect(textOf(exec)).toContain("get_purchase_order");
   });
 
-  it("wire-level failure: surfaces BT's error verbatim", async () => {
-    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
-      success: false,
-      errors: "HTTP 500 — BT internal error",
-    });
+  it("a structured refusal surfaces BT's reason and says nothing changed", async () => {
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue(refusedTransition("HTTP 500 — BT internal error"));
     const api = fakeApi({
-      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+      bulkTransitionPurchaseOrderStatusesRaw: bulkTransitionPurchaseOrderStatuses as any,
     });
     const tool = findTool(api, mkStore());
     const args = { purchase_order_ids: [1, 2], status: "Sent" as const };
@@ -2751,8 +2732,33 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
     const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
     const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
     expect(exec.isError).toBe(true);
-    expect(textOf(exec)).toContain("Bulk transition failed at the wire");
+    expect(textOf(exec)).toContain("Bulk transition refused");
     expect(textOf(exec)).toContain("HTTP 500");
+    // Upstream refused, so the claim is safe to make. The ambiguous case is
+    // covered separately and must NOT say this.
+    expect(textOf(exec)).toContain("No purchase orders were changed");
+  });
+
+  it("an unreadable response does NOT claim nothing changed", async () => {
+    // The distinction the outcome model exists for. Some of these POs may have
+    // moved; telling the caller "no purchase orders were changed" would send
+    // them to retry a batch that is already half-applied.
+    const raw = vi.fn().mockResolvedValue({
+      dispatched: true,
+      status: 500,
+      body: "<html>gateway</html>",
+    });
+    const api = fakeApi({ bulkTransitionPurchaseOrderStatusesRaw: raw as any });
+    const tool = findTool(api, mkStore());
+    const args = { purchase_order_ids: [1, 2], status: "Sent" as const };
+    const prompt = await tool.handler(args, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+
+    const exec = await tool.handler({ ...args, confirmation_id: cid }, api);
+
+    expect(textOf(exec)).toContain("Outcome unknown");
+    expect(textOf(exec)).toContain("get_purchase_order");
+    expect(textOf(exec)).not.toContain("No purchase orders were changed");
   });
 
   it("Zod: max 50 ids per call", async () => {
@@ -2785,11 +2791,9 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
   });
 
   it("PR #69 review HIGH 2: prompt shows ALL ids (no truncation) so adversarial expansion is visible", async () => {
-    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
-      success: true, successCount: 8, failureCount: 0,
-    });
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue(okTransition(8, 0));
     const api = fakeApi({
-      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+      bulkTransitionPurchaseOrderStatusesRaw: bulkTransitionPurchaseOrderStatuses as any,
     });
     const tool = findTool(api, mkStore());
     const args = {
@@ -2805,11 +2809,9 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
   });
 
   it("idempotency: order-insensitive — {3,1,2} and {1,2,3} hit the same cache entry", async () => {
-    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
-      success: true, successCount: 3, failureCount: 0,
-    });
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue(okTransition(3, 0));
     const api = fakeApi({
-      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+      bulkTransitionPurchaseOrderStatusesRaw: bulkTransitionPurchaseOrderStatuses as any,
     });
     const { IdempotencyStore } = await import("../../idempotency/index.js");
     const idem = new IdempotencyStore();
@@ -2835,14 +2837,14 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
 
   it("PR #69 review HIGH 1: partial-failure surfaces BT's actual error message (not '(no detail)')", async () => {
     const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
-      success: true,
-      successCount: 0,
-      failureCount: 1,
-      message: "Partial: 0 succeeded, 1 failed.",
-      errors: "The Signature field is required.", // BT's actual reason
+      dispatched: true,
+      status: 200,
+      body: "{}",
+      // BT reports the reason in `msg` alongside the counts.
+      json: { r: 1, s: 0, f: 1, msg: ["The Signature field is required."] },
     });
     const api = fakeApi({
-      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+      bulkTransitionPurchaseOrderStatusesRaw: bulkTransitionPurchaseOrderStatuses as any,
     });
     const tool = findTool(api, mkStore());
     const args = { purchase_order_ids: [1], status: "Confirmed" as const };
@@ -2855,11 +2857,9 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
   });
 
   it("PR #69 review MEDIUM 7: partial-failure includes enumeration warning", async () => {
-    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
-      success: true, successCount: 5, failureCount: 5,
-    });
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue(okTransition(5, 5));
     const api = fakeApi({
-      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+      bulkTransitionPurchaseOrderStatusesRaw: bulkTransitionPurchaseOrderStatuses as any,
     });
     const tool = findTool(api, mkStore());
     const args = {
@@ -2888,14 +2888,9 @@ describe("bulk_transition_purchase_orders — PR #69", () => {
   });
 
   it("partial-failure result is CACHED (so retries replay the report, not re-execute)", async () => {
-    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue({
-      success: true,
-      successCount: 5,
-      failureCount: 5,
-      message: "Partial",
-    });
+    const bulkTransitionPurchaseOrderStatuses = vi.fn().mockResolvedValue(okTransition(5, 5));
     const api = fakeApi({
-      bulkTransitionPurchaseOrderStatuses: bulkTransitionPurchaseOrderStatuses as any,
+      bulkTransitionPurchaseOrderStatusesRaw: bulkTransitionPurchaseOrderStatuses as any,
     });
     const { IdempotencyStore } = await import("../../idempotency/index.js");
     const idem = new IdempotencyStore();

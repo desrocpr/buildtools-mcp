@@ -203,3 +203,61 @@ describe("writes: mock and BuildTools adapter agree on the outcome vocabulary", 
     await expect(mock.createProject({ name: "b" })).resolves.toBeDefined();
   });
 });
+
+describe("bulk writes: `ok` means applied, not 'everything succeeded'", () => {
+  // The reading that had to be fixed before ~20 methods each picked one
+  // implicitly. A batch that moved 7 of 10 rows is an APPLIED call with a
+  // partial result — not a failure. Collapsing it into a boolean loses the
+  // only number the caller can act on.
+
+  it("reports a partial as ok with counts, not as a failure", async () => {
+    const mock = new MockOperationsApi({
+      purchaseOrders: [{ id: 1, status: 1 }, { id: 2, status: 1 }],
+    });
+
+    const outcome = await mock.transitionPurchaseOrders({
+      purchaseOrderIds: [1, 2, 999], // 999 does not exist
+      status: 2,
+    });
+
+    expect(outcome.status).toBe("ok");
+    expect(outcome.status === "ok" && outcome.data).toEqual({
+      succeeded: 2,
+      failed: 1,
+    });
+  });
+
+  it("actually moves the rows, so a follow-up read sees the new status", async () => {
+    // Asserting only the counts would pass against a mock that changed
+    // nothing — the same blind spot a call-spy has.
+    const mock = new MockOperationsApi({
+      purchaseOrders: [{ id: 1, status: 1 }],
+    });
+
+    await mock.transitionPurchaseOrders({ purchaseOrderIds: [1], status: 5 });
+
+    const rows = (await mock.getPurchaseOrders({})) as {
+      data: Array<Record<string, unknown>>;
+    };
+    expect(rows.data[0]?.status).toBe(5);
+  });
+
+  it("carries an ambiguous transition's probe, which names the ids to re-read", async () => {
+    const mock = new MockOperationsApi({ purchaseOrders: [{ id: 1, status: 1 }] });
+    mock.scriptWrites("purchaseOrders", ["ambiguous"]);
+
+    const outcome = await mock.transitionPurchaseOrders({
+      purchaseOrderIds: [1, 2],
+      status: 2,
+    });
+
+    expect(outcome.status).toBe("ambiguous");
+    // For a transition there is no new record to search for — the ids the
+    // caller already holds ARE the reconcile handle.
+    expect(outcome.status === "ambiguous" && outcome.probe).toEqual({
+      kind: "search",
+      resource: "purchaseOrders",
+      query: "1,2",
+    });
+  });
+});

@@ -29,7 +29,12 @@ import {
   storeIdempotencyResult,
 } from "../idempotency/index.js";
 import { getOperationsManagementApi } from "../operations/factory.js";
-import { isOk, type WriteOutcome } from "../operations/outcomes.js";
+import {
+  isOk,
+  type WriteAmbiguous,
+  type WriteFailed,
+  type WriteOutcome,
+} from "../operations/outcomes.js";
 import type {
   CreatedRecord,
   OperationsManagementApi,
@@ -161,6 +166,32 @@ function remember(
 /** The outcome behind a result, when it came from a neutral write. */
 function outcomeOf(result: ToolResult): WriteOutcome<unknown> | undefined {
   return OUTCOME_BY_RESULT.get(result);
+}
+
+/**
+ * Render a bulk write that was NOT applied.
+ *
+ * Separate from `renderOutcome` because the reconcile advice is different. For
+ * a create, "check whether it exists" is the whole job. For a batch, an
+ * ambiguous outcome may mean SOME of the ids moved and the rest did not — so
+ * the caller has to re-read every id, not look for one record, and a blind
+ * retry would re-transition the ones that already moved.
+ */
+function formatBulkNotApplied(
+  outcome: WriteFailed | WriteAmbiguous,
+  total: number,
+): ToolResult {
+  if (outcome.status === "failed") {
+    return errorMarkdown(
+      `**Bulk transition refused.** ${escapeMarkdownInline(outcome.reason)} No purchase orders were changed.`,
+    );
+  }
+  return errorMarkdown(
+    `**Outcome unknown — do NOT retry blindly.** The transition of ${total} purchase order(s) may have been applied in whole, in part, or not at all. ` +
+      `${escapeMarkdownInline(outcome.reason)}\n\n` +
+      `Re-read each purchase order with \`get_purchase_order\` and compare its status before doing anything else. ` +
+      `Retrying now would re-transition any that already moved.`,
+  );
 }
 
 function renderOutcome(
@@ -883,17 +914,18 @@ export function createMutationTools(
     },
     async (a) => {
       try {
-        const result = await getApi().createPurchaseOrder({
-          name: a.name,
-          projectId: a.project_id,
-          companyId: a.company_id,
-          prefix: a.prefix,
-          total: a.total,
-          notes: a.notes,
-          items: a.items,
-        });
-        if (result.success) return markdown(`Purchase order **#${result.purchaseOrderId}** created. ${result.message ?? ""}`);
-        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+        return formatWriteOutcome(
+          await opsOf(getApi()).createPurchaseOrder({
+            name: a.name,
+            projectId: a.project_id,
+            companyId: a.company_id,
+            prefix: a.prefix,
+            total: a.total,
+            notes: a.notes,
+            items: a.items,
+          }),
+          { noun: "Purchase order", toolName: "create_purchase_order" },
+        );
       } catch (err) { return formatError(err, "create_purchase_order"); }
     },
   );
@@ -1084,13 +1116,14 @@ export function createMutationTools(
 
         // === Auto-transition: demote first if needed ===
         if (isLocked && a.unlock_if_locked) {
-          const demote = await getApi().transitionPurchaseOrderStatus({
+          const demote = await transitionStep({
             purchaseOrderId: a.purchase_order_id,
             status: 1, // Draft / Cancel
           });
           if (!demote.success) {
             return errorMarkdown(
-              `**Auto-transition: demote failed** for PO #${a.purchase_order_id}: ${String(demote.errors ?? "(no detail)")}. PO unchanged.`,
+              `**Auto-transition: demote failed** for PO #${a.purchase_order_id}: ${String(demote.errors ?? "(no detail)")}.` +
+                stateClaim(demote, "PO unchanged."),
             );
           }
           workflowSteps.push(
@@ -1142,13 +1175,15 @@ export function createMutationTools(
             // status so the PO doesn't get stranded in Draft.
             let restoreNote = "";
             if (isLocked && a.unlock_if_locked && currentStatus !== null) {
-              const restore = await getApi().transitionPurchaseOrderStatus({
+              const restore = await transitionStep({
                 purchaseOrderId: a.purchase_order_id,
                 status: currentStatus,
               });
               restoreNote = restore.success
                 ? `\n\n_Restored to original **${poStatusLabel(currentStatus)}** state._`
-                : `\n\n**Could not restore to ${poStatusLabel(currentStatus)}** (${String(restore.errors)}). **PO is now in Draft — fix manually in the BT UI.**`;
+                : restore.ambiguous
+                  ? `\n\n**Restore to ${poStatusLabel(currentStatus)} may or may not have applied** (${String(restore.errors)}). Re-read the PO with \`get_purchase_order\` before fixing anything manually.`
+                  : `\n\n**Could not restore to ${poStatusLabel(currentStatus)}** (${String(restore.errors)}). **PO is now in Draft — fix manually in the BT UI.**`;
             }
             return errorMarkdown(
               `**Failed to update PO #${a.purchase_order_id}**: ${errorBody}${restoreNote}`,
@@ -1173,7 +1208,7 @@ export function createMutationTools(
           finalTarget = targetStatusCode;
         }
         if (finalTarget !== undefined) {
-          const transition = await getApi().transitionPurchaseOrderStatus({
+          const transition = await transitionStep({
             purchaseOrderId: a.purchase_order_id,
             status: finalTarget,
           });
@@ -1188,13 +1223,15 @@ export function createMutationTools(
               ? "Content updated"
               : "No content change requested";
             if (isLocked && a.unlock_if_locked && currentStatus !== null) {
-              const rollback = await getApi().transitionPurchaseOrderStatus({
+              const rollback = await transitionStep({
                 purchaseOrderId: a.purchase_order_id,
                 status: currentStatus,
               });
               const rollbackNote = rollback.success
                 ? `\n\n_Rolled back to original **${poStatusLabel(currentStatus)}** state — your content edits remain applied but the status didn't move forward._`
-                : `\n\n**Rollback to ${poStatusLabel(currentStatus)} ALSO failed** (${String(rollback.errors ?? "(no detail)")}). **PO is now in Draft with your content edits applied — fix manually in the BT UI.**`;
+                : rollback.ambiguous
+                  ? `\n\n**Rollback to ${poStatusLabel(currentStatus)} may or may not have applied** (${String(rollback.errors ?? "(no detail)")}). Your content edits are applied; re-read the PO with \`get_purchase_order\` to see where the status landed.`
+                  : `\n\n**Rollback to ${poStatusLabel(currentStatus)} ALSO failed** (${String(rollback.errors ?? "(no detail)")}). **PO is now in Draft with your content edits applied — fix manually in the BT UI.**`;
               return errorMarkdown(
                 `**${headlineVerb}** for PO #${a.purchase_order_id} but **status transition to ${poStatusLabel(finalTarget)} failed**: ${String(transition.errors ?? "(no detail)")}.${rollbackNote}`,
               );
@@ -1443,13 +1480,15 @@ export function createMutationTools(
             `**Error calling \`transition_purchase_order_status\`**: status code was not resolved`,
           );
         }
-        const result = await getApi().transitionPurchaseOrderStatus({
+        const result = await transitionStep({
           purchaseOrderId: a.purchase_order_id,
           status: code,
         });
         if (!result.success) {
           return errorMarkdown(
-            `**Failed to transition PO #${a.purchase_order_id} to ${poStatusLabel(code)}**: ${String(result.errors ?? "(no detail)")}`,
+            result.ambiguous
+              ? `**Outcome unknown — do NOT retry blindly.** The transition of PO #${a.purchase_order_id} to ${poStatusLabel(code)} may or may not have been applied: ${String(result.errors ?? "(no detail)")}. Re-read it with \`get_purchase_order\` first.`
+              : `**Failed to transition PO #${a.purchase_order_id} to ${poStatusLabel(code)}**: ${String(result.errors ?? "(no detail)")}`,
           );
         }
         return markdown(
@@ -1493,24 +1532,29 @@ export function createMutationTools(
             `**Error calling \`bulk_transition_purchase_orders\`**: status code was not resolved`,
           );
         }
-        const result = await getApi().bulkTransitionPurchaseOrderStatuses({
+        const outcome = await opsOf(getApi()).transitionPurchaseOrders({
           purchaseOrderIds: a.purchase_order_ids,
           status: code,
         });
-        if (!result.success) {
-          // Wire-level failure (BT returned r:0). Report the BT message
-          // verbatim — there's no per-id breakdown to share.
-          return errorMarkdown(
-            `**Bulk transition failed at the wire**: ${String(result.errors ?? "(no detail)")}`,
+        if (!isOk(outcome)) {
+          // A wire-level refusal and an unreadable response are no longer the
+          // same thing. The second may have moved some of these POs, and the
+          // caller must re-read before deciding what to do about the rest.
+          return remember(
+            outcome,
+            formatBulkNotApplied(outcome, a.purchase_order_ids.length),
           );
         }
-        // Wire-level success. Surface per-id breakdown.
+        // The call was applied. Surface the per-id breakdown.
         const total = a.purchase_order_ids.length;
-        const succ = result.successCount ?? 0;
-        const fail = result.failureCount ?? 0;
+        const succ = outcome.data.succeeded;
+        const fail = outcome.data.failed;
         if (fail === 0) {
-          return markdown(
-            `All **${total}** purchase order(s) transitioned to **${poStatusLabel(code)}** (${code}).`,
+          return remember(
+            outcome,
+            markdown(
+              `All **${total}** purchase order(s) transitioned to **${poStatusLabel(code)}** (${code}).`,
+            ),
           );
         }
         // Partial success — the bulk result is NOT an error (some
@@ -1525,12 +1569,18 @@ export function createMutationTools(
         // indistinguishable from status-transition failures. If
         // caller didn't expect failures, the IDs may include ones
         // they don't have access to.
-        const btReason = result.errors ? `\n\nBT message: ${String(result.errors)}` : "";
-        return markdown(
-          `**Partial bulk transition**: ${succ} of ${total} purchase orders transitioned to **${poStatusLabel(code)}** (${code}); ${fail} failed.${btReason}\n\n` +
-            `_BT doesn't return per-id results — refetch the POs via \`get_purchase_order\` to identify which ${fail} didn't transition._\n\n` +
-            `_If you did not expect any failures, verify all provided IDs belong to a project you have write access to — BT's bulk endpoint silently rejects unauthorized IDs and counts them as failures, indistinguishable from status-transition errors._\n\n` +
-            `_Common cause: promotion to Confirmed requires a per-PO signature; demote-to-Draft and Sent transitions usually succeed in bulk._`,
+        return remember(
+          outcome,
+          markdown(
+            `**Partial bulk transition**: ${succ} of ${total} purchase orders transitioned to **${poStatusLabel(code)}** (${code}); ${fail} failed.` +
+              (outcome.data.message
+                ? `\n\nBT message: ${escapeMarkdownInline(outcome.data.message)}`
+                : "") +
+              `\n\n` +
+              `_BT doesn't return per-id results — refetch the POs via \`get_purchase_order\` to identify which ${fail} didn't transition._\n\n` +
+              `_If you did not expect any failures, verify all provided IDs belong to a project you have write access to — BT's bulk endpoint silently rejects unauthorized IDs and counts them as failures, indistinguishable from status-transition errors._\n\n` +
+              `_Common cause: promotion to Confirmed requires a per-PO signature; demote-to-Draft and Sent transitions usually succeed in bulk._`,
+          ),
         );
       } catch (err) {
         return formatError(err, "bulk_transition_purchase_orders");
@@ -1875,13 +1925,15 @@ export function createMutationTools(
 
         // 1a. Demote if locked.
         if (isLocked && unlockIfLocked) {
-          const demote = await getApi().transitionPurchaseOrderStatus({
+          const demote = await transitionStep({
             purchaseOrderId: po.id,
             status: 1,
           });
           if (!demote.success) {
             return errorMarkdown(
-              `**Demote failed** for PO #${po.id}: ${String(demote.errors ?? "(no detail)")}. PO unchanged; no attachment uploaded.`,
+              `**Demote failed** for PO #${po.id}: ${String(demote.errors ?? "(no detail)")}.` +
+                stateClaim(demote, "PO unchanged;") +
+                " No attachment was uploaded.",
             );
           }
           workflowSteps.push(`demoted ${poStatusLabel(pre!.status as number)} → Draft`);
@@ -1911,13 +1963,15 @@ export function createMutationTools(
           // Restore lock state on failure (mirrors update_purchase_order).
           let restoreNote = "";
           if (isLocked && unlockIfLocked && pre?.status !== null) {
-            const restore = await getApi().transitionPurchaseOrderStatus({
+            const restore = await transitionStep({
               purchaseOrderId: po.id,
               status: pre!.status as number,
             });
             restoreNote = restore.success
               ? `\n\n_Rolled back to **${poStatusLabel(pre!.status as number)}**._`
-              : `\n\n**Rollback ALSO failed**. PO is now in Draft — fix manually in the BT UI.`;
+              : restore.ambiguous
+                ? `\n\n**Rollback may or may not have applied.** Re-read the PO with \`get_purchase_order\` before fixing anything manually.`
+                : `\n\n**Rollback ALSO failed**. PO is now in Draft — fix manually in the BT UI.`;
           }
           return errorMarkdown(
             `**Update step failed** for PO #${po.id}: ${String(updateResult.errors ?? "(no detail)")}${restoreNote}`,
@@ -1932,7 +1986,7 @@ export function createMutationTools(
         // email trigger.
         const currentAfterEdit = isLocked && unlockIfLocked ? 1 : originalStatus;
         if (finalStatusCode !== currentAfterEdit) {
-          const transitionResult = await getApi().transitionPurchaseOrderStatus({
+          const transitionResult = await transitionStep({
             purchaseOrderId: po.id,
             status: finalStatusCode,
           });
@@ -1944,13 +1998,15 @@ export function createMutationTools(
             // PO doesn't get stranded in a state the caller didn't ask
             // for. Report concretely either way.
             if (isLocked && unlockIfLocked && originalStatus !== null) {
-              const rollback = await getApi().transitionPurchaseOrderStatus({
+              const rollback = await transitionStep({
                 purchaseOrderId: po.id,
                 status: originalStatus,
               });
               const rollbackNote = rollback.success
                 ? `\n\n_Rolled back to original **${poStatusLabel(originalStatus)}** state — your content edits remain applied but the status didn't move forward._`
-                : `\n\n**Rollback to ${poStatusLabel(originalStatus)} ALSO failed** (${String(rollback.errors ?? "(no detail)")}). **PO is now in Draft with content applied — fix manually in the BT UI.**`;
+                : rollback.ambiguous
+                  ? `\n\n**Rollback to ${poStatusLabel(originalStatus)} may or may not have applied** (${String(rollback.errors ?? "(no detail)")}). Content is applied; re-read the PO with \`get_purchase_order\` to see where the status landed.`
+                  : `\n\n**Rollback to ${poStatusLabel(originalStatus)} ALSO failed** (${String(rollback.errors ?? "(no detail)")}). **PO is now in Draft with content applied — fix manually in the BT UI.**`;
               return errorMarkdown(
                 `**Content updated** for PO #${po.id} but **status transition to ${poStatusLabel(finalStatusCode)} failed**: ${String(transitionResult.errors ?? "(no detail)")}.${rollbackNote}`,
               );
@@ -2523,6 +2579,67 @@ export function createMutationTools(
   );
 
   // -- Build ToolDefinition array ------------------------------------------
+
+  /**
+   * One status transition inside a multi-step PO workflow.
+   *
+   * These flows are compensating transactions — demote, edit, restore — and
+   * every step's next move depends on knowing whether the previous one
+   * applied. The boolean the old client returned could not say "I don't know",
+   * so an unreadable response looked exactly like a refusal, and the code
+   * confidently told the user "PO unchanged" for a PO it had possibly just
+   * demoted.
+   *
+   * `ambiguous` is what the call sites branch on to avoid making that claim.
+   */
+  interface TransitionStep {
+    success: boolean;
+    ambiguous: boolean;
+    errors?: string;
+    message?: string;
+  }
+
+  async function transitionStep(input: {
+    purchaseOrderId: string | number;
+    status: number;
+  }): Promise<TransitionStep> {
+    const outcome = await opsOf(getApi()).transitionPurchaseOrders({
+      purchaseOrderIds: [input.purchaseOrderId],
+      status: input.status,
+    });
+    if (isOk(outcome)) {
+      // The CALL was applied. For a single id, `failed: 1` means BuildTools
+      // accepted the request and declined this PO — a real, known refusal.
+      return outcome.data.failed === 0
+        ? { success: true, ambiguous: false, message: "Status updated." }
+        : {
+            success: false,
+            ambiguous: false,
+            errors:
+              "BuildTools accepted the request but did not transition this purchase order. " +
+              "Promotion to Confirmed requires a per-PO signature, which this tool cannot supply.",
+          };
+    }
+    return {
+      success: false,
+      ambiguous: outcome.status === "ambiguous",
+      errors: outcome.reason,
+    };
+  }
+
+  /**
+   * A claim about the PO's state after a failed step.
+   *
+   * Only safe to assert when the step's failure was KNOWN. Under ambiguity the
+   * honest answer is "go and look", and saying anything else is the specific
+   * way this tool would mislead someone into a manual fix they do not need —
+   * or out of one they do.
+   */
+  function stateClaim(step: TransitionStep, knownClaim: string): string {
+    return step.ambiguous
+      ? " The transition may or may not have been applied — re-read the PO with `get_purchase_order` before acting."
+      : ` ${knownClaim}`;
+  }
 
   function makeTool(
     name: string,
