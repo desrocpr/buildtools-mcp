@@ -1122,7 +1122,7 @@ export function createMutationTools(
           });
           if (!demote.success) {
             return errorMarkdown(
-              `**Auto-transition: demote failed** for PO #${a.purchase_order_id}: ${String(demote.errors ?? "(no detail)")}.` +
+              `**Auto-transition: demote failed** for PO #${a.purchase_order_id}: ${escapeMarkdownInline(demote.errors ?? "(no detail)")}.` +
                 stateClaim(demote, "PO unchanged."),
             );
           }
@@ -1182,8 +1182,8 @@ export function createMutationTools(
               restoreNote = restore.success
                 ? `\n\n_Restored to original **${poStatusLabel(currentStatus)}** state._`
                 : restore.ambiguous
-                  ? `\n\n**Restore to ${poStatusLabel(currentStatus)} may or may not have applied** (${String(restore.errors)}). Re-read the PO with \`get_purchase_order\` before fixing anything manually.`
-                  : `\n\n**Could not restore to ${poStatusLabel(currentStatus)}** (${String(restore.errors)}). **PO is now in Draft — fix manually in the BT UI.**`;
+                  ? `\n\n**Restore to ${poStatusLabel(currentStatus)} may or may not have applied** (${escapeMarkdownInline(restore.errors)}). Re-read the PO with \`get_purchase_order\` before fixing anything manually.`
+                  : `\n\n**Could not restore to ${poStatusLabel(currentStatus)}** (${escapeMarkdownInline(restore.errors)}). **PO is now in Draft — fix manually in the BT UI.**`;
             }
             return errorMarkdown(
               `**Failed to update PO #${a.purchase_order_id}**: ${errorBody}${restoreNote}`,
@@ -1230,10 +1230,10 @@ export function createMutationTools(
               const rollbackNote = rollback.success
                 ? `\n\n_Rolled back to original **${poStatusLabel(currentStatus)}** state — your content edits remain applied but the status didn't move forward._`
                 : rollback.ambiguous
-                  ? `\n\n**Rollback to ${poStatusLabel(currentStatus)} may or may not have applied** (${String(rollback.errors ?? "(no detail)")}). Your content edits are applied; re-read the PO with \`get_purchase_order\` to see where the status landed.`
-                  : `\n\n**Rollback to ${poStatusLabel(currentStatus)} ALSO failed** (${String(rollback.errors ?? "(no detail)")}). **PO is now in Draft with your content edits applied — fix manually in the BT UI.**`;
+                  ? `\n\n**Rollback to ${poStatusLabel(currentStatus)} may or may not have applied** (${escapeMarkdownInline(rollback.errors ?? "(no detail)")}). Your content edits are applied; re-read the PO with \`get_purchase_order\` to see where the status landed.`
+                  : `\n\n**Rollback to ${poStatusLabel(currentStatus)} ALSO failed** (${escapeMarkdownInline(rollback.errors ?? "(no detail)")}). **PO is now in Draft with your content edits applied — fix manually in the BT UI.**`;
               return errorMarkdown(
-                `**${headlineVerb}** for PO #${a.purchase_order_id} but **status transition to ${poStatusLabel(finalTarget)} failed**: ${String(transition.errors ?? "(no detail)")}.${rollbackNote}`,
+                `**${headlineVerb}** for PO #${a.purchase_order_id} but **status transition to ${poStatusLabel(finalTarget)} failed**: ${escapeMarkdownInline(transition.errors ?? "(no detail)")}.${rollbackNote}`,
               );
             }
             // Non-auto-transition path: nothing to roll back (caller is
@@ -1248,7 +1248,7 @@ export function createMutationTools(
                 ? `\n\n_PO status is unchanged at **${poStatusLabel(currentStatus)}**._`
                 : "";
             return errorMarkdown(
-              `**${headlineVerb}** for PO #${a.purchase_order_id} but **status transition to ${poStatusLabel(finalTarget)} failed**: ${String(transition.errors ?? "(no detail)")}.${stateNote}`,
+              `**${headlineVerb}** for PO #${a.purchase_order_id} but **status transition to ${poStatusLabel(finalTarget)} failed**: ${escapeMarkdownInline(transition.errors ?? "(no detail)")}.${stateNote}`,
             );
           }
           workflowSteps.push(`set status → ${poStatusLabel(finalTarget)}`);
@@ -1491,8 +1491,8 @@ export function createMutationTools(
         if (!result.success) {
           return errorMarkdown(
             result.ambiguous
-              ? `**Outcome unknown — do NOT retry blindly.** The transition of PO #${a.purchase_order_id} to ${poStatusLabel(code)} may or may not have been applied: ${String(result.errors ?? "(no detail)")}. Re-read it with \`get_purchase_order\` first.`
-              : `**Failed to transition PO #${a.purchase_order_id} to ${poStatusLabel(code)}**: ${String(result.errors ?? "(no detail)")}`,
+              ? `**Outcome unknown — do NOT retry blindly.** The transition of PO #${a.purchase_order_id} to ${poStatusLabel(code)} may or may not have been applied: ${escapeMarkdownInline(result.errors ?? "(no detail)")}. Re-read it with \`get_purchase_order\` first.`
+              : `**Failed to transition PO #${a.purchase_order_id} to ${poStatusLabel(code)}**: ${escapeMarkdownInline(result.errors ?? "(no detail)")}`,
           );
         }
         return markdown(
@@ -1935,7 +1935,7 @@ export function createMutationTools(
           });
           if (!demote.success) {
             return errorMarkdown(
-              `**Demote failed** for PO #${po.id}: ${String(demote.errors ?? "(no detail)")}.` +
+              `**Demote failed** for PO #${po.id}: ${escapeMarkdownInline(demote.errors ?? "(no detail)")}.` +
                 stateClaim(demote, "PO unchanged;") +
                 " No attachment was uploaded.",
             );
@@ -2009,14 +2009,14 @@ export function createMutationTools(
               const rollbackNote = rollback.success
                 ? `\n\n_Rolled back to original **${poStatusLabel(originalStatus)}** state — your content edits remain applied but the status didn't move forward._`
                 : rollback.ambiguous
-                  ? `\n\n**Rollback to ${poStatusLabel(originalStatus)} may or may not have applied** (${String(rollback.errors ?? "(no detail)")}). Content is applied; re-read the PO with \`get_purchase_order\` to see where the status landed.`
-                  : `\n\n**Rollback to ${poStatusLabel(originalStatus)} ALSO failed** (${String(rollback.errors ?? "(no detail)")}). **PO is now in Draft with content applied — fix manually in the BT UI.**`;
+                  ? `\n\n**Rollback to ${poStatusLabel(originalStatus)} may or may not have applied** (${escapeMarkdownInline(rollback.errors ?? "(no detail)")}). Content is applied; re-read the PO with \`get_purchase_order\` to see where the status landed.`
+                  : `\n\n**Rollback to ${poStatusLabel(originalStatus)} ALSO failed** (${escapeMarkdownInline(rollback.errors ?? "(no detail)")}). **PO is now in Draft with content applied — fix manually in the BT UI.**`;
               return errorMarkdown(
-                `**Content updated** for PO #${po.id} but **status transition to ${poStatusLabel(finalStatusCode)} failed**: ${String(transitionResult.errors ?? "(no detail)")}.${rollbackNote}`,
+                `**Content updated** for PO #${po.id} but **status transition to ${poStatusLabel(finalStatusCode)} failed**: ${escapeMarkdownInline(transitionResult.errors ?? "(no detail)")}.${rollbackNote}`,
               );
             }
             return errorMarkdown(
-              `**Content updated** for PO #${po.id} but **status transition to ${poStatusLabel(finalStatusCode)} failed**: ${String(transitionResult.errors ?? "(no detail)")}.` +
+              `**Content updated** for PO #${po.id} but **status transition to ${poStatusLabel(finalStatusCode)} failed**: ${escapeMarkdownInline(transitionResult.errors ?? "(no detail)")}.` +
                 stateClaim(
                   transitionResult,
                   `PO status is unchanged from ${poStatusLabel(currentAfterEdit ?? -1)}.`,
