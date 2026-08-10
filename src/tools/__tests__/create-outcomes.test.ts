@@ -566,3 +566,102 @@ describe("vendor text is escaped before it reaches Markdown", () => {
     expect(text.split("\n").some((l) => l.includes("click"))).toBe(true);
   });
 });
+
+describe("task, RFI and service creates", () => {
+  // Mechanical against the established pattern, so these are covered as a set
+  // rather than one describe block each. What matters is that each one is
+  // wired to the right raw method, reads the right success discriminator, and
+  // names something findable in its reconcile probe — the three ways a
+  // mechanical conversion goes wrong quietly.
+  const CASES = [
+    {
+      tool: "create_task",
+      raw: "createTaskRaw",
+      args: { name: "Inspect framing", project_id: 100 },
+      probeText: "Inspect framing",
+      resource: "tasks",
+      noun: "Task",
+    },
+    {
+      tool: "create_rfi",
+      raw: "createRFIRaw",
+      args: { subject: "Beam sizing", project_id: 100, question: "which?" },
+      probeText: "Beam sizing",
+      resource: "rfis",
+      noun: "RFI",
+    },
+    {
+      tool: "create_service",
+      raw: "createServiceRaw",
+      args: { name: "Final clean", project_id: 100, description: "d" },
+      probeText: "Final clean",
+      resource: "services",
+      noun: "Service",
+    },
+  ];
+
+  it.each(CASES)("$tool reports the new id on success", async (c) => {
+    const tool = toolFor(c.tool, {
+      [c.raw]: async () => dispatched(200, "{}", { result: "success", id: 61 }),
+    } as Upstream);
+
+    const text = textOf(await execute(tool, c.args));
+
+    expect(text).toContain("#61");
+    expect(text).toContain("created successfully");
+  });
+
+  it.each(CASES)("$tool calls an unreadable response unknown, not failed", async (c) => {
+    const upstream = counted(() => dispatched(500, "<html>boom</html>"));
+    const tool = toolFor(c.tool, { [c.raw]: upstream.impl } as Upstream);
+
+    const text = textOf(await execute(tool, c.args));
+
+    expect(upstream.calls()).toBe(1);
+    expect(text).toContain("Outcome unknown");
+    // The probe names WHERE to look and WHAT to look for. Asserting only the
+    // query would let the three resources be swapped between each other — the
+    // exact failure a set-wise conversion invites — and still pass.
+    expect(text).toContain(`Search ${c.resource} for "${c.probeText}"`);
+  });
+
+  it.each(CASES)("$tool reports a structured refusal as a plain failure", async (c) => {
+    const tool = toolFor(c.tool, {
+      [c.raw]: async () => dispatched(422, "{}", { e: "Project is archived" }),
+    } as Upstream);
+
+    const result = await execute(tool, c.args);
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Project is archived");
+    expect(textOf(result)).not.toContain("do NOT retry");
+  });
+
+  it.each(CASES)("$tool replays an ambiguous result rather than writing twice", async (c) => {
+    let calls = 0;
+    const api = {
+      [c.raw]: async () => {
+        calls += 1;
+        return dispatched(500, "");
+      },
+    } as unknown as BuildToolsAPI;
+    const { IdempotencyStore } = await import("../../idempotency/index.js");
+    const tool = createMutationTools(
+      () => api,
+      new ConfirmationStore(),
+      undefined,
+      new IdempotencyStore(),
+    ).find((t) => t.name === c.tool)!;
+    const withKey = { ...c.args, idempotency_key: `retry-${c.tool}` };
+
+    const prompt = await tool.handler(withKey, api);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    await tool.handler({ ...withKey, confirmation_id: cid }, api);
+    expect(calls).toBe(1);
+
+    const retry = await tool.handler(withKey, api);
+
+    expect(textOf(retry)).toContain("Idempotency replay");
+    expect(calls).toBe(1);
+  });
+});

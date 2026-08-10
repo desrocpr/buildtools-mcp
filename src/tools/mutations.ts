@@ -470,6 +470,12 @@ const CreateTaskSchema = z.object({
   due_date: z.string().optional().describe("MM/DD/YYYY format."),
   assigned_to: z.union([z.number(), z.string()]).optional().describe("User ID to assign to."),
   description: z.string().optional(),
+  idempotency_key: z
+    .string()
+    .optional()
+    .describe(
+      "Optional retry-safety key. Reuse it when retrying THIS create; a repeat returns the cached result instead of creating a second record.",
+    ),
   confirmation_id: z.string().optional(),
 });
 type CreateTaskArgs = z.infer<typeof CreateTaskSchema>;
@@ -480,6 +486,12 @@ const CreateRFISchema = z.object({
   question: z.string().optional().describe("RFI question body."),
   priority: z.number().optional().describe("1=Normal (default), 2=High, 3=Urgent."),
   assigned_to: z.union([z.number(), z.string()]).optional(),
+  idempotency_key: z
+    .string()
+    .optional()
+    .describe(
+      "Optional retry-safety key. Reuse it when retrying THIS create; a repeat returns the cached result instead of creating a second record.",
+    ),
   confirmation_id: z.string().optional(),
 });
 type CreateRFIArgs = z.infer<typeof CreateRFISchema>;
@@ -807,6 +819,12 @@ const CreateServiceSchema = z.object({
   status: z.number().optional().describe("1=Draft (default)."),
   due_date: z.string().optional().describe("MM/DD/YYYY format."),
   assigned_to: z.union([z.number(), z.string()]).optional(),
+  idempotency_key: z
+    .string()
+    .optional()
+    .describe(
+      "Optional retry-safety key. Reuse it when retrying THIS create; a repeat returns the cached result instead of creating a second record.",
+    ),
   confirmation_id: z.string().optional(),
 });
 type CreateServiceArgs = z.infer<typeof CreateServiceSchema>;
@@ -2188,17 +2206,18 @@ export function createMutationTools(
     (a) => `Create task **"${a.name}"** on project #${a.project_id}.`,
     async (a) => {
       try {
-        const result = await getApi().createTask({
-          name: a.name,
-          projectId: a.project_id,
-          status: String(a.status ?? 1),
-          priority: String(a.priority ?? 1),
-          dueDate: a.due_date,
-          assignedTo: a.assigned_to ? String(a.assigned_to) : undefined,
-          description: a.description,
-        });
-        if (result.success) return markdown(`Task **#${result.taskId}** created. ${result.message ?? ""}`);
-        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+        return formatWriteOutcome(
+          await opsOf(getApi()).createTask({
+            name: a.name,
+            projectId: a.project_id,
+            status: String(a.status ?? 1),
+            priority: String(a.priority ?? 1),
+            dueDate: a.due_date,
+            assignedTo: a.assigned_to ? String(a.assigned_to) : undefined,
+            description: a.description,
+          }),
+          { noun: "Task", toolName: "create_task" },
+        );
       } catch (err) { return formatError(err, "create_task"); }
     },
   );
@@ -2209,15 +2228,16 @@ export function createMutationTools(
     (a) => `Create RFI **"${a.subject}"** on project #${a.project_id}.`,
     async (a) => {
       try {
-        const result = await getApi().createRFI({
-          subject: a.subject,
-          projectId: a.project_id,
-          question: a.question,
-          priority: String(a.priority ?? 1),
-          assignedTo: a.assigned_to ? String(a.assigned_to) : undefined,
-        });
-        if (result.success) return markdown(`RFI **#${result.rfiId}** created. ${result.message ?? ""}`);
-        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+        return formatWriteOutcome(
+          await opsOf(getApi()).createRfi({
+            subject: a.subject,
+            projectId: a.project_id,
+            question: a.question,
+            priority: String(a.priority ?? 1),
+            assignedTo: a.assigned_to ? String(a.assigned_to) : undefined,
+          }),
+          { noun: "RFI", toolName: "create_rfi" },
+        );
       } catch (err) { return formatError(err, "create_rfi"); }
     },
   );
@@ -2392,16 +2412,17 @@ export function createMutationTools(
     (a) => `Create service **"${a.name}"** on project #${a.project_id}.`,
     async (a) => {
       try {
-        const result = await getApi().createService({
-          name: a.name,
-          projectId: a.project_id,
-          description: a.description,
-          status: String(a.status ?? 1),
-          dueDate: a.due_date,
-          assignedTo: a.assigned_to ? String(a.assigned_to) : undefined,
-        });
-        if (result.success) return markdown(`Service **#${result.serviceId}** created. ${result.message ?? ""}`);
-        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+        return formatWriteOutcome(
+          await opsOf(getApi()).createService({
+            name: a.name,
+            projectId: a.project_id,
+            description: a.description,
+            status: String(a.status ?? 1),
+            dueDate: a.due_date,
+            assignedTo: a.assigned_to ? String(a.assigned_to) : undefined,
+          }),
+          { noun: "Service", toolName: "create_service" },
+        );
       } catch (err) { return formatError(err, "create_service"); }
     },
   );
@@ -3231,14 +3252,14 @@ export function createMutationTools(
         return result;
       },
     },
-    makeTool(
+    makeIdempotentTool(
       "create_task",
       "Create a task on a project. Requires confirmation. Status: 1=Open, 2=In Progress, 3=Complete.",
       CreateTaskSchema,
       createTaskConfirmed,
       "write:tasks",
     ),
-    makeTool(
+    makeIdempotentTool(
       "create_rfi",
       "Create an RFI (Request for Information) on a project. Requires confirmation.",
       CreateRFISchema,
@@ -3417,7 +3438,7 @@ export function createMutationTools(
       deleteFSConfirmed,
       "delete",
     ),
-    makeTool(
+    makeIdempotentTool(
       "create_service",
       "Create a service request on a project. Requires confirmation.",
       CreateServiceSchema,

@@ -38,6 +38,9 @@ import type {
   CreateInvoiceInput,
   CreateProjectInput,
   CreatePurchaseOrderInput,
+  CreateRfiInput,
+  CreateServiceInput,
+  CreateTaskInput,
   TransitionPurchaseOrdersInput,
   ListQuery,
   OperationsManagementApi,
@@ -493,6 +496,34 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
         },
       },
     );
+  }
+
+  async createTask(
+    input: CreateTaskInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    return this.runWrite(() => this.api.createTaskRaw(input), {
+      isSuccess: (p) => p.result === "success",
+      extract: (p) => ({ id: asId(p.id), message: asMessage(p.message) }),
+      probe: { kind: "search", resource: "tasks", query: input.name },
+    });
+  }
+
+  async createRfi(input: CreateRfiInput): Promise<WriteOutcome<CreatedRecord>> {
+    return this.runWrite(() => this.api.createRFIRaw(input), {
+      isSuccess: (p) => p.result === "success",
+      extract: (p) => ({ id: asId(p.id), message: asMessage(p.message) }),
+      probe: { kind: "search", resource: "rfis", query: input.subject },
+    });
+  }
+
+  async createService(
+    input: CreateServiceInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    return this.runWrite(() => this.api.createServiceRaw(input), {
+      isSuccess: (p) => p.result === "success",
+      extract: (p) => ({ id: asId(p.id), message: asMessage(p.message) }),
+      probe: { kind: "search", resource: "services", query: input.name },
+    });
   }
 
   /**
