@@ -579,6 +579,7 @@ describe("task, RFI and service creates", () => {
       raw: "createTaskRaw",
       args: { name: "Inspect framing", project_id: 100 },
       probeText: "Inspect framing",
+      resource: "tasks",
       noun: "Task",
     },
     {
@@ -586,6 +587,7 @@ describe("task, RFI and service creates", () => {
       raw: "createRFIRaw",
       args: { subject: "Beam sizing", project_id: 100, question: "which?" },
       probeText: "Beam sizing",
+      resource: "rfis",
       noun: "RFI",
     },
     {
@@ -593,6 +595,7 @@ describe("task, RFI and service creates", () => {
       raw: "createServiceRaw",
       args: { name: "Final clean", project_id: 100, description: "d" },
       probeText: "Final clean",
+      resource: "services",
       noun: "Service",
     },
   ];
@@ -616,8 +619,10 @@ describe("task, RFI and service creates", () => {
 
     expect(upstream.calls()).toBe(1);
     expect(text).toContain("Outcome unknown");
-    // The probe names the record, which is what makes the advice followable.
-    expect(text).toContain(c.probeText);
+    // The probe names WHERE to look and WHAT to look for. Asserting only the
+    // query would let the three resources be swapped between each other — the
+    // exact failure a set-wise conversion invites — and still pass.
+    expect(text).toContain(`Search ${c.resource} for "${c.probeText}"`);
   });
 
   it.each(CASES)("$tool reports a structured refusal as a plain failure", async (c) => {
