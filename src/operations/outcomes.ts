@@ -124,6 +124,14 @@ export type WriteOutcome<T> = WriteOk<T> | WriteFailed | WriteAmbiguous;
 export interface BulkWriteData {
   succeeded: number;
   failed: number;
+  /**
+   * Upstream's explanation of the partial result, when it gave one.
+   *
+   * Counts alone say how many failed but never why, and the why is usually the
+   * actionable part ("The Signature field is required"). Carried on the OK
+   * outcome because a partial IS an applied call, not a failure.
+   */
+  message?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,5 +214,9 @@ export function isCacheable<T>(o: WriteOutcome<T>): boolean {
  * dropped.
  */
 export function redactUrls(text: string): string {
+  // Defensive: a malformed adapter result used to crash here with "Cannot read
+  // properties of undefined (reading 'replace')", surfacing to the user as an
+  // opaque tool error rather than as the write outcome it was describing.
+  if (typeof text !== "string") return String(text ?? "");
   return text.replace(/(https?:\/\/[^\s?]+)\?[^\s]*/gi, "$1?[redacted]");
 }

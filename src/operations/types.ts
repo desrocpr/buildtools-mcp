@@ -34,7 +34,7 @@
  * and one that merely looks neutral.
  */
 
-import type { WriteOutcome } from "./outcomes.js";
+import type { BulkWriteData, WriteOutcome } from "./outcomes.js";
 
 // ---------------------------------------------------------------------------
 // Neutral parameter + row types
@@ -320,6 +320,29 @@ export interface CreateInvoiceInput {
   notes?: string;
 }
 
+export interface PurchaseOrderLineInput {
+  name: string;
+  total: number;
+}
+
+export interface CreatePurchaseOrderInput {
+  name: string;
+  projectId: string | number;
+  companyId: string | number;
+  prefix?: string;
+  status?: string | number;
+  notes?: string;
+  /** Convenience for a single-line PO. Ignored when `items` is set. */
+  total?: number;
+  items?: PurchaseOrderLineInput[];
+}
+
+export interface TransitionPurchaseOrdersInput {
+  /** One id is a batch of one — the endpoint does not distinguish. */
+  purchaseOrderIds: Array<string | number>;
+  status: number;
+}
+
 export interface CreateFinancialStatementInput {
   projectId: string | number;
   name: string;
@@ -421,6 +444,21 @@ export interface OperationsManagementApi {
   createFinancialStatement(
     input: CreateFinancialStatementInput,
   ): Promise<WriteOutcome<CreatedRecord>>;
+  createPurchaseOrder(
+    input: CreatePurchaseOrderInput,
+  ): Promise<WriteOutcome<CreatedRecord>>;
+  /**
+   * Move one or more purchase orders to a status.
+   *
+   * Returns counts rather than a boolean because `ok` here means THE CALL WAS
+   * APPLIED, not "every id moved" — upstream answers `{r:1, s, f}` and a
+   * partial result is a normal outcome, not an error. Collapsing that into a
+   * boolean is how "9 of 10 transitioned" becomes indistinguishable from
+   * "all 10 transitioned".
+   */
+  transitionPurchaseOrders(
+    input: TransitionPurchaseOrdersInput,
+  ): Promise<WriteOutcome<BulkWriteData>>;
 }
 
 /** Per-tenant selection config. Values are config names, never secrets. */

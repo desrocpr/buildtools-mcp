@@ -1204,7 +1204,7 @@ describe("getChangeOrderAttachments()", () => {
 // createPurchaseOrder / createTask / createRFI / createService / createInvoice
 // ---------------------------------------------------------------------------
 
-describe("createPurchaseOrder()", () => {
+describe("createPurchaseOrderRaw()", () => {
   it("posts to /purchase-orders/save with JSON-encoded items", async () => {
     const { stub, recorded } = makeFetchStub([
       {
@@ -1214,13 +1214,17 @@ describe("createPurchaseOrder()", () => {
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createPurchaseOrder({
+    const out = await api.createPurchaseOrderRaw({
       name: "Lumber",
       projectId: 1,
       companyId: 2,
       notes: "rush",
     });
-    expect(out).toEqual({ success: true, purchaseOrderId: 70, message: "ok" });
+    expect(out.dispatched && out.json).toEqual({
+      result: "success",
+      id: 70,
+      message: "ok",
+    });
     expect(recorded[0].url).toBe(
       "https://moss.buildtools.app/purchase-orders/save",
     );
@@ -1230,30 +1234,30 @@ describe("createPurchaseOrder()", () => {
     expect(body).toContain("PurchaseOrder%5Bnotes%5D=rush");
   });
 
-  it("returns failure on non-success result", async () => {
+  it("hands back a rejection envelope without judging it", async () => {
     const { stub } = makeFetchStub([
       { status: 200, body: JSON.stringify({ result: "error", message: "x" }) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createPurchaseOrder({
+    const out = await api.createPurchaseOrderRaw({
       name: "n",
       projectId: 1,
       companyId: 2,
     });
-    expect(out).toEqual({ success: false, errors: "x" });
+    expect(out.dispatched && out.json).toEqual({ result: "error", message: "x" });
   });
 
-  it("returns 'Server error' on non-JSON", async () => {
+  it("keeps the 500 on an empty body instead of flattening it", async () => {
     const { stub } = makeFetchStub([{ status: 500, body: "" }]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createPurchaseOrder({
+    const out = await api.createPurchaseOrderRaw({
       name: "n",
       projectId: 1,
       companyId: 2,
     });
-    expect(out.success).toBe(false);
+    expect(out).toEqual({ dispatched: true, status: 500, body: "" });
   });
 });
 
@@ -2121,12 +2125,12 @@ describe("BuildToolsAPI.transitionPurchaseOrderStatus — CSRF cache (PR #62)", 
     const api = new BuildToolsAPI({ fetch: harness.fetchImpl } as any);
     (api as unknown as { authenticated: boolean }).authenticated = true;
 
-    const r1 = await api.transitionPurchaseOrderStatus({ purchaseOrderId: 39752, status: 1 });
-    expect(r1.success).toBe(true);
+    const r1 = await api.transitionPurchaseOrderStatusRaw({ purchaseOrderId: 39752, status: 1 });
+    expect(r1.dispatched && r1.json).toMatchObject({ r: 1, s: 1, f: 0 });
     expect(harness.getFormFetches()).toBe(1);
 
-    const r2 = await api.transitionPurchaseOrderStatus({ purchaseOrderId: 39752, status: 2 });
-    expect(r2.success).toBe(true);
+    const r2 = await api.transitionPurchaseOrderStatusRaw({ purchaseOrderId: 39752, status: 2 });
+    expect(r2.dispatched && r2.json).toMatchObject({ r: 1 });
     // Cache hit: no additional form fetch.
     expect(harness.getFormFetches()).toBe(1);
 
@@ -2148,8 +2152,8 @@ describe("BuildToolsAPI.transitionPurchaseOrderStatus — CSRF cache (PR #62)", 
     // Pre-seed the cache so we start with a stale token in cache.
     (api as unknown as { tokens: { form: string } }).tokens.form = "stale-token";
 
-    const r = await api.transitionPurchaseOrderStatus({ purchaseOrderId: 39752, status: 1 });
-    expect(r.success).toBe(true);
+    const r = await api.transitionPurchaseOrderStatusRaw({ purchaseOrderId: 39752, status: 1 });
+    expect(r.dispatched && r.json).toMatchObject({ r: 1 });
 
     // Form fetched once (for the refresh after 419), POST attempted twice.
     expect(harness.getFormFetches()).toBe(1);
@@ -2172,13 +2176,13 @@ describe("BuildToolsAPI.transitionPurchaseOrderStatus — CSRF cache (PR #62)", 
     expect((api as unknown as { tokens: { form: string | null } }).tokens.form).toBe("opportune-token");
   });
 
-  it("PR #64 review fix (M1): 419 followed by non-200 form refresh returns a CLEAR error (not 'non-JSON response')", async () => {
-    // The original PR #62 code called absorbFormToken on the refresh
-    // body regardless of HTTP status. If the form endpoint went 5xx,
-    // absorb returned null, the retry skipped, and the original 419
-    // body parsed as JSON downstream — surfacing as a confusing
-    // "Non-JSON response from /status/update (HTTP 419): Page expired"
-    // that hid the real cause (form endpoint failed).
+  it("419 followed by a non-200 form refresh surfaces the 419, which classifies as ambiguous", async () => {
+    // The first status POST DID go out and came back 419. Laravel's CSRF
+    // middleware is expected to reject before the controller mutates, but that
+    // is unverified against this endpoint — so the raw 419 is handed over and
+    // the classifier makes the conservative call. Previously this returned a
+    // flat failure whose text spliced 200 characters of the "Page expired"
+    // HTML into a user-facing message.
     let formCount = 0;
     const calls: string[] = [];
     const fetchImpl: typeof fetch = (async (input: RequestInfo | URL) => {
@@ -2204,13 +2208,22 @@ describe("BuildToolsAPI.transitionPurchaseOrderStatus — CSRF cache (PR #62)", 
     const api = new BuildToolsAPI({ fetch: fetchImpl } as any);
     (api as unknown as { authenticated: boolean }).authenticated = true;
 
-    const result = await api.transitionPurchaseOrderStatus({ purchaseOrderId: 39752, status: 1 });
-    expect(result.success).toBe(false);
-    // The error must name the refresh failure concretely. NOT the
-    // confusing "non-JSON response" pre-fix wording.
-    expect(String(result.errors)).toContain("CSRF refresh failed");
-    expect(String(result.errors)).toContain("503");
-    expect(String(result.errors)).not.toContain("Non-JSON response");
+    const result = await api.transitionPurchaseOrderStatusRaw({
+      purchaseOrderId: 39752,
+      status: 1,
+    });
+
+    // Dispatched, 419, body not JSON — everything the classifier needs, and
+    // nothing pre-judged here.
+    expect(result).toEqual({
+      dispatched: true,
+      status: 419,
+      body: "Page expired",
+    });
+    // The form GET was attempted twice (initial + post-419 refresh) and the
+    // second one 503'd, which is why no retry POST followed.
+    expect(formCount).toBe(2);
+    expect(calls.filter((u) => u.includes("/status/update"))).toHaveLength(1);
   });
 });
 

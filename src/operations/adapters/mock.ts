@@ -26,6 +26,7 @@ import {
   ambiguous,
   failed,
   ok,
+  type BulkWriteData,
   type ReconcileProbe,
   type WriteOutcome,
 } from "../outcomes.js";
@@ -38,6 +39,8 @@ import type {
   CreateFinancialStatementInput,
   CreateInvoiceInput,
   CreateProjectInput,
+  CreatePurchaseOrderInput,
+  TransitionPurchaseOrdersInput,
   ListQuery,
   OperationsManagementApi,
   PurchaseOrderView,
@@ -54,7 +57,8 @@ export type WritableGrid =
   | "projects"
   | "changeOrders"
   | "invoices"
-  | "financialStatementRows";
+  | "financialStatementRows"
+  | "purchaseOrders";
 
 /** A row in a mock grid. `id` is required — the interface guarantees it. */
 export interface MockRow extends Record<string, unknown> {
@@ -410,6 +414,56 @@ export class MockOperationsApi implements OperationsManagementApi {
         query: input.name,
       },
     );
+  }
+
+  async createPurchaseOrder(
+    input: CreatePurchaseOrderInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    this.record("createPurchaseOrder", input);
+    return this.write(
+      "purchaseOrders",
+      {
+        name: input.name,
+        project_id: input.projectId,
+        company_id: input.companyId,
+      },
+      { kind: "search", resource: "purchaseOrders", query: input.name },
+    );
+  }
+
+  async transitionPurchaseOrders(
+    input: TransitionPurchaseOrdersInput,
+  ): Promise<WriteOutcome<BulkWriteData>> {
+    this.record("transitionPurchaseOrders", input);
+    const probe: ReconcileProbe = {
+      kind: "search",
+      resource: "purchaseOrders",
+      query: input.purchaseOrderIds.join(","),
+    };
+    const scripted = this.nextOutcome("purchaseOrders");
+    if (scripted === "failed") {
+      return failed("mock: transition refused", "mock rejection");
+    }
+    if (scripted === "ambiguous") {
+      return ambiguous("mock: outcome unknown", probe);
+    }
+
+    // A transition MUTATES rows rather than adding one, and only rows that
+    // exist can move — which is what produces a partial result, the case a
+    // boolean cannot express. The mock reproduces that rather than always
+    // reporting every id as succeeded.
+    const rows = this.seed.purchaseOrders ?? [];
+    let succeeded = 0;
+    for (const id of input.purchaseOrderIds) {
+      const row = rows.find((r) => String(r.id) === String(id));
+      if (!row) continue;
+      row.status = input.status;
+      succeeded += 1;
+    }
+    return ok({
+      succeeded,
+      failed: input.purchaseOrderIds.length - succeeded,
+    });
   }
 
   /**

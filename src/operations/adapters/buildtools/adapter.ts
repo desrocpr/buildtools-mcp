@@ -17,7 +17,11 @@
 import type { BuildToolsAPI } from "../../../client/BuildToolsAPI.js";
 import type { RawWriteAttempt } from "../../../client/types.js";
 import { normalizeEnvelope, normalizeMaybeRow } from "../../normalize.js";
-import { failed, type WriteOutcome } from "../../outcomes.js";
+import {
+  failed,
+  type BulkWriteData,
+  type WriteOutcome,
+} from "../../outcomes.js";
 import {
   classifyWriteError,
   classifyWriteResponse,
@@ -33,6 +37,8 @@ import type {
   CreateFinancialStatementInput,
   CreateInvoiceInput,
   CreateProjectInput,
+  CreatePurchaseOrderInput,
+  TransitionPurchaseOrdersInput,
   ListQuery,
   OperationsManagementApi,
   PurchaseOrderView,
@@ -447,6 +453,48 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
     );
   }
 
+  async createPurchaseOrder(
+    input: CreatePurchaseOrderInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    return this.runWrite(() => this.api.createPurchaseOrderRaw(input), {
+      isSuccess: (p) => p.result === "success",
+      extract: (p) => ({ id: asId(p.id), message: asMessage(p.message) }),
+      probe: {
+        kind: "search",
+        resource: "purchaseOrders",
+        query: input.name,
+      },
+    });
+  }
+
+  async transitionPurchaseOrders(
+    input: TransitionPurchaseOrdersInput,
+  ): Promise<WriteOutcome<BulkWriteData>> {
+    return this.runWrite(
+      () => this.api.bulkTransitionPurchaseOrderStatusesRaw(input),
+      {
+        // `r === 1` means the CALL was applied. Per-id failures come back as
+        // `f > 0` alongside it and are data, not an error — a caller that
+        // treated a partial as a failure would retry the ids that already
+        // moved.
+        isSuccess: (p) => p.r === 1,
+        extract: (p) => ({
+          succeeded: asCount(p.s),
+          failed: asCount(p.f),
+          message: asJoinedMessage(p.msg),
+        }),
+        // A transition is not a create, so there is nothing new to search for.
+        // The ids the caller already holds ARE the reconcile handle: re-read
+        // them and compare status.
+        probe: {
+          kind: "search",
+          resource: "purchaseOrders",
+          query: input.purchaseOrderIds.join(","),
+        },
+      },
+    );
+  }
+
   /**
    * Run a vendor write and classify whatever comes back — including a throw.
    *
@@ -475,6 +523,31 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
     }
     return classifyWriteResponse(result, spec);
   }
+}
+
+/**
+ * A count from an upstream envelope.
+ *
+ * Absent means zero here, not "unknown": BuildTools omits `s`/`f` when there is
+ * nothing to report. Defaulting to zero is only safe because `isSuccess` has
+ * already established the call was applied.
+ */
+function asCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/**
+ * Upstream's `msg`, which is sometimes a string and sometimes a list of them.
+ * Non-strings are dropped rather than stringified — an object here would put
+ * unrelated records into a user-facing message.
+ */
+function asJoinedMessage(value: unknown): string | undefined {
+  if (typeof value === "string") return value || undefined;
+  if (Array.isArray(value)) {
+    const parts = value.filter((v): v is string => typeof v === "string");
+    return parts.length > 0 ? parts.join("; ") : undefined;
+  }
+  return undefined;
 }
 
 /** Coerce an upstream id field to the neutral shape, dropping junk. */
