@@ -261,3 +261,115 @@ describe("bulk writes: `ok` means applied, not 'everything succeeded'", () => {
     });
   });
 });
+
+describe("budget writes: the mock models the dedup, not just the insert", () => {
+  // A mock that always inserted would let a caller's skip/error handling ship
+  // with no test behind it — the same blind spot as a mock that ignores its
+  // own query parameters.
+  const BUDGET = {
+    columns: [],
+    items: [
+      {
+        id: "63477",
+        categoryId: "1614",
+        name: "Countertops",
+        isAllowance: false,
+        publishedBudget: 0,
+        workingBudget: 0,
+        approvedCOs: 0,
+        publishedRevised: 0,
+        workingRevised: 0,
+        cells: [],
+      },
+    ],
+  };
+
+  it("returns the existing line rather than adding a second one", async () => {
+    const mock = new MockOperationsApi({ budget: { "42": BUDGET } });
+
+    const outcome = await mock.createBudgetItem({
+      projectId: 42,
+      budgetCategoryId: 1614,
+    });
+
+    expect(outcome.status === "ok" && outcome.data).toEqual({
+      id: "63477",
+      existed: true,
+    });
+    const after = await mock.getBudget(42);
+    expect(after.items).toHaveLength(1);
+  });
+
+  it("refuses when the caller asked to be told instead", async () => {
+    const mock = new MockOperationsApi({ budget: { "42": BUDGET } });
+
+    const outcome = await mock.createBudgetItem({
+      projectId: 42,
+      budgetCategoryId: 1614,
+      ifExists: "error",
+    });
+
+    expect(outcome.status).toBe("failed");
+  });
+
+  it("inserts for a category with no line yet", async () => {
+    const mock = new MockOperationsApi({ budget: { "42": BUDGET } });
+
+    const outcome = await mock.createBudgetItem({
+      projectId: 42,
+      budgetCategoryId: 7051,
+    });
+
+    expect(outcome.status === "ok" && outcome.data.existed).toBe(false);
+  });
+
+  it("delete removes the row and reports one succeeded", async () => {
+    const mock = new MockOperationsApi({
+      budget: { "42": { columns: [], items: [...BUDGET.items] } },
+    });
+
+    const outcome = await mock.deleteBudgetItem({
+      projectId: 42,
+      budgetItemId: "63477",
+    });
+
+    expect(outcome.status === "ok" && outcome.data).toEqual({
+      succeeded: 1,
+      failed: 0,
+    });
+    expect((await mock.getBudget(42)).items).toHaveLength(0);
+  });
+
+  it("delete of a row that is not there reports zero, not a failure", async () => {
+    // Matching the real endpoint's silent no-op rather than inventing an
+    // error the caller would never see in production.
+    const mock = new MockOperationsApi({ budget: { "42": BUDGET } });
+
+    const outcome = await mock.deleteBudgetItem({
+      projectId: 42,
+      budgetItemId: "99999",
+    });
+
+    expect(outcome.status).toBe("ok");
+    expect(outcome.status === "ok" && outcome.data.succeeded).toBe(0);
+  });
+
+  it("scripted outcomes reach the budget writes too", async () => {
+    const mock = new MockOperationsApi({ budget: { "42": BUDGET } });
+    mock.scriptWrites("budget", ["ambiguous", "failed"]);
+
+    const created = await mock.createBudgetItem({
+      projectId: 42,
+      budgetCategoryId: 7051,
+    });
+    const updated = await mock.updateBudgetItem({
+      projectId: 42,
+      budgetItemId: "63477",
+      budgetCategoryId: 1614,
+      amountWorking: 100,
+    });
+
+    expect(created.status).toBe("ambiguous");
+    expect(updated.status).toBe("failed");
+  });
+});

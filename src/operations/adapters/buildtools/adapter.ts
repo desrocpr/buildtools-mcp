@@ -19,6 +19,7 @@ import type { RawWriteAttempt } from "../../../client/types.js";
 import { normalizeEnvelope, normalizeMaybeRow } from "../../normalize.js";
 import {
   failed,
+  ok,
   type BulkWriteData,
   type WriteOutcome,
 } from "../../outcomes.js";
@@ -38,9 +39,12 @@ import type {
   CreateInvoiceInput,
   CreateProjectInput,
   CreatePurchaseOrderInput,
+  CreateBudgetItemInput,
   CreateRfiInput,
   CreateServiceInput,
   CreateTaskInput,
+  DeleteBudgetItemInput,
+  UpdateBudgetItemInput,
   TransitionPurchaseOrdersInput,
   ListQuery,
   OperationsManagementApi,
@@ -527,6 +531,93 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
   }
 
   /**
+   * Create a budget line for a category, without creating a second one.
+   *
+   * The dedup lives HERE, not in the vendor client, because it is policy
+   * rather than wire format: the endpoint is a plain INSERT with no unique
+   * constraint, and a duplicate line breaks any report that keys on
+   * category-per-project. Any operations vendor with the same shape needs the
+   * same guard, and this layer is the one that can read the budget to check.
+   */
+  async createBudgetItem(
+    input: CreateBudgetItemInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    const mode = input.ifExists ?? "skip";
+    if (mode !== "force") {
+      let existingId: string | number | undefined;
+      try {
+        const budget = await this.getBudget(input.projectId);
+        existingId = budget.items.find(
+          (i) => Number(i.categoryId) === Number(input.budgetCategoryId),
+        )?.id;
+      } catch (err) {
+        // A failed dup-check must NOT fall through to the insert — that is
+        // precisely how duplicates get made. Nothing was written, so this is a
+        // definite failure rather than an unknown.
+        return failed(
+          `could not check for an existing budget line (${errorText(err)}); refusing to insert blind`,
+        );
+      }
+      if (existingId !== undefined) {
+        if (mode === "error") {
+          return failed(
+            `project ${input.projectId} already has a budget line for category ${input.budgetCategoryId} (id ${existingId})`,
+          );
+        }
+        return ok({ id: existingId, existed: true });
+      }
+    }
+
+    return this.runWrite(() => this.api.createBudgetItemRaw(input), {
+      isSuccess: (p) => p.result === "success",
+      extract: (p) => ({ id: asId(p.id), existed: false }),
+      probe: {
+        kind: "search",
+        resource: `projects/${input.projectId}/budget`,
+        query: String(input.budgetCategoryId),
+      },
+    });
+  }
+
+  async updateBudgetItem(
+    input: UpdateBudgetItemInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    return this.runWrite(() => this.api.updateBudgetItemRaw(input), {
+      isSuccess: (p) => p.result === "success",
+      extract: () => ({ id: input.budgetItemId }),
+      probe: {
+        kind: "search",
+        resource: `projects/${input.projectId}/budget`,
+        query: String(input.budgetItemId),
+      },
+    });
+  }
+
+  async deleteBudgetItem(
+    input: DeleteBudgetItemInput,
+  ): Promise<WriteOutcome<BulkWriteData>> {
+    return this.runWrite(
+      () => this.api.deleteBudgetItemRaw(input.budgetItemId, input.projectId),
+      {
+        // `r === 1` means the call was applied. It does NOT mean anything was
+        // deleted: `{r:1, s:0, f:0}` is a documented silent no-op, and the
+        // counts are how the caller finds out.
+        isSuccess: (p) => p.r === 1,
+        extract: (p) => ({
+          succeeded: asCount(p.s),
+          failed: asCount(p.f),
+          message: asJoinedMessage(p.mg),
+        }),
+        probe: {
+          kind: "search",
+          resource: `projects/${input.projectId}/budget`,
+          query: String(input.budgetItemId),
+        },
+      },
+    );
+  }
+
+  /**
    * Run a vendor write and classify whatever comes back — including a throw.
    *
    * The catch is the point. `runWrite`'s caller has already committed the write
@@ -565,6 +656,11 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
  */
 function asCount(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/** Message text from a thrown error, for a reason string. */
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**

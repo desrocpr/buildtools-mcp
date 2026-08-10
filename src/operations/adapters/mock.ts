@@ -40,9 +40,12 @@ import type {
   CreateInvoiceInput,
   CreateProjectInput,
   CreatePurchaseOrderInput,
+  CreateBudgetItemInput,
   CreateRfiInput,
   CreateServiceInput,
   CreateTaskInput,
+  DeleteBudgetItemInput,
+  UpdateBudgetItemInput,
   TransitionPurchaseOrdersInput,
   ListQuery,
   OperationsManagementApi,
@@ -503,6 +506,76 @@ export class MockOperationsApi implements OperationsManagementApi {
     );
   }
 
+  async createBudgetItem(
+    input: CreateBudgetItemInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    this.record("createBudgetItem", input);
+    const mode = input.ifExists ?? "skip";
+    const budget = this.seed.budget?.[String(input.projectId)];
+    const existing = budget?.items.find(
+      (i) => Number(i.categoryId) === Number(input.budgetCategoryId),
+    );
+    // The mock models the DEDUP, not just the insert. A mock that always
+    // inserted would let a caller's skip/error handling ship untested.
+    if (existing && mode !== "force") {
+      return mode === "error"
+        ? failed(`mock: category ${input.budgetCategoryId} already has a line`)
+        : ok({ id: existing.id, existed: true });
+    }
+    const scripted = this.nextOutcome("budget");
+    if (scripted === "failed") return failed("mock: budget write refused");
+    if (scripted === "ambiguous") {
+      return ambiguous("mock: outcome unknown", {
+        kind: "search",
+        resource: `projects/${input.projectId}/budget`,
+        query: String(input.budgetCategoryId),
+      });
+    }
+    return ok({ id: this.nextId++, existed: false });
+  }
+
+  async updateBudgetItem(
+    input: UpdateBudgetItemInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    this.record("updateBudgetItem", input);
+    const scripted = this.nextOutcome("budget");
+    if (scripted === "failed") return failed("mock: budget update refused");
+    if (scripted === "ambiguous") {
+      return ambiguous("mock: outcome unknown", {
+        kind: "search",
+        resource: `projects/${input.projectId}/budget`,
+        query: String(input.budgetItemId),
+      });
+    }
+    return ok({ id: input.budgetItemId });
+  }
+
+  async deleteBudgetItem(
+    input: DeleteBudgetItemInput,
+  ): Promise<WriteOutcome<BulkWriteData>> {
+    this.record("deleteBudgetItem", input);
+    const scripted = this.nextOutcome("budget");
+    if (scripted === "failed") return failed("mock: delete refused");
+    if (scripted === "ambiguous") {
+      return ambiguous("mock: outcome unknown", {
+        kind: "search",
+        resource: `projects/${input.projectId}/budget`,
+        query: String(input.budgetItemId),
+      });
+    }
+    const budget = this.seed.budget?.[String(input.projectId)];
+    const before = budget?.items.length ?? 0;
+    if (budget) {
+      budget.items = budget.items.filter(
+        (i) => String(i.id) !== String(input.budgetItemId),
+      );
+    }
+    const removed = before - (budget?.items.length ?? 0);
+    // Deleting a row that is not there returns succeeded 0 — the silent no-op
+    // the real endpoint produces, rather than a fabricated success.
+    return ok({ succeeded: removed, failed: 0 });
+  }
+
   /**
    * Perform a seeded write.
    *
@@ -548,7 +621,7 @@ export class MockOperationsApi implements OperationsManagementApi {
    * Anything past the end of the list succeeds.
    */
   scriptWrites(
-    grid: WritableGrid,
+    grid: WritableGrid | "budget",
     outcomes: Array<"ok" | "failed" | "ambiguous">,
   ): void {
     this.scriptedOutcomes[grid] = [...outcomes];

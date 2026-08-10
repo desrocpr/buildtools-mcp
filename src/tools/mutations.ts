@@ -2533,22 +2533,25 @@ export function createMutationTools(
     (a) => `Add budget category #${a.budget_category_id} to project #${a.project_id}${a.if_exists ? ` (if_exists: ${a.if_exists})` : ""}.`,
     async (a) => {
       try {
-        const result = await getApi().createBudgetItem({
+        const outcome = await opsOf(getApi()).createBudgetItem({
           projectId: a.project_id,
           budgetCategoryId: a.budget_category_id,
           ifExists: a.if_exists,
         });
-        if (result.success) {
-          if (result.existed) {
-            return markdown(
-              `Budget item **#${result.budgetItemId}** already exists for category #${a.budget_category_id} on project #${a.project_id}. Returning existing row (no write). Use update_budget_item to change its amount.`,
-            );
-          }
-          return markdown(
-            `Budget item **#${result.budgetItemId}** created. Use update_budget_item to set its amount.`,
+        if (isOk(outcome) && outcome.data.existed) {
+          // A no-op, and the message says so. Rendering it as "created" would
+          // make an unchanged budget look like an edited one.
+          return remember(
+            outcome,
+            markdown(
+              `Budget item **#${escapeMarkdownInline(outcome.data.id)}** already exists for category #${a.budget_category_id} on project #${a.project_id}. Returning existing row (no write). Use update_budget_item to change its amount.`,
+            ),
           );
         }
-        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+        return formatWriteOutcome(outcome, {
+          noun: "Budget item",
+          toolName: "create_budget_item",
+        });
       } catch (err) { return formatError(err, "create_budget_item"); }
     },
   );
@@ -2574,15 +2577,23 @@ export function createMutationTools(
     },
     async (a) => {
       try {
-        const result = await getApi().updateBudgetItem({
+        const outcome = await opsOf(getApi()).updateBudgetItem({
           projectId: a.project_id,
           budgetItemId: a.budget_item_id,
           budgetCategoryId: a.budget_category_id,
           amountWorking: a.amount_working,
           isAllowance: a.is_allowance,
         });
-        if (result.success) return markdown(`Budget item **#${a.budget_item_id}** updated.`);
-        return errorMarkdown(`Failed: ${JSON.stringify(result.errors)}`);
+        if (isOk(outcome)) {
+          return remember(
+            outcome,
+            markdown(`Budget item **#${a.budget_item_id}** updated.`),
+          );
+        }
+        return formatWriteOutcome(outcome, {
+          noun: `Budget item #${a.budget_item_id}`,
+          toolName: "update_budget_item",
+        });
       } catch (err) { return formatError(err, "update_budget_item"); }
     },
   );
@@ -2600,9 +2611,42 @@ export function createMutationTools(
     (a) => `Delete budget item #${a.budget_item_id} from project #${a.project_id}.`,
     async (a) => {
       try {
-        const result = await getApi().deleteBudgetItem(a.budget_item_id, a.project_id);
-        if (result.success) return markdown(`Budget item **#${a.budget_item_id}** deleted (${result.succeeded} succeeded).`);
-        return errorMarkdown(`Delete failed: succeeded=${result.succeeded}, failed=${result.failed}, errors=${JSON.stringify(result.errors)?.substring(0, 200)}`);
+        const outcome = await opsOf(getApi()).deleteBudgetItem({
+          projectId: a.project_id,
+          budgetItemId: a.budget_item_id,
+        });
+        if (!isOk(outcome)) {
+          return remember(outcome, formatBulkNotApplied(outcome, 1));
+        }
+        if (outcome.data.succeeded === 0 && outcome.data.failed === 0) {
+          // The documented silent no-op: upstream accepted the call and
+          // deleted nothing, which it also does when the row is already gone.
+          // Reporting this as a successful delete is how a budget item that
+          // is still there gets recorded as removed.
+          return remember(
+            outcome,
+            errorMarkdown(
+              `**Nothing was deleted.** BuildTools accepted the request for budget item #${a.budget_item_id} but removed no rows — the item may not exist, or may already have been deleted. Re-read the budget with \`list_budget\` to confirm.`,
+            ),
+          );
+        }
+        if (outcome.data.failed > 0) {
+          return remember(
+            outcome,
+            errorMarkdown(
+              `**Delete refused** for budget item #${a.budget_item_id}.` +
+                (outcome.data.message
+                  ? ` ${escapeMarkdownInline(outcome.data.message)}`
+                  : " A budget item with related change orders cannot be deleted."),
+            ),
+          );
+        }
+        return remember(
+          outcome,
+          markdown(
+            `Budget item **#${a.budget_item_id}** deleted (${outcome.data.succeeded} row(s) removed).`,
+          ),
+        );
       } catch (err) { return formatError(err, "delete_budget_item"); }
     },
   );

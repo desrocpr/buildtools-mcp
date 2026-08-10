@@ -506,3 +506,167 @@ describe("status compensation — pagination and scan bounds", () => {
     expect(res.countsArePartial).toBe(false);
   });
 });
+
+describe("createBudgetItem — the dedup that moved out of the client", () => {
+  /**
+   * A budget line for a category is a natural key with no unique constraint
+   * behind it: the endpoint is a plain INSERT, and a second row breaks any
+   * report that keys on category-per-project. The guard used to live in the
+   * vendor client; it lives here now because it is policy, not wire format —
+   * so its coverage has to live here too rather than quietly disappear.
+   */
+  function budgetAdapter(opts: {
+    items: Array<{ id: number; categoryId: number }>;
+    onInsert?: () => unknown;
+    budgetThrows?: boolean;
+  }) {
+    let inserts = 0;
+    const api = {
+      db: null,
+      async getBudget() {
+        if (opts.budgetThrows) throw new Error("replica unavailable");
+        return { items: opts.items, columns: [] };
+      },
+      async createBudgetItemRaw() {
+        inserts += 1;
+        return (
+          opts.onInsert?.() ?? {
+            dispatched: true,
+            status: 200,
+            body: "{}",
+            json: { result: "success", id: 777 },
+          }
+        );
+      },
+    } as unknown as BuildToolsAPI;
+    return { ops: new BuildToolsOperationsAdapter(api), inserts: () => inserts };
+  }
+
+  it("returns the existing row and writes nothing when one is already there", async () => {
+    const { ops, inserts } = budgetAdapter({
+      items: [{ id: 63477, categoryId: 1614 }],
+    });
+
+    const outcome = await ops.createBudgetItem({
+      projectId: 185966,
+      budgetCategoryId: 1614,
+    });
+
+    expect(outcome.status).toBe("ok");
+    expect(outcome.status === "ok" && outcome.data).toEqual({
+      id: 63477,
+      existed: true,
+    });
+    // The assertion that matters: no INSERT was issued.
+    expect(inserts()).toBe(0);
+  });
+
+  it("inserts when the category has no line yet", async () => {
+    const { ops, inserts } = budgetAdapter({ items: [] });
+
+    const outcome = await ops.createBudgetItem({
+      projectId: 185966,
+      budgetCategoryId: 9999,
+    });
+
+    expect(outcome.status === "ok" && outcome.data).toEqual({
+      id: 777,
+      existed: false,
+    });
+    expect(inserts()).toBe(1);
+  });
+
+  it("refuses rather than returning the existing row when asked to error", async () => {
+    const { ops, inserts } = budgetAdapter({
+      items: [{ id: 63477, categoryId: 1614 }],
+    });
+
+    const outcome = await ops.createBudgetItem({
+      projectId: 185966,
+      budgetCategoryId: 1614,
+      ifExists: "error",
+    });
+
+    expect(outcome.status).toBe("failed");
+    expect(inserts()).toBe(0);
+  });
+
+  it("skips the check entirely on force", async () => {
+    const { ops, inserts } = budgetAdapter({
+      items: [{ id: 63477, categoryId: 1614 }],
+    });
+
+    const outcome = await ops.createBudgetItem({
+      projectId: 185966,
+      budgetCategoryId: 1614,
+      ifExists: "force",
+    });
+
+    expect(outcome.status).toBe("ok");
+    expect(inserts()).toBe(1);
+  });
+
+  it("fails rather than inserting blind when the check itself cannot run", async () => {
+    // The dangerous case. If a failed dup-check fell through to the INSERT,
+    // every transient read error would create a duplicate budget line — and
+    // it would look like a successful create.
+    const { ops, inserts } = budgetAdapter({ items: [], budgetThrows: true });
+
+    const outcome = await ops.createBudgetItem({
+      projectId: 185966,
+      budgetCategoryId: 1614,
+    });
+
+    expect(outcome.status).toBe("failed");
+    expect(inserts()).toBe(0);
+  });
+});
+
+describe("deleteBudgetItem — the silent no-op is data, not success", () => {
+  function deleteAdapter(json: unknown) {
+    const api = {
+      db: null,
+      async deleteBudgetItemRaw() {
+        return { dispatched: true, status: 200, body: "{}", json };
+      },
+    } as unknown as BuildToolsAPI;
+    return new BuildToolsOperationsAdapter(api);
+  }
+
+  it("reports zero-deleted as an applied call with zero counts", async () => {
+    // `{r:1, s:0, f:0}` is BuildTools accepting the request and removing
+    // nothing. It is not a refusal, and it is certainly not a delete.
+    const ops = deleteAdapter({ r: 1, s: 0, f: 0, mg: [] });
+
+    const outcome = await ops.deleteBudgetItem({
+      projectId: 1,
+      budgetItemId: 99,
+    });
+
+    expect(outcome.status).toBe("ok");
+    expect(outcome.status === "ok" && outcome.data).toMatchObject({
+      succeeded: 0,
+      failed: 0,
+    });
+  });
+
+  it("carries the vendor's reason when the row could not be removed", async () => {
+    const ops = deleteAdapter({
+      r: 1,
+      s: 0,
+      f: 1,
+      mg: ["Budget item has related change orders"],
+    });
+
+    const outcome = await ops.deleteBudgetItem({
+      projectId: 1,
+      budgetItemId: 99,
+    });
+
+    expect(outcome.status === "ok" && outcome.data).toMatchObject({
+      succeeded: 0,
+      failed: 1,
+      message: "Budget item has related change orders",
+    });
+  });
+});
