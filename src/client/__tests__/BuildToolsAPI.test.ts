@@ -1261,7 +1261,7 @@ describe("createPurchaseOrderRaw()", () => {
   });
 });
 
-describe("createTask()", () => {
+describe("createTaskRaw()", () => {
   it("posts to /tasks/save with defaults filled in", async () => {
     const { stub, recorded } = makeFetchStub([
       {
@@ -1271,33 +1271,35 @@ describe("createTask()", () => {
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createTask({
+    const out = await api.createTaskRaw({
       name: "Inspect",
       projectId: 1,
       dueDate: "2025-01-01",
       assignedTo: "9",
       description: "d",
     });
-    expect(out.success).toBe(true);
-    expect(out.taskId).toBe(33);
+    expect(out.dispatched && out.json).toMatchObject({
+      result: "success",
+      id: 33,
+    });
     const body = String(recorded[0].init.body);
     expect(body).toContain("Task%5Blocations_room_id%5D=2");
     expect(body).toContain("Task%5Bstatus%5D=1");
     expect(body).toContain("Task%5Bpriority%5D=1");
   });
 
-  it("returns failure on non-success", async () => {
+  it("hands back a rejection envelope without judging it", async () => {
     const { stub } = makeFetchStub([
       { status: 200, body: JSON.stringify({ result: "error", message: "no" }) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createTask({ name: "x", projectId: 1 });
-    expect(out).toEqual({ success: false, errors: "no" });
+    const out = await api.createTaskRaw({ name: "x", projectId: 1 });
+    expect(out.dispatched && out.json).toEqual({ result: "error", message: "no" });
   });
 });
 
-describe("createRFI()", () => {
+describe("createRFIRaw()", () => {
   it("posts to /rfis/save with Rfi[...] fields", async () => {
     const { stub, recorded } = makeFetchStub([
       {
@@ -1307,38 +1309,42 @@ describe("createRFI()", () => {
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createRFI({
+    const out = await api.createRFIRaw({
       subject: "Q",
       projectId: 1,
       question: "huh?",
       assignedTo: "9",
     });
-    expect(out).toEqual({ success: true, rfiId: 7, message: "ok" });
+    expect(out.dispatched && out.json).toEqual({
+      result: "success",
+      id: 7,
+      message: "ok",
+    });
     const body = String(recorded[0].init.body);
     expect(body).toContain("Rfi%5Bsubject%5D=Q");
     expect(body).toContain("Rfi%5Bquestion%5D=huh%3F");
   });
 
-  it("returns failure on non-success", async () => {
+  it("hands back a rejection envelope without judging it", async () => {
     const { stub } = makeFetchStub([
       { status: 200, body: JSON.stringify({ result: "error", message: "x" }) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createRFI({ subject: "x", projectId: 1 });
-    expect(out).toEqual({ success: false, errors: "x" });
+    const out = await api.createRFIRaw({ subject: "x", projectId: 1 });
+    expect(out.dispatched && out.json).toEqual({ result: "error", message: "x" });
   });
 
-  it("returns 'Server error' on non-JSON", async () => {
+  it("keeps the 500 on an empty body instead of flattening it", async () => {
     const { stub } = makeFetchStub([{ status: 500, body: "" }]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createRFI({ subject: "x", projectId: 1 });
-    expect(out.success).toBe(false);
+    const out = await api.createRFIRaw({ subject: "x", projectId: 1 });
+    expect(out).toEqual({ dispatched: true, status: 500, body: "" });
   });
 });
 
-describe("createService()", () => {
+describe("createServiceRaw()", () => {
   it("posts to /services/save", async () => {
     const { stub, recorded } = makeFetchStub([
       {
@@ -1348,26 +1354,30 @@ describe("createService()", () => {
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createService({
+    const out = await api.createServiceRaw({
       name: "Cleanup",
       projectId: 1,
       description: "post-work",
       dueDate: "2025-02-01",
       assignedTo: "9",
     });
-    expect(out).toEqual({ success: true, serviceId: 50, message: "ok" });
+    expect(out.dispatched && out.json).toEqual({
+      result: "success",
+      id: 50,
+      message: "ok",
+    });
     const body = String(recorded[0].init.body);
     expect(body).toContain("Service%5Bname%5D=Cleanup");
   });
 
-  it("returns failure on non-success", async () => {
+  it("hands back a rejection envelope without judging it", async () => {
     const { stub } = makeFetchStub([
       { status: 200, body: JSON.stringify({ result: "error", message: "x" }) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createService({ name: "x", projectId: 1 });
-    expect(out).toEqual({ success: false, errors: "x" });
+    const out = await api.createServiceRaw({ name: "x", projectId: 1 });
+    expect(out.dispatched && out.json).toEqual({ result: "error", message: "x" });
   });
 });
 

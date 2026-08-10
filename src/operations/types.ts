@@ -343,6 +343,37 @@ export interface TransitionPurchaseOrdersInput {
   status: number;
 }
 
+export interface CreateTaskInput {
+  name: string;
+  projectId: string | number;
+  locationId?: string | number;
+  status?: string | number;
+  priority?: string | number;
+  dueDate?: string;
+  assignedTo?: string | number;
+  description?: string;
+}
+
+export interface CreateRfiInput {
+  subject: string;
+  projectId: string | number;
+  locationId?: string | number;
+  status?: string | number;
+  priority?: string | number;
+  question?: string;
+  assignedTo?: string | number;
+}
+
+export interface CreateServiceInput {
+  name: string;
+  projectId: string | number;
+  description?: string;
+  locationId?: string | number;
+  status?: string | number;
+  dueDate?: string;
+  assignedTo?: string | number;
+}
+
 export interface CreateFinancialStatementInput {
   projectId: string | number;
   name: string;
@@ -459,6 +490,11 @@ export interface OperationsManagementApi {
   transitionPurchaseOrders(
     input: TransitionPurchaseOrdersInput,
   ): Promise<WriteOutcome<BulkWriteData>>;
+  createTask(input: CreateTaskInput): Promise<WriteOutcome<CreatedRecord>>;
+  createRfi(input: CreateRfiInput): Promise<WriteOutcome<CreatedRecord>>;
+  createService(
+    input: CreateServiceInput,
+  ): Promise<WriteOutcome<CreatedRecord>>;
 }
 
 /** Per-tenant selection config. Values are config names, never secrets. */

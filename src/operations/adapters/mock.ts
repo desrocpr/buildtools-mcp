@@ -40,6 +40,9 @@ import type {
   CreateInvoiceInput,
   CreateProjectInput,
   CreatePurchaseOrderInput,
+  CreateRfiInput,
+  CreateServiceInput,
+  CreateTaskInput,
   TransitionPurchaseOrdersInput,
   ListQuery,
   OperationsManagementApi,
@@ -58,7 +61,10 @@ export type WritableGrid =
   | "changeOrders"
   | "invoices"
   | "financialStatementRows"
-  | "purchaseOrders";
+  | "purchaseOrders"
+  | "tasks"
+  | "rfis"
+  | "services";
 
 /** A row in a mock grid. `id` is required — the interface guarantees it. */
 export interface MockRow extends Record<string, unknown> {
@@ -464,6 +470,37 @@ export class MockOperationsApi implements OperationsManagementApi {
       succeeded,
       failed: input.purchaseOrderIds.length - succeeded,
     });
+  }
+
+  async createTask(
+    input: CreateTaskInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    this.record("createTask", input);
+    return this.write(
+      "tasks",
+      { name: input.name, project_id: input.projectId },
+      { kind: "search", resource: "tasks", query: input.name },
+    );
+  }
+
+  async createRfi(input: CreateRfiInput): Promise<WriteOutcome<CreatedRecord>> {
+    this.record("createRfi", input);
+    return this.write(
+      "rfis",
+      { subject: input.subject, project_id: input.projectId },
+      { kind: "search", resource: "rfis", query: input.subject },
+    );
+  }
+
+  async createService(
+    input: CreateServiceInput,
+  ): Promise<WriteOutcome<CreatedRecord>> {
+    this.record("createService", input);
+    return this.write(
+      "services",
+      { name: input.name, project_id: input.projectId },
+      { kind: "search", resource: "services", query: input.name },
+    );
   }
 
   /**

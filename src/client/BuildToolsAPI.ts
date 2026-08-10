@@ -4028,7 +4028,7 @@ export class BuildToolsAPI {
   }
 
   /** Source L533–555. */
-  async createTask(taskData: {
+  async createTaskRaw(taskData: {
     name: string;
     projectId: string | number;
     locationId?: string | number;
@@ -4037,13 +4037,9 @@ export class BuildToolsAPI {
     dueDate?: string;
     assignedTo?: string | number;
     description?: string;
-  }): Promise<{
-    success: boolean;
-    taskId?: string | number;
-    message?: unknown;
-    errors?: unknown;
-  }> {
-    await this.ensureAuthenticated();
+  }): Promise<RawWriteAttempt> {
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
 
     const data: PostData = {
       "Task[name]": taskData.name,
@@ -4056,15 +4052,8 @@ export class BuildToolsAPI {
     if (taskData.assignedTo) data["Task[assigned_to]"] = taskData.assignedTo;
     if (taskData.description) data["Task[description]"] = taskData.description;
 
-    const result = (await this.post("/tasks/save", data)) as {
-      result?: string;
-      id?: string | number;
-      message?: unknown;
-    };
-    if (result?.result === "success") {
-      return { success: true, taskId: result.id, message: result.message };
-    }
-    return { success: false, errors: result?.message };
+    const raw = await this.postRaw("/tasks/save", data);
+    return { dispatched: true, ...raw };
   }
 
   // ========================================================================
@@ -4077,7 +4066,7 @@ export class BuildToolsAPI {
   }
 
   /** Source L563–598. */
-  async createRFI(rfiData: {
+  async createRFIRaw(rfiData: {
     subject: string;
     projectId: string | number;
     locationId?: string | number;
@@ -4085,53 +4074,27 @@ export class BuildToolsAPI {
     priority?: string | number;
     question?: string;
     assignedTo?: string | number;
-  }): Promise<{
-    success: boolean;
-    rfiId?: string | number;
-    message?: unknown;
-    errors?: unknown;
-  }> {
-    await this.ensureAuthenticated();
+  }): Promise<RawWriteAttempt> {
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
 
-    const formData = new URLSearchParams();
-    formData.append("Rfi[subject]", rfiData.subject);
-    formData.append("Rfi[project_id]", String(rfiData.projectId));
-    formData.append("Rfi[locations_room_id]", String(rfiData.locationId ?? "2"));
-    formData.append("Rfi[status]", String(rfiData.status ?? "1"));
-    formData.append("Rfi[priority]", String(rfiData.priority ?? "1"));
-    if (rfiData.question) formData.append("Rfi[question]", rfiData.question);
+    // Through postRaw, like every other write. This method used to hand-roll
+    // its own URLSearchParams and headers — the second request path that
+    // postRaw's docstring warns about.
+    const data: PostData = {
+      "Rfi[subject]": rfiData.subject,
+      "Rfi[project_id]": String(rfiData.projectId),
+      "Rfi[locations_room_id]": String(rfiData.locationId ?? "2"),
+      "Rfi[status]": String(rfiData.status ?? "1"),
+      "Rfi[priority]": String(rfiData.priority ?? "1"),
+    };
+    if (rfiData.question) data["Rfi[question]"] = rfiData.question;
     if (rfiData.assignedTo) {
-      formData.append("Rfi[assigned_to]", String(rfiData.assignedTo));
+      data["Rfi[assigned_to]"] = String(rfiData.assignedTo);
     }
 
-    const response = await this.request(
-      `${this.baseUrl}/rfis/save`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "X-Requested-With": "XMLHttpRequest",
-          Accept: "application/json",
-          ...(this.tokens.xsrf ? { "X-XSRF-TOKEN": this.tokens.xsrf } : {}),
-        },
-        body: formData.toString(),
-      },
-      false,
-    );
-
-    try {
-      const result = JSON.parse(response.body) as {
-        result?: string;
-        id?: string | number;
-        message?: unknown;
-      };
-      if (result?.result === "success") {
-        return { success: true, rfiId: result.id, message: result.message };
-      }
-      return { success: false, errors: result?.message };
-    } catch {
-      return { success: false, errors: "Server error" };
-    }
+    const raw = await this.postRaw("/rfis/save", data);
+    return { dispatched: true, ...raw };
   }
 
   // ========================================================================
@@ -4522,7 +4485,7 @@ export class BuildToolsAPI {
   }
 
   /** Source L925–946. */
-  async createService(serviceData: {
+  async createServiceRaw(serviceData: {
     name: string;
     projectId: string | number;
     description?: string;
@@ -4530,13 +4493,9 @@ export class BuildToolsAPI {
     status?: string | number;
     dueDate?: string;
     assignedTo?: string | number;
-  }): Promise<{
-    success: boolean;
-    serviceId?: string | number;
-    message?: unknown;
-    errors?: unknown;
-  }> {
-    await this.ensureAuthenticated();
+  }): Promise<RawWriteAttempt> {
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
 
     const data: PostData = {
       "Service[name]": serviceData.name,
@@ -4548,15 +4507,8 @@ export class BuildToolsAPI {
     if (serviceData.dueDate) data["Service[due_date]"] = serviceData.dueDate;
     if (serviceData.assignedTo) data["Service[assigned_to]"] = serviceData.assignedTo;
 
-    const result = (await this.post("/services/save", data)) as {
-      result?: string;
-      id?: string | number;
-      message?: unknown;
-    };
-    if (result?.result === "success") {
-      return { success: true, serviceId: result.id, message: result.message };
-    }
-    return { success: false, errors: result?.message };
+    const raw = await this.postRaw("/services/save", data);
+    return { dispatched: true, ...raw };
   }
 
   // ========================================================================
