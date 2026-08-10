@@ -1960,83 +1960,43 @@ describe("createBudgetItem() — idempotency", () => {
         <thead><tr><th>cat</th></tr></thead>
       </table>`);
 
-  it("skip (default): returns existing row id without writing when one exists", async () => {
+  it("posts the category to /budget/save and hands back the envelope", async () => {
+    // The dedup that used to live in this method is now the operations
+    // adapter's job — it is policy, not wire format, and the adapter is the
+    // layer that can read the budget. See adapter.test.ts for its coverage.
     const { stub, recorded } = makeFetchStub([
-      { status: 200, body: budgetHtmlWith(1614, 63477) },
-    ]);
-    const api = new BuildToolsAPI({ fetch: stub });
-    api.authenticated = true;
-    const out = await api.createBudgetItem({
-      projectId: 185966,
-      budgetCategoryId: 1614,
-    });
-    expect(out).toEqual({
-      success: true,
-      budgetItemId: 63477,
-      existed: true,
-    });
-    expect(recorded).toHaveLength(1);
-    expect(recorded[0].url).toContain("/budget?PR[]=185966");
-    expect(recorded[0].init.method ?? "GET").toBe("GET");
-  });
-
-  it("error: returns success=false with existing budgetItemId when a row exists", async () => {
-    const { stub } = makeFetchStub([
-      { status: 200, body: budgetHtmlWith(1614, 63477) },
-    ]);
-    const api = new BuildToolsAPI({ fetch: stub });
-    api.authenticated = true;
-    const out = await api.createBudgetItem({
-      projectId: 185966,
-      budgetCategoryId: 1614,
-      ifExists: "error",
-    });
-    expect(out.success).toBe(false);
-    expect(out.budgetItemId).toBe(63477);
-    expect(out.existed).toBe(true);
-    expect(String(out.errors)).toMatch(/already exists/);
-  });
-
-  it("skip: when no existing row, inserts and returns new id with existed:false", async () => {
-    const { stub, recorded } = makeFetchStub([
-      { status: 200, body: emptyBudgetHtml },
       { status: 200, body: JSON.stringify({ result: "success", id: 99999 }) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createBudgetItem({
+
+    const out = await api.createBudgetItemRaw({
       projectId: 185966,
       budgetCategoryId: 9999,
     });
-    expect(out).toEqual({
-      success: true,
-      budgetItemId: 99999,
-      existed: false,
-    });
-    expect(recorded).toHaveLength(2);
-    expect(recorded[1].url).toContain("/budget/save?PR[]=185966");
-    expect(recorded[1].init.method).toBe("POST");
+
+    expect(out.dispatched && out.json).toEqual({ result: "success", id: 99999 });
+    // Exactly one call: no dup-check GET happens at this layer any more.
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].url).toContain("/budget/save?PR[]=185966");
+    expect(recorded[0].init.method).toBe("POST");
+    expect(String(recorded[0].init.body)).toContain(
+      "Budget%5Bbudget_category_id%5D=9999",
+    );
   });
 
-  it("force: skips the existence check entirely and POSTs", async () => {
-    const { stub, recorded } = makeFetchStub([
-      { status: 200, body: JSON.stringify({ result: "success", id: 99998 }) },
-    ]);
+  it("reports a missing projectId as NOT dispatched", async () => {
+    const { stub, recorded } = makeFetchStub([]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.createBudgetItem({
-      projectId: 185966,
-      budgetCategoryId: 1614,
-      ifExists: "force",
+
+    const out = await api.createBudgetItemRaw({
+      projectId: 0,
+      budgetCategoryId: 1,
     });
-    expect(out).toEqual({
-      success: true,
-      budgetItemId: 99998,
-      existed: false,
-    });
-    // Exactly one HTTP call — no dup-check GET.
-    expect(recorded).toHaveLength(1);
-    expect(recorded[0].init.method).toBe("POST");
+
+    expect(out.dispatched).toBe(false);
+    expect(recorded).toHaveLength(0);
   });
 });
 
@@ -2044,7 +2004,7 @@ describe("createBudgetItem() — idempotency", () => {
 // deleteBudgetItem() — CSRF wiring + success check
 // ---------------------------------------------------------------------------
 
-describe("deleteBudgetItem() — CSRF + success check", () => {
+describe("deleteBudgetItemRaw() — CSRF wiring", () => {
   const formHtml = `<form><input name="_token" value="csrf-tok-xyz" /></form>`;
 
   it("harvests _token and posts ids[]= (NOT id=)", async () => {
@@ -2057,13 +2017,8 @@ describe("deleteBudgetItem() — CSRF + success check", () => {
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.deleteBudgetItem(63478, 185966);
-    expect(out).toEqual({
-      success: true,
-      succeeded: 1,
-      failed: 0,
-      errors: undefined,
-    });
+    const out = await api.deleteBudgetItemRaw(63478, 185966);
+    expect(out.dispatched && out.json).toEqual({ r: 1, s: 1, f: 0, mg: [] });
     expect(recorded[1].url).toContain("/budget/delete?PR[]=185966");
     const body = String(recorded[1].init.body ?? "");
     expect(body).toContain("_token=csrf-tok-xyz");
@@ -2071,16 +2026,21 @@ describe("deleteBudgetItem() — CSRF + success check", () => {
     expect(body).not.toMatch(/(^|&)id=/);
   });
 
-  it("treats {r:1, s:0, f:0} as failure — server silently no-op'd", async () => {
+  it("passes the silent no-op envelope through rather than judging it", async () => {
+    // `{r:1, s:0, f:0}` means BuildTools accepted the call and deleted
+    // nothing. The counts are the only way a caller learns that, so they must
+    // survive this layer intact — collapsing them into a boolean here is what
+    // made "refused" and "did nothing" indistinguishable.
     const { stub } = makeFetchStub([
       { status: 200, body: formHtml },
       { status: 200, body: JSON.stringify({ r: 1, s: 0, f: 0, mg: [] }) },
     ]);
     const api = new BuildToolsAPI({ fetch: stub });
     api.authenticated = true;
-    const out = await api.deleteBudgetItem(99, 1);
-    expect(out.success).toBe(false);
-    expect(out.succeeded).toBe(0);
+
+    const out = await api.deleteBudgetItemRaw(99, 1);
+
+    expect(out.dispatched && out.json).toEqual({ r: 1, s: 0, f: 0, mg: [] });
   });
 });
 

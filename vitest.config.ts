@@ -35,11 +35,15 @@ export default defineConfig({
         "src/**/*.d.ts",
         "src/index.ts", // process entrypoint (transport selection + boot)
       ],
+      // Raised from 69/69/75/70 (MOS-747 Phase 5). Measured coverage has sat
+      // at ~72/75/81 for several slices while the floor stayed where it was
+      // set months ago, which means it had stopped catching anything. Set just
+      // under the current numbers again, per this file's own instruction.
       thresholds: {
-        lines: 69,
-        statements: 69,
-        functions: 75,
-        branches: 70,
+        lines: 71,
+        statements: 71,
+        functions: 79,
+        branches: 73,
       },
     },
   },

@@ -2096,62 +2096,23 @@ export class BuildToolsAPI {
    *
    * Verified live: works against both Templates and active projects.
    */
-  async createBudgetItem(data: {
+  async createBudgetItemRaw(data: {
     projectId: string | number;
     budgetCategoryId: string | number;
-    ifExists?: "skip" | "error" | "force";
-  }): Promise<{
-    success: boolean;
-    budgetItemId?: number;
-    existed?: boolean;
-    errors?: unknown;
-  }> {
-    await this.ensureAuthenticated();
-    if (!data.projectId) throw new BuildToolsServerError("projectId is required");
+  }): Promise<RawWriteAttempt> {
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
+    if (!data.projectId) {
+      return { dispatched: false, reason: "projectId is required" };
+    }
     if (!data.budgetCategoryId) {
-      throw new BuildToolsServerError("budgetCategoryId is required");
+      return { dispatched: false, reason: "budgetCategoryId is required" };
     }
 
-    // Idempotency: BuildTools' `budgets` table has a natural unique key on
-    // (project_id, budget_category_id) for active (deleted_working=0) rows,
-    // but the /budget/save endpoint is a plain INSERT — calling it twice with
-    // the same category produces duplicate rows that break downstream reports
-    // (Power BI's `m budgets_selections` model keys on category||project and
-    // chokes on the dupe). Default behavior here is `skip`: look up the
-    // existing row first and return it without writing.
-    const ifExists = data.ifExists ?? "skip";
-    if (ifExists !== "force") {
-      try {
-        const grid = await this.getBudget(data.projectId);
-        const existing = grid.items.find(
-          (i) => Number(i.categoryId) === Number(data.budgetCategoryId),
-        );
-        if (existing) {
-          if (ifExists === "error") {
-            return {
-              success: false,
-              budgetItemId: Number(existing.id),
-              existed: true,
-              errors: `A budget item for category ${data.budgetCategoryId} already exists on project ${data.projectId} (budget_item_id=${existing.id}). Pass ifExists: "skip" to return the existing row, or "force" to insert a duplicate (not recommended).`,
-            };
-          }
-          return {
-            success: true,
-            budgetItemId: Number(existing.id),
-            existed: true,
-          };
-        }
-      } catch (err) {
-        // If the dup-check fetch itself fails (network blip, auth churn),
-        // don't fall through silently to an INSERT — that's how dupes get
-        // created. Surface the error.
-        throw err;
-      }
-    }
-
-    const fd = new URLSearchParams();
-    fd.append("Budget[budget_category_id]", String(data.budgetCategoryId));
-
+    // The natural-key dedup that used to live here now lives in the operations
+    // adapter: "don't insert a second row for a category that already has one"
+    // is policy any operations system needs, not BuildTools wire format, and
+    // the adapter is the layer that can read the budget to check.
     const resp = await this.request(
       `${this.baseUrl}/budget/save?PR[]=${data.projectId}`,
       {
@@ -2162,27 +2123,14 @@ export class BuildToolsAPI {
           Accept: "application/json",
           "X-XSRF-TOKEN": this.tokens.xsrf ?? "",
         },
-        body: fd.toString(),
+        body: new URLSearchParams({
+          "Budget[budget_category_id]": String(data.budgetCategoryId),
+        }).toString(),
       },
       false,
     );
 
-    try {
-      const result = JSON.parse(resp.body) as {
-        result?: string;
-        id?: number;
-        message?: string;
-      };
-      if (result.result === "success") {
-        return { success: true, budgetItemId: result.id, existed: false };
-      }
-      return { success: false, errors: result.message };
-    } catch {
-      return {
-        success: false,
-        errors: `HTTP ${resp.status}: ${resp.body.slice(0, 200)}`,
-      };
-    }
+    return { dispatched: true, ...parseRawBody(resp) };
   }
 
   /**
@@ -2193,18 +2141,25 @@ export class BuildToolsAPI {
    *
    * Verified live: changing amount_working updates data-value attr.
    */
-  async updateBudgetItem(data: {
+  async updateBudgetItemRaw(data: {
     projectId: string | number;
     budgetItemId: string | number;
     budgetCategoryId: string | number;
     amountWorking?: number;
     isAllowance?: boolean;
-  }): Promise<{ success: boolean; errors?: unknown }> {
-    await this.ensureAuthenticated();
-    if (!data.projectId) throw new BuildToolsServerError("projectId is required");
-    if (!data.budgetItemId) throw new BuildToolsServerError("budgetItemId is required");
+  }): Promise<RawWriteAttempt> {
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
+    // Guard failures are pre-dispatch: nothing reached BuildTools, so the
+    // caller can fix the input and retry with no risk of a duplicate edit.
+    if (!data.projectId) {
+      return { dispatched: false, reason: "projectId is required" };
+    }
+    if (!data.budgetItemId) {
+      return { dispatched: false, reason: "budgetItemId is required" };
+    }
     if (!data.budgetCategoryId) {
-      throw new BuildToolsServerError("budgetCategoryId is required");
+      return { dispatched: false, reason: "budgetCategoryId is required" };
     }
 
     // Harvest CSRF from the edit form
@@ -2220,7 +2175,10 @@ export class BuildToolsAPI {
     );
     const csrf = (formResp.body.match(/name="_token"[^>]*value="([^"]+)"/) ?? [])[1];
     if (!csrf) {
-      return { success: false, errors: "Could not harvest CSRF token from budget form" };
+      return {
+        dispatched: false,
+        reason: "Could not harvest CSRF token from budget form",
+      };
     }
 
     const fd = new URLSearchParams();
@@ -2249,19 +2207,7 @@ export class BuildToolsAPI {
       false,
     );
 
-    try {
-      const result = JSON.parse(resp.body) as {
-        result?: string;
-        message?: string;
-      };
-      if (result.result === "success") return { success: true };
-      return { success: false, errors: result.message };
-    } catch {
-      return {
-        success: false,
-        errors: `HTTP ${resp.status}: ${resp.body.slice(0, 200)}`,
-      };
-    }
+    return { dispatched: true, ...parseRawBody(resp) };
   }
 
   /**
@@ -2273,13 +2219,18 @@ export class BuildToolsAPI {
    * Response: { r: 1, s: <succeeded>, f: <failed>, mg: <error details> }.
    * Deletion fails (f > 0) if the budget item has related change orders.
    */
-  async deleteBudgetItem(
+  async deleteBudgetItemRaw(
     budgetItemId: string | number,
     projectId: string | number,
-  ): Promise<{ success: boolean; succeeded: number; failed: number; errors?: unknown }> {
-    await this.ensureAuthenticated();
-    if (!projectId) throw new BuildToolsServerError("projectId is required");
-    if (!budgetItemId) throw new BuildToolsServerError("budgetItemId is required");
+  ): Promise<RawWriteAttempt> {
+    const blocked = await this.preflight();
+    if (blocked) return blocked;
+    if (!projectId) {
+      return { dispatched: false, reason: "projectId is required" };
+    }
+    if (!budgetItemId) {
+      return { dispatched: false, reason: "budgetItemId is required" };
+    }
 
     // Harvest a fresh CSRF token from the budget edit form. Without `_token`
     // in the form body the server returns 200 with {r:1,s:0,f:0} and silently
@@ -2316,29 +2267,11 @@ export class BuildToolsAPI {
       false,
     );
 
-    try {
-      const result = JSON.parse(resp.body) as {
-        r?: number;
-        s?: number;
-        f?: number;
-        mg?: unknown;
-      };
-      const succeeded = result.s ?? 0;
-      const failed = result.f ?? 0;
-      // Real success requires r=1, no failures, AND at least one row deleted.
-      // The server returns {r:1, s:0, f:0} for silent no-ops (e.g. missing
-      // CSRF, or attempting to delete a row that doesn't exist) — that's NOT
-      // success.
-      const success = result.r === 1 && failed === 0 && succeeded > 0;
-      return { success, succeeded, failed, errors: failed > 0 ? result.mg : undefined };
-    } catch {
-      return {
-        success: false,
-        succeeded: 0,
-        failed: 1,
-        errors: `HTTP ${resp.status}: ${resp.body.slice(0, 200)}`,
-      };
-    }
+    // `{r:1, s:0, f:0}` is a documented SILENT NO-OP here (missing CSRF, or a
+    // row that does not exist). The adapter reads the counts and says so —
+    // collapsing it into `success: false` lost the difference between "refused"
+    // and "did nothing", and collapsing it into `true` was worse.
+    return { dispatched: true, ...parseRawBody(resp) };
   }
 
   /**

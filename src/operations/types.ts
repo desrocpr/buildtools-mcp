@@ -276,6 +276,15 @@ export interface CreatedRecord {
   id?: string | number;
   /** Upstream's own confirmation text, when it sent one. */
   message?: string;
+  /**
+   * True when the record ALREADY existed and nothing was written.
+   *
+   * A real outcome, not a failure: for resources with a natural key, "it is
+   * already there" is what the caller wanted. Reporting it as created would
+   * make a no-op look like a write; reporting it as failed would send the
+   * caller to create a duplicate.
+   */
+  existed?: boolean;
 }
 
 export interface CreateProjectInput {
@@ -341,6 +350,33 @@ export interface TransitionPurchaseOrdersInput {
   /** One id is a batch of one — the endpoint does not distinguish. */
   purchaseOrderIds: Array<string | number>;
   status: number;
+}
+
+export interface CreateBudgetItemInput {
+  projectId: string | number;
+  budgetCategoryId: string | number;
+  /**
+   * What to do when the project already has a line for this category.
+   *
+   * `skip` (default) returns the existing row untouched. `error` refuses.
+   * `force` inserts anyway — the endpoint is a plain INSERT with no unique
+   * constraint, so a second row breaks downstream reporting that keys on
+   * category-per-project.
+   */
+  ifExists?: "skip" | "error" | "force";
+}
+
+export interface UpdateBudgetItemInput {
+  projectId: string | number;
+  budgetItemId: string | number;
+  budgetCategoryId: string | number;
+  amountWorking?: number;
+  isAllowance?: boolean;
+}
+
+export interface DeleteBudgetItemInput {
+  projectId: string | number;
+  budgetItemId: string | number;
 }
 
 export interface CreateTaskInput {
@@ -495,6 +531,19 @@ export interface OperationsManagementApi {
   createService(
     input: CreateServiceInput,
   ): Promise<WriteOutcome<CreatedRecord>>;
+  createBudgetItem(
+    input: CreateBudgetItemInput,
+  ): Promise<WriteOutcome<CreatedRecord>>;
+  updateBudgetItem(
+    input: UpdateBudgetItemInput,
+  ): Promise<WriteOutcome<CreatedRecord>>;
+  /**
+   * Counts, not a boolean — and `succeeded: 0` with `failed: 0` is a real
+   * answer here, meaning upstream accepted the call and deleted nothing.
+   */
+  deleteBudgetItem(
+    input: DeleteBudgetItemInput,
+  ): Promise<WriteOutcome<BulkWriteData>>;
 }
 
 /** Per-tenant selection config. Values are config names, never secrets. */

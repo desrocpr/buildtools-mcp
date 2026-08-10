@@ -665,3 +665,177 @@ describe("task, RFI and service creates", () => {
     expect(calls).toBe(1);
   });
 });
+
+describe("budget item writes", () => {
+  const BUDGET_ARGS = { project_id: 185966, budget_category_id: 1614 };
+
+  function budgetTool(name: string, api: Record<string, unknown>) {
+    const client = { db: null, ...api } as unknown as BuildToolsAPI;
+    const tool = createMutationTools(
+      () => client,
+      new ConfirmationStore(),
+    ).find((t) => t.name === name)!;
+    return { tool, client };
+  }
+
+  it("create says 'already exists' — not 'created' — for a no-op", async () => {
+    // The distinction a caller acts on: an unchanged budget must not read as
+    // an edited one, or the next step is taken against a number nobody set.
+    const { tool, client } = budgetTool("create_budget_item", {
+      async getBudget() {
+        return { items: [{ id: 63477, categoryId: 1614 }], columns: [] };
+      },
+      async createBudgetItemRaw() {
+        throw new Error("must not insert");
+      },
+    });
+
+    const prompt = await tool.handler(BUDGET_ARGS, client);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const text = textOf(
+      await tool.handler({ ...BUDGET_ARGS, confirmation_id: cid }, client),
+    );
+
+    expect(text).toContain("already exists");
+    expect(text).toContain("#63477");
+    expect(text).not.toContain("created");
+  });
+
+  it("delete refuses to call a silent no-op a deletion", async () => {
+    // BuildTools returns {r:1, s:0, f:0} when it accepts the call and removes
+    // nothing — including when the row was never there. Rendering that as a
+    // successful delete is how a budget item that still exists gets recorded
+    // as gone.
+    const { tool, client } = budgetTool("delete_budget_item", {
+      async deleteBudgetItemRaw() {
+        return { dispatched: true, status: 200, body: "{}", json: { r: 1, s: 0, f: 0 } };
+      },
+    });
+    const args = { project_id: 1, budget_item_id: 99 };
+
+    const prompt = await tool.handler(args, client);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const result = await tool.handler({ ...args, confirmation_id: cid }, client);
+
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain("Nothing was deleted");
+    expect(textOf(result)).toContain("list_budget");
+  });
+
+  it("delete reports the vendor's reason when the row is blocked", async () => {
+    const { tool, client } = budgetTool("delete_budget_item", {
+      async deleteBudgetItemRaw() {
+        return {
+          dispatched: true,
+          status: 200,
+          body: "{}",
+          json: { r: 1, s: 0, f: 1, mg: ["Budget item has related change orders"] },
+        };
+      },
+    });
+    const args = { project_id: 1, budget_item_id: 99 };
+
+    const prompt = await tool.handler(args, client);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const text = textOf(
+      await tool.handler({ ...args, confirmation_id: cid }, client),
+    );
+
+    expect(text).toContain("Delete refused");
+    expect(text).toContain("related change orders");
+  });
+
+  it("delete reports a real deletion plainly", async () => {
+    const { tool, client } = budgetTool("delete_budget_item", {
+      async deleteBudgetItemRaw() {
+        return { dispatched: true, status: 200, body: "{}", json: { r: 1, s: 1, f: 0 } };
+      },
+    });
+    const args = { project_id: 1, budget_item_id: 63478 };
+
+    const prompt = await tool.handler(args, client);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const result = await tool.handler({ ...args, confirmation_id: cid }, client);
+
+    expect(result.isError).toBeUndefined();
+    expect(textOf(result)).toContain("deleted");
+  });
+
+  it("update calls an unreadable response unknown", async () => {
+    const { tool, client } = budgetTool("update_budget_item", {
+      async updateBudgetItemRaw() {
+        return { dispatched: true, status: 500, body: "<html>x</html>" };
+      },
+    });
+    const args = {
+      project_id: 1,
+      budget_item_id: 63478,
+      budget_category_id: 1614,
+      amount_working: 100,
+    };
+
+    const prompt = await tool.handler(args, client);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const text = textOf(
+      await tool.handler({ ...args, confirmation_id: cid }, client),
+    );
+
+    expect(text).toContain("Outcome unknown");
+  });
+});
+
+describe("reconcile advice names a tool the reader can actually call", () => {
+  // A budget delete that came back ambiguous used to render the purchase-order
+  // tool's copy verbatim — "No purchase orders were changed", "re-read each
+  // purchase order with get_purchase_order". Unfollowable advice on the one
+  // path where following it is the entire point.
+  it("tells a failed budget delete to re-read the budget, not purchase orders", async () => {
+    const client = {
+      db: null,
+      async deleteBudgetItemRaw() {
+        return { dispatched: true, status: 500, body: "<html>x</html>" };
+      },
+    } as unknown as BuildToolsAPI;
+    const tool = createMutationTools(
+      () => client,
+      new ConfirmationStore(),
+    ).find((t) => t.name === "delete_budget_item")!;
+    const args = { project_id: 1, budget_item_id: 99 };
+
+    const prompt = await tool.handler(args, client);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const text = textOf(await tool.handler({ ...args, confirmation_id: cid }, client));
+
+    expect(text).toContain("list_budget");
+    expect(text).not.toContain("purchase order");
+    expect(text).not.toContain("get_purchase_order");
+  });
+
+  it("does not tell someone their UPDATE may not have been created", async () => {
+    // `renderOutcome`'s copy is create-shaped, and update_budget_item was its
+    // first non-create caller.
+    const client = {
+      db: null,
+      async updateBudgetItemRaw() {
+        return { dispatched: true, status: 500, body: "" };
+      },
+    } as unknown as BuildToolsAPI;
+    const tool = createMutationTools(
+      () => client,
+      new ConfirmationStore(),
+    ).find((t) => t.name === "update_budget_item")!;
+    const args = {
+      project_id: 1,
+      budget_item_id: 63478,
+      budget_category_id: 1614,
+      amount_working: 100,
+    };
+
+    const prompt = await tool.handler(args, client);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const text = textOf(await tool.handler({ ...args, confirmation_id: cid }, client));
+
+    expect(text).toContain("may or may not have been updated");
+    expect(text).not.toContain("created");
+  });
+});
