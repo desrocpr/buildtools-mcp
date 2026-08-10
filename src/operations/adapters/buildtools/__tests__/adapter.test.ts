@@ -670,3 +670,51 @@ describe("deleteBudgetItem — the silent no-op is data, not success", () => {
     });
   });
 });
+
+describe("the dedup check must not read a lagging replica", () => {
+  /**
+   * A read that GATES A WRITE cannot come from the DB fast path. The adapter
+   * already states this rule for write dispatch — "the replica is read-only,
+   * and `this.reader` may BE the replica" — and the dedup has the identical
+   * hazard: if a line created moments ago is not visible yet, the guard sees
+   * "no existing row" and inserts the duplicate it exists to prevent.
+   *
+   * That is not hypothetical here. The retry path this whole series is built
+   * around is "the create was ambiguous, so call it again with skip" — which
+   * is exactly when the row is newest and the replica most likely behind.
+   */
+  it("reads the live client even when a DB fast path is attached", async () => {
+    let liveReads = 0;
+    let replicaReads = 0;
+    let inserts = 0;
+    const api = {
+      // The replica has not caught up: it still shows an empty budget.
+      db: {
+        async getBudget() {
+          replicaReads += 1;
+          return { items: [], columns: [] };
+        },
+      },
+      // The live source knows the line already exists.
+      async getBudget() {
+        liveReads += 1;
+        return { items: [{ id: 63477, categoryId: 1614 }], columns: [] };
+      },
+      async createBudgetItemRaw() {
+        inserts += 1;
+        return { dispatched: true, status: 200, body: "{}", json: { result: "success", id: 1 } };
+      },
+    } as unknown as BuildToolsAPI;
+
+    const outcome = await new BuildToolsOperationsAdapter(api).createBudgetItem({
+      projectId: 185966,
+      budgetCategoryId: 1614,
+    });
+
+    expect(liveReads).toBe(1);
+    expect(replicaReads).toBe(0);
+    // The whole point: no duplicate line.
+    expect(inserts).toBe(0);
+    expect(outcome.status === "ok" && outcome.data.existed).toBe(true);
+  });
+});

@@ -783,3 +783,59 @@ describe("budget item writes", () => {
     expect(text).toContain("Outcome unknown");
   });
 });
+
+describe("reconcile advice names a tool the reader can actually call", () => {
+  // A budget delete that came back ambiguous used to render the purchase-order
+  // tool's copy verbatim — "No purchase orders were changed", "re-read each
+  // purchase order with get_purchase_order". Unfollowable advice on the one
+  // path where following it is the entire point.
+  it("tells a failed budget delete to re-read the budget, not purchase orders", async () => {
+    const client = {
+      db: null,
+      async deleteBudgetItemRaw() {
+        return { dispatched: true, status: 500, body: "<html>x</html>" };
+      },
+    } as unknown as BuildToolsAPI;
+    const tool = createMutationTools(
+      () => client,
+      new ConfirmationStore(),
+    ).find((t) => t.name === "delete_budget_item")!;
+    const args = { project_id: 1, budget_item_id: 99 };
+
+    const prompt = await tool.handler(args, client);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const text = textOf(await tool.handler({ ...args, confirmation_id: cid }, client));
+
+    expect(text).toContain("list_budget");
+    expect(text).not.toContain("purchase order");
+    expect(text).not.toContain("get_purchase_order");
+  });
+
+  it("does not tell someone their UPDATE may not have been created", async () => {
+    // `renderOutcome`'s copy is create-shaped, and update_budget_item was its
+    // first non-create caller.
+    const client = {
+      db: null,
+      async updateBudgetItemRaw() {
+        return { dispatched: true, status: 500, body: "" };
+      },
+    } as unknown as BuildToolsAPI;
+    const tool = createMutationTools(
+      () => client,
+      new ConfirmationStore(),
+    ).find((t) => t.name === "update_budget_item")!;
+    const args = {
+      project_id: 1,
+      budget_item_id: 63478,
+      budget_category_id: 1614,
+      amount_working: 100,
+    };
+
+    const prompt = await tool.handler(args, client);
+    const cid = textOf(prompt).match(/confirmation_id:\s*"([^"]+)"/)![1];
+    const text = textOf(await tool.handler({ ...args, confirmation_id: cid }, client));
+
+    expect(text).toContain("may or may not have been updated");
+    expect(text).not.toContain("created");
+  });
+});

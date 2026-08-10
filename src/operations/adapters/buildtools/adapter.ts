@@ -546,7 +546,14 @@ export class BuildToolsOperationsAdapter implements OperationsManagementApi {
     if (mode !== "force") {
       let existingId: string | number | undefined;
       try {
-        const budget = await this.getBudget(input.projectId);
+        // `this.api.getBudget`, NOT `this.getBudget`. The latter routes through
+        // `this.reader`, which is the MySQL replica whenever MYSQL_* is
+        // configured — i.e. in production. A read that GATES A WRITE cannot use
+        // a lagging source: a line created moments ago would be invisible, the
+        // guard would see "no existing row", and it would insert the duplicate
+        // it exists to prevent. Same reasoning as the rule for write dispatch
+        // itself, one line up.
+        const budget = await this.api.getBudget(input.projectId);
         existingId = budget.items.find(
           (i) => Number(i.categoryId) === Number(input.budgetCategoryId),
         )?.id;

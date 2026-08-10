@@ -134,7 +134,7 @@ function opsOf(api: BuildToolsAPI): OperationsManagementApi {
  */
 function formatWriteOutcome(
   outcome: WriteOutcome<CreatedRecord>,
-  opts: { noun: string; toolName: string },
+  opts: { noun: string; toolName: string; verb?: string },
 ): ToolResult {
   return remember(outcome, renderOutcome(outcome, opts));
 }
@@ -177,27 +177,50 @@ function outcomeOf(result: ToolResult): WriteOutcome<unknown> | undefined {
  * the caller has to re-read every id, not look for one record, and a blind
  * retry would re-transition the ones that already moved.
  */
+interface BulkNotAppliedCopy {
+  /** Headline for a refusal, e.g. "Bulk transition refused". */
+  refusedHeadline: string;
+  /** What was attempted, e.g. "transition of 5 purchase order(s)". */
+  attempt: string;
+  /** What is definitely true when upstream REFUSED, e.g. "No purchase orders were changed." */
+  refusedClaim: string;
+  /** The read that resolves an ambiguous outcome, e.g. "get_purchase_order". */
+  reReadWith: string;
+  /** Why a blind retry is wrong here. */
+  retryHazard: string;
+}
+
 function formatBulkNotApplied(
   outcome: WriteFailed | WriteAmbiguous,
-  total: number,
+  copy: BulkNotAppliedCopy,
 ): ToolResult {
   if (outcome.status === "failed") {
     return errorMarkdown(
-      `**Bulk transition refused.** ${escapeMarkdownInline(outcome.reason)} No purchase orders were changed.`,
+      `**${copy.refusedHeadline}.** ${escapeMarkdownInline(outcome.reason)} ${copy.refusedClaim}`,
     );
   }
   return errorMarkdown(
-    `**Outcome unknown — do NOT retry blindly.** The transition of ${total} purchase order(s) may have been applied in whole, in part, or not at all. ` +
+    `**Outcome unknown — do NOT retry blindly.** The ${copy.attempt} may have been applied in whole, in part, or not at all. ` +
       `${escapeMarkdownInline(outcome.reason)}\n\n` +
-      `Re-read each purchase order with \`get_purchase_order\` and compare its status before doing anything else. ` +
-      `Retrying now would re-transition any that already moved.`,
+      `Re-read with \`${copy.reReadWith}\` before doing anything else. ${copy.retryHazard}`,
   );
 }
 
 function renderOutcome(
   outcome: WriteOutcome<CreatedRecord>,
-  opts: { noun: string; toolName: string },
+  opts: { noun: string; toolName: string; verb?: string },
 ): ToolResult {
+  // "created" is right for the eight create tools and wrong for anything else.
+  // `update_budget_item` was the first non-create caller and inherited copy
+  // telling the reader its edit "may or may not have been created".
+  const verb = opts.verb ?? "created";
+  const infinitive = verb === "created" ? "create" : verb.replace(/d$/, "");
+  // The hazard differs with the verb: retrying a create makes a second record,
+  // retrying an update re-applies an edit that may already be in place.
+  const retryHazard =
+    verb === "created"
+      ? "Retrying without checking is how a duplicate gets created."
+      : "Retrying without checking re-applies a change that may already be in place.";
   if (isOk(outcome)) {
     const id = outcome.data.id;
     const suffix = outcome.data.message
@@ -205,14 +228,14 @@ function renderOutcome(
       : "";
     return markdown(
       id === undefined
-        ? `${opts.noun} created successfully.${suffix}`
-        : `${opts.noun} **#${escapeMarkdownInline(id)}** created successfully.${suffix}`,
+        ? `${opts.noun} ${verb} successfully.${suffix}`
+        : `${opts.noun} **#${escapeMarkdownInline(id)}** ${verb} successfully.${suffix}`,
     );
   }
 
   if (outcome.status === "failed") {
     return errorMarkdown(
-      `**Failed to create ${opts.noun.toLowerCase()}.** ${escapeMarkdownInline(outcome.reason)}`,
+      `**Failed to ${infinitive} ${opts.noun.toLowerCase()}.** ${escapeMarkdownInline(outcome.reason)}`,
     );
   }
 
@@ -225,9 +248,8 @@ function renderOutcome(
         : `Look for marker \`${escapeMarkdownInline(probe.marker)}\` before retrying.`;
 
   return errorMarkdown(
-    `**Outcome unknown — do NOT retry blindly.** The ${opts.noun.toLowerCase()} may or may not have been created. ` +
-      `${escapeMarkdownInline(outcome.reason)}\n\n${howToCheck} ` +
-      `Retrying without checking is how a duplicate gets created.`,
+    `**Outcome unknown — do NOT retry blindly.** The ${opts.noun.toLowerCase()} may or may not have been ${verb}. ` +
+      `${escapeMarkdownInline(outcome.reason)}\n\n${howToCheck} ${retryHazard}`,
   );
 }
 
@@ -1564,7 +1586,13 @@ export function createMutationTools(
           // caller must re-read before deciding what to do about the rest.
           return remember(
             outcome,
-            formatBulkNotApplied(outcome, a.purchase_order_ids.length),
+            formatBulkNotApplied(outcome, {
+              refusedHeadline: "Bulk transition refused",
+              attempt: `transition of ${a.purchase_order_ids.length} purchase order(s)`,
+              refusedClaim: "No purchase orders were changed.",
+              reReadWith: "get_purchase_order",
+              retryHazard: "Retrying now would re-transition any that already moved.",
+            }),
           );
         }
         // The call was applied. Surface the per-id breakdown.
@@ -2593,6 +2621,7 @@ export function createMutationTools(
         return formatWriteOutcome(outcome, {
           noun: `Budget item #${a.budget_item_id}`,
           toolName: "update_budget_item",
+          verb: "updated",
         });
       } catch (err) { return formatError(err, "update_budget_item"); }
     },
@@ -2616,7 +2645,20 @@ export function createMutationTools(
           budgetItemId: a.budget_item_id,
         });
         if (!isOk(outcome)) {
-          return remember(outcome, formatBulkNotApplied(outcome, 1));
+          // Its own copy. Reusing the PO tool's renderer sent the reader to
+          // `get_purchase_order` to reconcile a budget line — advice that
+          // cannot be followed, on the one path where following it matters.
+          return remember(
+            outcome,
+            formatBulkNotApplied(outcome, {
+              refusedHeadline: `Delete refused for budget item #${a.budget_item_id}`,
+              attempt: `deletion of budget item #${a.budget_item_id}`,
+              refusedClaim: "The budget item was not deleted.",
+              reReadWith: "list_budget",
+              retryHazard:
+                "Retrying without checking risks acting on a budget you have not seen.",
+            }),
+          );
         }
         if (outcome.data.succeeded === 0 && outcome.data.failed === 0) {
           // The documented silent no-op: upstream accepted the call and
