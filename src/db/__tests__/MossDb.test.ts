@@ -57,6 +57,48 @@ describe("MossDb — FS status labeling", () => {
   });
 });
 
+describe("MossDb — selection status labeling", () => {
+  const { selectionStatusLabel } = __test__;
+
+  // The map this pins was SHIFTED BY ONE and shipped that way. It labelled status 4 "Approved"
+  // when status 4 is Rejected — 31 of 31 rows carry a rejected_date and none carries an
+  // approved_date — so every rejected pick was reported to a user as approved. Counts and date
+  // coverage below are from the replica on 2026-08-21.
+
+  it("status=4 → 'Rejected' — the one that was reported as 'Approved'", () => {
+    // 31 rows, 0 approved_date, 31 rejected_date. Unambiguous.
+    expect(selectionStatusLabel(4)).toBe("Rejected");
+  });
+
+  it("status=3 → 'Approved' — the largest bucket, previously labelled 'Selected'", () => {
+    // 9,615 rows, 9,033 with approved_date.
+    expect(selectionStatusLabel(3)).toBe("Approved");
+  });
+
+  it("status=5 → 'Complete' — downstream of approval, 100% carry approved_date", () => {
+    // 4,258 rows, 4,258 with approved_date. BuildTools' own UI calls this "Complete".
+    expect(selectionStatusLabel(5)).toBe("Complete");
+  });
+
+  it("status=1/2 → 'Open'/'Selected'", () => {
+    expect(selectionStatusLabel(1)).toBe("Open");
+    expect(selectionStatusLabel(2)).toBe("Selected");
+  });
+
+  it("status=6 does not exist — an unmapped code is named, never guessed", () => {
+    // The old map assigned "Rejected" to 6. No status-6 row exists, so that label could never
+    // be applied to anything while the real rejected bucket was called "Approved".
+    expect(selectionStatusLabel(6)).toBe("Status6");
+  });
+
+  it("the labels match what listSelections offers as a filter", () => {
+    // These two drifted apart: filtering "Complete" matched nothing (the map emitted
+    // "Purchased") and filtering "Approved" returned the rejected picks.
+    const filterable = ["Open", "Selected", "Approved", "Rejected", "Complete"];
+    expect([1, 2, 3, 4, 5].map(selectionStatusLabel)).toEqual(filterable);
+  });
+});
+
 describe("MossDb — search handling (search[value])", () => {
   const { searchClause, rejectUnsupportedSearch } = __test__;
 
