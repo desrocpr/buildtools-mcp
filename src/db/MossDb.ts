@@ -13,7 +13,10 @@
  *   - projects.status: 1=Templates, 2=On Hold, 3=Warranty, 4=Completed,
  *     5=Nexus, 6=Omega, 7=Invicta, 8=Alpha, 10=Maintenance Plans,
  *     12=Cancelled, 14=Excluded Reporting
- *   - change_orders.status: 1=Draft, 2=Pending, 3=Approved, 4=Rejected
+ *   - change_orders.status: 1=Draft, 2=Pending, 3=Approved, 4=Rejected (verified 2026-08-21)
+ *   - selections.status: 1=Open, 2=Selected, 3=Approved, 4=Rejected, 5=Complete
+ *     (verified against the replica 2026-08-21 — NO status 6 exists. The header block that
+ *      previously said "4=Approved, 5=Purchased, 6=Rejected" was shifted by one; see the map.)
  *   - financial_statements.status: 1=Draft, 2=?, 4=Sent unpaid (paid_amount=0),
  *     5=Partly Paid, 6=Paid (verified live 2026-06-28)
  *   - users.role: 1=Core Admin, 2=Employee, 3=Client, 4=Company Rep
@@ -87,6 +90,32 @@ const CO_STATUS_LABELS: Record<number, string> = {
   3: "Approved",
   4: "Rejected",
 };
+
+// VERIFIED against the replica 2026-08-21 — the previous map was shifted by one and reported
+// REJECTED picks as "Approved", the worst possible direction:
+//
+//   status | count | approved_date | rejected_date
+//      1   |  2241 |             1 | 0
+//      2   |  1595 |            40 | 0
+//      3   |  9615 |          9033 | 0     <- Approved (was labelled "Selected")
+//      4   |    31 |             0 | 31    <- Rejected (was labelled "APPROVED")
+//      5   |  4258 |          4258 | 0     <- downstream of approval, 100% carry approved_date
+//
+// There is NO status 6, so the old "Rejected" label could never be applied to anything.
+// Labels follow BuildToolsAPI.ts's STATUS_MAP — the vocabulary parsed from the live UI, i.e. what
+// a human actually sees — which is also what listSelections' status filter already offers. Before
+// this, filtering "Complete" matched nothing and filtering "Approved" returned the rejected picks.
+const SELECTION_STATUS_LABELS: Record<number, string> = {
+  1: "Open",
+  2: "Selected",
+  3: "Approved",
+  4: "Rejected",
+  5: "Complete",
+};
+
+function selectionStatusLabel(code: number): string {
+  return SELECTION_STATUS_LABELS[code] ?? `Status${code}`;
+}
 
 function mmddyyyy(d: Date | string | null | undefined): string {
   if (!d) return "";
@@ -715,14 +744,10 @@ export class MossDb {
         ORDER BY s.id DESC`,
       [pid],
     );
-    const STATUS_LABELS: Record<number, string> = {
-      1: "Open", 2: "Selecting", 3: "Selected", 4: "Approved",
-      5: "Purchased", 6: "Rejected",
-    };
     const statusCount: Record<string, number> = {};
     const selections = rows.map((r) => {
       const statusCode = Number(r.status);
-      const label = STATUS_LABELS[statusCode] ?? `Status${statusCode}`;
+      const label = selectionStatusLabel(statusCode);
       statusCount[label] = (statusCount[label] ?? 0) + 1;
       const cat = [r.bc_code, r.bc_name].filter(Boolean).join(" - ") || (r.bc_name ?? "");
       return {
@@ -1682,4 +1707,4 @@ export function buildMossDbFromEnv(env: NodeJS.ProcessEnv = process.env): MossDb
   });
 }
 
-export const __test__ = { fsStatusLabel, mmddyyyy, searchClause, rejectUnsupportedSearch, statusClause };
+export const __test__ = { fsStatusLabel, selectionStatusLabel, mmddyyyy, searchClause, rejectUnsupportedSearch, statusClause };
